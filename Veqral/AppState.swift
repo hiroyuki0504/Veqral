@@ -928,17 +928,30 @@ final class CommandCenterStore: ObservableObject {
                 remoteHistorySessions = response.sessions
                 remoteHistoryProjects = response.projects
                 remoteHistoryTotal = response.total
+                let previousSelection = selectedHistorySession
+                var sessionToLoad: RemoteHistorySession?
                 if let selectedHistorySession, !response.sessions.contains(where: { $0.id == selectedHistorySession.id }) {
                     self.selectedHistorySession = response.sessions.first
                     remoteHistoryTurns = []
+                    sessionToLoad = response.sessions.first
                 } else if selectedHistorySession == nil {
                     selectedHistorySession = response.sessions.first
+                    sessionToLoad = response.sessions.first
+                } else if remoteHistoryTurns.isEmpty,
+                          let selectedHistorySession,
+                          response.sessions.contains(where: { $0.id == selectedHistorySession.id }),
+                          previousSelection?.id == selectedHistorySession.id {
+                    sessionToLoad = selectedHistorySession
                 }
                 remoteHistoryMessage = response.sessions.isEmpty ? "No Claude/Codex history found on Mac Host." : "\(response.total) sessions loaded."
+                isLoadingRemoteHistory = false
+                if let sessionToLoad {
+                    loadRemoteHistoryDetail(sessionToLoad)
+                }
             } catch {
                 remoteHistoryMessage = Self.remoteFailureMessage(error, context: "History")
+                isLoadingRemoteHistory = false
             }
-            isLoadingRemoteHistory = false
         }
     }
 
