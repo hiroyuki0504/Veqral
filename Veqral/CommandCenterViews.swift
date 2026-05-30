@@ -202,6 +202,7 @@ struct CommandCenterRunView: View {
 
 struct CommandCenterInspectorView: View {
     @EnvironmentObject private var store: CommandCenterStore
+    @Binding var selection: AppSection?
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -223,7 +224,9 @@ struct CommandCenterInspectorView: View {
                                 InspectorApprovalRow(approval: approval)
                             }
                         }
-                        Button("View all approvals ->", action: {})
+                        Button("View all approvals ->") {
+                            selection = .approvals
+                        }
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(VQTheme.accent)
                             .frame(maxWidth: .infinity)
@@ -278,7 +281,7 @@ struct CommandCenterPhoneDashboard: View {
                         .foregroundStyle(VQTheme.ink)
                     Spacer()
                     AppearanceToggleButton()
-                    Button(action: {}) {
+                    NavigationLink(value: AppSection.chat) {
                         Image(systemName: "plus")
                             .font(.system(size: 18, weight: .medium))
                             .frame(width: 34, height: 34)
@@ -470,16 +473,35 @@ private struct RunHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Label("Back to Active Runs", systemImage: "chevron.left")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(VQTheme.accent)
+                Button {
+                    if let newest = store.runs.first?.id {
+                        store.selectRun(newest)
+                    }
+                } label: {
+                    Label("Back to Active Runs", systemImage: "chevron.left")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.accent)
+                }
+                .buttonStyle(.plain)
                 Spacer()
                 Button(action: store.pauseOrResumeSelectedRun) {
                     Label(run.status == .waiting ? "Resume" : "Pause", systemImage: run.status == .waiting ? "play" : "pause")
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(CommandButtonStyle())
-                Button(action: {}) {
+                Menu {
+                    Button("Refresh workspace") {
+                        store.refreshWorkspace()
+                    }
+                    Button(run.status == .waiting ? "Resume run" : "Pause run") {
+                        store.pauseOrResumeSelectedRun()
+                    }
+                    Button("Show latest run") {
+                        if let newest = store.runs.first?.id {
+                            store.selectRun(newest)
+                        }
+                    }
+                } label: {
                     Image(systemName: "ellipsis")
                         .font(.caption.weight(.bold))
                 }
@@ -1132,9 +1154,9 @@ private struct PhoneComposer: View {
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             HStack {
-                CommandChip(title: "Implement", symbol: "chevron.left.forwardslash.chevron.right")
-                CommandChip(title: "Test", symbol: "flask")
-                CommandChip(title: "", symbol: "ellipsis")
+                CommandChip(title: "Implement", symbol: "chevron.left.forwardslash.chevron.right", command: "Implement the current approved requirements.")
+                CommandChip(title: "Test", symbol: "flask", command: "Run the relevant tests and fix failures if they are in scope.")
+                CommandChip(title: "", symbol: "ellipsis", command: "Show available next actions for this project.")
                 Spacer()
             }
 
@@ -1146,11 +1168,15 @@ private struct PhoneComposer: View {
 }
 
 private struct CommandChip: View {
+    @EnvironmentObject private var store: CommandCenterStore
     let title: String
     let symbol: String
+    let command: String
 
     var body: some View {
-        Button(action: {}) {
+        Button {
+            store.commandDraft = command
+        } label: {
             HStack(spacing: 5) {
                 Image(systemName: symbol)
                 if !title.isEmpty {
@@ -1330,10 +1356,12 @@ private struct PhoneProjectStatusPanel: View {
                     .foregroundStyle(VQTheme.secondaryText)
                     .lineLimit(1)
             }
-            Button("View All Projects ->", action: {})
+            NavigationLink(value: AppSection.projects) {
+                Text("View All Projects ->")
+                    .frame(maxWidth: .infinity)
+            }
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(VQTheme.accent)
-                .frame(maxWidth: .infinity)
         }
         .padding(10)
         .commandPanel()

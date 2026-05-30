@@ -20,7 +20,12 @@ private struct CompactRootView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            CommandCenterPhoneDashboard()
+            NavigationStack {
+                CommandCenterPhoneDashboard()
+                    .navigationDestination(for: AppSection.self) { section in
+                        sectionDestination(section)
+                    }
+            }
             .tabItem { Label(AppSection.home.title, systemImage: AppSection.home.symbol) }
             .tag(AppSection.home)
 
@@ -113,7 +118,7 @@ private struct RegularRootView: View {
             Divider()
                 .overlay(VQTheme.hairline)
 
-            CommandCenterInspectorView()
+            CommandCenterInspectorView(selection: $selectedSection)
                 .frame(width: 326)
         }
         .background {
@@ -135,6 +140,7 @@ private struct RegularRootView: View {
 }
 
 private struct SidebarView: View {
+    @EnvironmentObject private var store: CommandCenterStore
     @Binding var selection: AppSection?
 
     var body: some View {
@@ -176,9 +182,11 @@ private struct SidebarView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Agent Host")
                             .font(.caption.weight(.semibold))
-                        Text("2 Macs reachable")
+                        Text(store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : "Pair a Mac Host")
                             .font(.caption2)
                             .foregroundStyle(VQTheme.secondaryText)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                     Spacer()
                 }
