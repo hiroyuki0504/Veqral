@@ -1,17 +1,13 @@
 import SwiftUI
 
 struct AppearanceToggleButton: View {
-    @AppStorage("appearanceMode") private var appearanceMode = AppearanceMode.dark.rawValue
-
-    private var mode: AppearanceMode {
-        AppearanceMode(rawValue: appearanceMode) ?? .dark
-    }
+    @EnvironmentObject private var store: CommandCenterStore
 
     var body: some View {
         Button {
-            appearanceMode = mode == .dark ? AppearanceMode.light.rawValue : AppearanceMode.dark.rawValue
+            store.refreshWorkspace()
         } label: {
-            Image(systemName: mode.toggleSymbol)
+            Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: 16, weight: .semibold))
                 .frame(width: 34, height: 34)
                 .foregroundStyle(VQTheme.accent)
@@ -23,7 +19,7 @@ struct AppearanceToggleButton: View {
                 }
         }
         .buttonStyle(.plain)
-        .help(mode.toggleTitle)
+        .help("Refresh workspace")
     }
 }
 
@@ -31,58 +27,78 @@ struct CommandCenterSidebar: View {
     @EnvironmentObject private var store: CommandCenterStore
     @Binding var selection: AppSection?
 
-    private var primary: [(AppSection, String, String, Int?)] {
+    private var sidebarGroups: [(String, [AppSection])] {
         [
-            (.home, "Command", "terminal", nil),
-            (.runs, "Active Runs", "scope", store.runs.count),
-            (.approvals, "承認待ち", "exclamationmark.triangle", store.pendingApprovals().count),
-            (.projects, "Projects", "folder", nil),
-            (.agents, "Agents", "person.3.sequence", nil),
-            (.requirements, "Context Packs", "doc.badge.gearshape", nil),
-            (.memory, "Models", "cpu", nil),
-            (.devices, "Devices", "display", nil),
-            (.artifacts, "Artifacts", "doc.richtext", nil)
+            ("Command", AppSection.commandGroup),
+            ("Operations", AppSection.operationGroup),
+            ("System", AppSection.systemGroup)
         ]
+    }
+
+    private func count(for section: AppSection) -> Int? {
+        switch section {
+        case .runs:
+            store.runs.count
+        case .approvals:
+            store.pendingApprovals().count
+        default:
+            nil
+        }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Text("9:41 AM")
-                Text("Tue May 13")
-                Spacer()
-                AppearanceToggleButton()
+            VStack(spacing: 12) {
+                HStack {
+                    Spacer()
+                    SpinningCommandNodeMark(size: 28)
+                    Spacer()
+                }
+
+                HStack(spacing: 8) {
+                    TimelineView(.periodic(from: .now, by: 60)) { context in
+                        HStack(spacing: 8) {
+                            Text(context.date, format: .dateTime.hour().minute())
+                            Text(context.date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
+                        }
+                    }
+                    Spacer()
+                    AppearanceToggleButton()
+                }
             }
             .font(.caption.weight(.semibold))
             .foregroundStyle(VQTheme.ink)
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 18)
             .padding(.top, 12)
-            .padding(.bottom, 14)
+            .padding(.bottom, 16)
 
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 18) {
-                    VStack(spacing: 8) {
-                        ForEach(primary, id: \.1) { item in
-                            SidebarActionRow(
-                                title: item.1,
-                                symbol: item.2,
-                                count: item.3,
-                                isSelected: selection == item.0,
-                                isWarning: item.0 == .approvals
-                            ) {
-                                selection = item.0
+                    ForEach(sidebarGroups, id: \.0) { group in
+                        VStack(alignment: .leading, spacing: 8) {
+                            SidebarSectionTitle(group.0)
+                            ForEach(group.1) { section in
+                                SidebarActionRow(
+                                    title: section.title,
+                                    symbol: section.symbol,
+                                    count: count(for: section),
+                                    isSelected: selection == section,
+                                    isWarning: section == .approvals
+                                ) {
+                                    selection = section
+                                }
                             }
                         }
                     }
 
                     SidebarSectionTitle("Favorites")
                     VStack(spacing: 10) {
-                        FavoriteRow(color: VQTheme.amber, title: "Acme Web Platform")
-                        FavoriteRow(color: VQTheme.accent, title: "Data Pipeline")
-                        FavoriteRow(color: VQTheme.violet, title: "iOS Companion")
+                        FavoriteRow(color: VQTheme.amber, title: store.workspace.projectName)
+                        FavoriteRow(color: VQTheme.accent, title: store.workspace.branchLabel)
+                        FavoriteRow(color: VQTheme.violet, title: store.workspace.cleanlinessLabel)
                     }
                 }
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 12)
             }
 
             Spacer(minLength: 12)
@@ -97,12 +113,13 @@ struct CommandCenterSidebar: View {
                             .foregroundStyle(VQTheme.ink)
                     }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Jordan Devlin")
+                    Text("Local Operator")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(VQTheme.ink)
-                    Text("Pro Plan")
+                    Text(store.workspace.deviceName)
                         .font(.caption2)
                         .foregroundStyle(VQTheme.secondaryText)
+                        .lineLimit(1)
                 }
                 Spacer()
                 Image(systemName: "chevron.up.chevron.down")
@@ -110,7 +127,7 @@ struct CommandCenterSidebar: View {
                     .foregroundStyle(VQTheme.secondaryText)
             }
             .padding(10)
-            .background(VQTheme.panel)
+            .background(VQTheme.elevated)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -118,7 +135,16 @@ struct CommandCenterSidebar: View {
             }
             .padding(10)
         }
-        .background(VQTheme.sidebar)
+        .background {
+            ZStack {
+                VQTheme.sidebar
+                LinearGradient(
+                    colors: [Color.white.opacity(0.026), Color.clear, Color.black.opacity(0.18)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
+        }
     }
 }
 
@@ -130,10 +156,11 @@ struct CommandCenterRunView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    CommandSubmitPanel()
+
                     if let run = store.selectedRun {
                         RunHeader(run: run)
                         RunPhaseTracker(run: run)
-                        CommandSubmitPanel()
 
                         VStack(spacing: 0) {
                             WorkSurfacePicker(selectedSurface: $selectedSurface)
@@ -150,16 +177,25 @@ struct CommandCenterRunView: View {
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .stroke(VQTheme.hairline, lineWidth: 1)
                         }
-                    } else {
-                        CommandSubmitPanel()
+                        .shadow(color: .black.opacity(0.18), radius: 20, x: 0, y: 14)
                     }
                 }
-                .padding(18)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 22)
             }
 
             RunStatusBar(run: store.selectedRun)
         }
-        .background(VQTheme.canvas)
+        .background {
+            ZStack {
+                VQTheme.canvas
+                LinearGradient(
+                    colors: [Color.white.opacity(0.020), Color.clear, Color.black.opacity(0.16)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
+        }
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -175,12 +211,19 @@ struct CommandCenterInspectorView: View {
                     .foregroundStyle(VQTheme.ink)
                     .padding(.top, 18)
 
-                InspectorPanel(title: "承認待ち", count: store.pendingApprovals().count) {
+                InspectorPanel(title: "Approvals", count: store.pendingApprovals().count) {
                     VStack(spacing: 8) {
-                        ForEach(store.pendingApprovals(limit: 3)) { approval in
-                            InspectorApprovalRow(approval: approval)
+                        let pending = store.pendingApprovals(limit: 3)
+                        if pending.isEmpty {
+                            ForEach(approvalGuardrails) { guardrail in
+                                InspectorGuardrailRow(guardrail: guardrail)
+                            }
+                        } else {
+                            ForEach(pending) { approval in
+                                InspectorApprovalRow(approval: approval)
+                            }
                         }
-                        Button("承認をすべて表示 ->", action: {})
+                        Button("View all approvals ->", action: {})
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(VQTheme.accent)
                             .frame(maxWidth: .infinity)
@@ -188,29 +231,34 @@ struct CommandCenterInspectorView: View {
                     }
                 }
 
-                InspectorPanel(title: "Context Pack", trailing: "同期済み") {
+                InspectorPanel(title: "Context Pack", trailing: "Unified") {
                     InspectorLinkedRow(
                         symbol: "doc.badge.gearshape",
-                        title: "Acme Web Platform Pack",
-                        detail: "2分前更新 - 126 files"
+                        title: "\(store.workspace.projectName) Pack",
+                        detail: "\(MockData.contextPackage.count) items - \(store.workspace.branchLabel)"
                     )
                 }
 
-                InspectorPanel(title: "担当Agent") {
+                InspectorPanel(title: "Assigned Agent") {
                     VStack(spacing: 8) {
                         InspectorAgentRow(color: .blue, title: "PM", detail: "Product Manager", status: VQTheme.green)
                         InspectorAgentRow(color: VQTheme.violet, title: "Architect", detail: "System Architect", status: VQTheme.green)
                         InspectorAgentRow(color: VQTheme.amber, title: "Reviewer", detail: "Code Reviewer", status: VQTheme.amber)
-                        InspectorAgentRow(color: VQTheme.ink, title: "Claude", detail: "Implementer", status: VQTheme.accent)
+                        InspectorAgentRow(color: VQTheme.ink, title: "Codex", detail: "Implementer", status: VQTheme.accent)
                     }
                 }
 
                 InspectorPanel(title: "Mac Device") {
-                    InspectorLinkedRow(symbol: "laptopcomputer", title: "MacBook Pro", detail: "16-inch - M3 Pro", trailing: "オンライン")
+                    InspectorLinkedRow(symbol: "laptopcomputer", title: store.workspace.deviceName, detail: store.workspace.hostName, trailing: store.workspace.canRunLocalCommands ? "Online" : "Waiting")
                 }
 
                 InspectorPanel(title: "Model") {
-                    InspectorLinkedRow(symbol: "asterisk.circle.fill", title: "Claude 3.5 Sonnet", detail: "Context Window 200k")
+                    InspectorLinkedRow(
+                        symbol: store.selectedRuntime.symbol,
+                        title: store.selectedRuntime.title,
+                        detail: store.selectedRuntime == .hermesAgent ? store.workspace.hermesLabel : store.workspace.remoteLabel,
+                        trailing: store.selectedRuntime == .hermesAgent && store.workspace.canRunHermes ? "Ready" : nil
+                    )
                 }
             }
             .padding(12)
@@ -256,20 +304,27 @@ struct CommandCenterPhoneDashboard: View {
                 }
                 .commandPanel()
 
-                PhoneSectionHeader(title: "Command", count: nil, showAction: false)
+                PhoneSectionHeader(title: store.selectedRuntime.title, count: nil, showAction: false)
                 PhoneComposer()
 
-                PhoneSectionHeader(title: "承認待ち", count: store.pendingApprovals().count)
+                PhoneSectionHeader(title: "Approvals", count: store.pendingApprovals().count)
                 VStack(spacing: 8) {
-                    ForEach(store.pendingApprovals(limit: 3)) { approval in
-                        CompactApprovalStrip(approval: approval)
+                    let pending = store.pendingApprovals(limit: 3)
+                    if pending.isEmpty {
+                        ForEach(approvalGuardrails) { guardrail in
+                            CompactGuardrailStrip(guardrail: guardrail)
+                        }
+                    } else {
+                        ForEach(pending) { approval in
+                            CompactApprovalStrip(approval: approval)
+                        }
                     }
                 }
 
-                PhoneSectionHeader(title: "Devices", count: nil, trailing: "正常")
+                PhoneSectionHeader(title: "Devices", count: nil, trailing: "All Healthy")
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                    PhoneDeviceCard(name: "MacBook Pro", detail: "16-inch - M3 Pro")
-                    PhoneDeviceCard(name: "Mac mini", detail: "M2 Pro")
+                    PhoneDeviceCard(name: store.workspace.deviceName, detail: store.workspace.hostName)
+                    PhoneDeviceCard(name: store.workspace.projectName, detail: store.workspace.statusSummary)
                 }
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
@@ -280,7 +335,17 @@ struct CommandCenterPhoneDashboard: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 28)
         }
-        .background(VQTheme.canvas.ignoresSafeArea())
+        .background {
+            ZStack {
+                VQTheme.canvas.ignoresSafeArea()
+                LinearGradient(
+                    colors: [Color.white.opacity(0.024), Color.clear, Color.black.opacity(0.20)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+            }
+        }
     }
 }
 
@@ -299,6 +364,20 @@ private enum WorkSurface: String, CaseIterable, Identifiable {
         }
     }
 }
+
+private struct ApprovalGuardrail: Identifiable {
+    let id: String
+    let title: String
+    let detail: String
+    let risk: String
+    let tint: Color
+}
+
+private let approvalGuardrails = [
+    ApprovalGuardrail(id: "delete", title: "File deletion guarded", detail: "rm, git clean, reset --hard", risk: "Risk: High", tint: VQTheme.red),
+    ApprovalGuardrail(id: "secrets", title: "Secrets require review", detail: ".env, token, keychain, private key", risk: "Risk: Medium", tint: VQTheme.amber),
+    ApprovalGuardrail(id: "screen", title: "Screen control paused", detail: "open, osascript, screenshot", risk: "Risk: Medium", tint: VQTheme.red)
+]
 
 private struct SidebarActionRow: View {
     let title: String
@@ -330,9 +409,23 @@ private struct SidebarActionRow: View {
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 10)
-            .background(isSelected ? VQTheme.control : Color.clear)
+            .padding(.vertical, 9)
+            .background {
+                if isSelected {
+                    LinearGradient(
+                        colors: [VQTheme.control.opacity(0.96), VQTheme.control.opacity(0.72)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                } else {
+                    Color.clear
+                }
+            }
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSelected ? VQTheme.hairline : Color.clear, lineWidth: 1)
+            }
         }
         .buttonStyle(.plain)
     }
@@ -378,12 +471,12 @@ private struct RunHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Label("Active Runsへ戻る", systemImage: "chevron.left")
+                Label("Back to Active Runs", systemImage: "chevron.left")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(VQTheme.accent)
                 Spacer()
                 Button(action: store.pauseOrResumeSelectedRun) {
-                    Label(run.status == .waiting ? "再開" : "一時停止", systemImage: run.status == .waiting ? "play" : "pause")
+                    Label(run.status == .waiting ? "Resume" : "Pause", systemImage: run.status == .waiting ? "play" : "pause")
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(CommandButtonStyle())
@@ -396,7 +489,7 @@ private struct RunHeader: View {
 
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(run.title)
-                    .font(.system(size: 26, weight: .medium))
+                    .font(.system(size: 27, weight: .medium))
                     .foregroundStyle(VQTheme.ink)
                     .lineLimit(2)
                     .minimumScaleFactor(0.78)
@@ -405,11 +498,12 @@ private struct RunHeader: View {
             }
 
             HStack(spacing: 10) {
-                Label(run.workingDirectory, systemImage: "folder")
+                Label(store.workspace.projectName, systemImage: "doc.text")
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text("\(run.elapsedLabel)に開始")
-                Text("Run ID 7f3b2e14")
+                Text(run.runtimeOrDefault.title)
+                Text("Started \(run.elapsedLabel)")
+                Text("Run ID \(run.shortID)")
                 Image(systemName: "doc.on.doc")
             }
             .font(.caption)
@@ -423,11 +517,11 @@ private struct RunPhaseTracker: View {
 
     private var steps: [(String, String, Color, Bool)] {
         [
-            ("Plan", "完了", VQTheme.green, true),
-            ("実装", run.status == .failed ? "失敗" : "進行中", run.status == .failed ? VQTheme.red : VQTheme.green, run.progress > 0.1),
-            ("Test", run.status == .complete ? "完了" : "待機中", run.status == .complete ? VQTheme.green : VQTheme.accent, run.progress > 0.55),
-            ("Review", run.status == .approval ? "承認待ち" : "待機中", run.status == .approval ? VQTheme.amber : VQTheme.mutedText, run.status == .approval),
-            ("Complete", run.status == .complete ? "完了" : "待機中", run.status == .complete ? VQTheme.green : VQTheme.mutedText, run.status == .complete)
+            ("Plan", run.progress > 0.0 ? "Ready" : "Pending", VQTheme.green, true),
+            ("Implement", run.status == .failed ? "Failed" : "In Progress", run.status == .failed ? VQTheme.red : VQTheme.green, run.progress > 0.1),
+            ("Test", run.status == .complete ? "Complete" : "In Progress", run.status == .complete ? VQTheme.green : VQTheme.accent, run.progress > 0.55),
+            ("Review", run.status == .approval ? "Approval" : "Pending", run.status == .approval ? VQTheme.amber : VQTheme.mutedText, run.status == .approval),
+            ("Complete", run.status == .complete ? "Done" : "Pending", run.status == .complete ? VQTheme.green : VQTheme.mutedText, run.status == .complete)
         ]
     }
 
@@ -474,6 +568,7 @@ private struct RunPhaseTracker: View {
             }
         }
         .padding(.vertical, 8)
+        .padding(.bottom, 8)
     }
 }
 
@@ -482,8 +577,10 @@ private struct CommandSubmitPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            RuntimeSegmentedControl()
+
             HStack(spacing: 10) {
-                TextField("やりたいこと、またはMacで実行するコマンド", text: $store.commandDraft, axis: .vertical)
+                TextField(store.selectedRuntime == .hermesAgent ? "Ask Hermes to build, test, review, or explain..." : "Run a shell command on this Mac", text: $store.commandDraft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.subheadline)
                     .lineLimit(1...3)
@@ -504,15 +601,21 @@ private struct CommandSubmitPanel: View {
 
             #if targetEnvironment(macCatalyst)
             HStack(spacing: 8) {
+                Image(systemName: store.selectedRuntime.symbol)
+                Text(store.selectedRuntime.title)
+                Text("in")
                 Image(systemName: "folder")
                 TextField("Working directory", text: $store.workingDirectory)
                     .textFieldStyle(.plain)
                     .font(.caption.monospaced())
+                    .onSubmit {
+                        store.refreshWorkspace()
+                    }
             }
             .foregroundStyle(VQTheme.secondaryText)
             .padding(.horizontal, 4)
             #else
-            Text("iPhone/iPadではRunを作成して保存します。実行はMac版またはMac Host接続後に行います。")
+            Text("On iPhone and iPad this creates a run. Execution starts after a Mac Host is connected.")
                 .font(.caption)
                 .foregroundStyle(VQTheme.secondaryText)
             #endif
@@ -588,7 +691,7 @@ private struct RunWorkSurface: View {
                 }
             }
         }
-        .frame(minHeight: 470)
+        .frame(minHeight: 486)
     }
 }
 
@@ -628,7 +731,7 @@ private struct TerminalTranscript: View {
         .font(.system(.caption, design: .monospaced))
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.black.opacity(0.001))
+        .background(VQTheme.terminal.opacity(0.96))
     }
 
 }
@@ -654,7 +757,7 @@ private struct DiffListPanel: View {
             }
 
             if diffs.isEmpty {
-                Text("Git diffはまだありません。Mac版でgit管理下のフォルダを指定すると取得します。")
+                Text("No git diff yet. Point the Mac build at a git workspace to collect changed files.")
                     .font(.caption)
                     .foregroundStyle(VQTheme.secondaryText)
             }
@@ -696,10 +799,10 @@ private struct PreviewPlaceholder: View {
             Image(systemName: "safari")
                 .font(.system(size: 48, weight: .light))
                 .foregroundStyle(VQTheme.accent)
-            Text("PreviewはローカルWeb待ち")
+            Text("Preview is waiting for a local web target")
                 .font(.headline)
                 .foregroundStyle(VQTheme.ink)
-            Text("Mac Host接続後、スクリーンショットとWebプレビューをここに表示します。")
+            Text("After a Mac Host connects, screenshots and web previews appear here.")
                 .font(.caption)
                 .foregroundStyle(VQTheme.secondaryText)
                 .multilineTextAlignment(.center)
@@ -721,7 +824,7 @@ private struct RunStatusBar: View {
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
                 Label(run?.agent ?? "Local Mac", systemImage: "person.crop.circle")
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
-                Label(run?.elapsedLabel ?? "待機中", systemImage: "timer")
+                Label(run?.elapsedLabel ?? "Waiting", systemImage: "timer")
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
                 Label("\(Int((run?.progress ?? 0) * 100))%", systemImage: "gearshape")
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
@@ -805,14 +908,14 @@ private struct InspectorApprovalRow: View {
             }
             HStack {
                 Spacer()
-                Button("拒否") {
+                Button("Reject") {
                     store.reject(approval)
                 }
                     .buttonStyle(CommandButtonStyle())
                 Button {
                     store.approve(approval)
                 } label: {
-                    Label("承認", systemImage: "checkmark")
+                    Label("Approve", systemImage: "checkmark")
                 }
                 .buttonStyle(CommandButtonStyle(tint: VQTheme.accent))
             }
@@ -823,6 +926,42 @@ private struct InspectorApprovalRow: View {
         .overlay {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .stroke(tint.opacity(0.65), lineWidth: 1)
+        }
+    }
+}
+
+private struct InspectorGuardrailRow: View {
+    let guardrail: ApprovalGuardrail
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(guardrail.title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(guardrail.tint)
+                    Text(guardrail.detail)
+                        .font(.caption2)
+                        .foregroundStyle(guardrail.tint.opacity(0.88))
+                }
+                Spacer()
+                Text(guardrail.risk)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(guardrail.tint)
+            }
+            HStack(spacing: 6) {
+                Image(systemName: "lock.shield")
+                Text("Approval gate ready")
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(VQTheme.secondaryText)
+        }
+        .padding(9)
+        .background(guardrail.tint.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(guardrail.tint.opacity(0.58), lineWidth: 1)
         }
     }
 }
@@ -899,7 +1038,7 @@ private struct InspectorAgentRow: View {
 private struct PhoneSectionHeader: View {
     let title: String
     var count: Int?
-    var trailing: String = "すべて表示"
+    var trailing: String = "View All"
     var showAction: Bool = true
 
     var body: some View {
@@ -943,7 +1082,7 @@ private struct PhoneRunRow: View {
                     .lineLimit(1)
                 HStack(spacing: 4) {
                     Circle().stroke(run.status.tint, lineWidth: 1).frame(width: 8, height: 8)
-                    Text(run.phase.commandTitle)
+                Text(run.phase.commandTitle)
                 }
                 .font(.caption2)
                 .foregroundStyle(VQTheme.secondaryText)
@@ -967,8 +1106,10 @@ private struct PhoneComposer: View {
 
     var body: some View {
         VStack(spacing: 8) {
+            RuntimeSegmentedControl()
+
             HStack(spacing: 8) {
-                TextField("何を作りますか？", text: $store.commandDraft)
+                TextField(store.selectedRuntime == .hermesAgent ? "Ask Hermes to build..." : "Run a shell command...", text: $store.commandDraft)
                     .font(.caption)
                     .textFieldStyle(.plain)
                     .onSubmit {
@@ -990,7 +1131,7 @@ private struct PhoneComposer: View {
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             HStack {
-                CommandChip(title: "実装", symbol: "chevron.left.forwardslash.chevron.right")
+                CommandChip(title: "Implement", symbol: "chevron.left.forwardslash.chevron.right")
                 CommandChip(title: "Test", symbol: "flask")
                 CommandChip(title: "", symbol: "ellipsis")
                 Spacer()
@@ -1044,7 +1185,7 @@ private struct CompactApprovalStrip: View {
             VStack(spacing: 6) {
                 Text(approval.risk)
                     .font(.caption2.weight(.semibold))
-                Button("承認") {
+                Button("Approve") {
                     store.approve(approval)
                 }
                 .font(.caption2.weight(.semibold))
@@ -1057,6 +1198,34 @@ private struct CompactApprovalStrip: View {
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(tint.opacity(0.58), lineWidth: 1)
+        }
+    }
+}
+
+private struct CompactGuardrailStrip: View {
+    let guardrail: ApprovalGuardrail
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(guardrail.title)
+                    .font(.caption.weight(.semibold))
+                Text(guardrail.detail)
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Text(guardrail.risk)
+                .font(.caption2.weight(.semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(guardrail.tint)
+        .padding(10)
+        .background(guardrail.tint.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(guardrail.tint.opacity(0.58), lineWidth: 1)
         }
     }
 }
@@ -1077,7 +1246,7 @@ private struct PhoneDeviceCard: View {
                 Text(detail)
                     .font(.caption2)
                     .foregroundStyle(VQTheme.secondaryText)
-                Label("オンライン", systemImage: "circle.fill")
+                Label("Online", systemImage: "circle.fill")
                     .font(.caption2)
                     .foregroundStyle(VQTheme.green)
             }
@@ -1096,7 +1265,7 @@ private struct PhoneArtifactsPanel: View {
                     .font(.caption.weight(.bold))
                     .foregroundStyle(VQTheme.secondaryText)
                 Spacer()
-                Text("すべて表示")
+                Text("View All")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(VQTheme.accent)
             }
@@ -1133,30 +1302,35 @@ private struct PhoneArtifactsPanel: View {
 }
 
 private struct PhoneProjectStatusPanel: View {
-    private let projects = [
-        ("Acme Web Platform", "順調", VQTheme.green),
-        ("Data Pipeline", "順調", VQTheme.green),
-        ("iOS Companion", "要注意", VQTheme.amber)
-    ]
+    @EnvironmentObject private var store: CommandCenterStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Project Status")
                 .font(.caption.weight(.bold))
                 .foregroundStyle(VQTheme.secondaryText)
-            ForEach(projects, id: \.0) { project in
-                HStack {
-                    Text(project.0)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(VQTheme.ink)
-                        .lineLimit(1)
-                    Spacer()
-                    Text(project.1)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(project.2)
-                }
+            HStack {
+                Text(store.workspace.projectName)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                    .lineLimit(1)
+                Spacer()
+                Text(store.workspace.statusSummary)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(store.workspace.changedFiles == 0 ? VQTheme.green : VQTheme.amber)
+                    .lineLimit(1)
             }
-            Button("Projectsをすべて表示 ->", action: {})
+            HStack {
+                Text("Branch")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                Text(store.workspace.branchLabel)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(1)
+            }
+            Button("View All Projects ->", action: {})
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(VQTheme.accent)
                 .frame(maxWidth: .infinity)
@@ -1186,7 +1360,16 @@ private struct CommandButtonStyle: ButtonStyle {
 
 private extension View {
     func commandPanel() -> some View {
-        background(VQTheme.elevated)
+        background {
+            ZStack {
+                VQTheme.elevated
+                LinearGradient(
+                    colors: [Color.white.opacity(0.052), Color.clear, Color.black.opacity(0.055)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
+        }
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -1215,6 +1398,12 @@ private extension CommandLogEntry {
     }
 }
 
+private extension CommandRun {
+    var shortID: String {
+        String(id.uuidString.prefix(8)).lowercased()
+    }
+}
+
 extension Date {
     var commandTime: String {
         let formatter = DateFormatter()
@@ -1227,7 +1416,7 @@ private extension RunPhase {
     var commandTitle: String {
         switch self {
         case .requirements: "Requirements"
-        case .implementation: "実装"
+        case .implementation: "Implement"
         case .testing: "Test"
         case .github: "GitHub"
         case .deploy: "Deploy"

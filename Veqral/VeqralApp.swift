@@ -9,6 +9,9 @@ struct VeqralApp: App {
             RootView()
                 .tint(VQTheme.accent)
                 .environmentObject(store)
+                .onOpenURL { url in
+                    store.handlePairingURL(url)
+                }
         }
     }
 }
