@@ -219,6 +219,11 @@ struct RequirementsView: View {
 
 struct DevicesView: View {
     @EnvironmentObject private var store: CommandCenterStore
+    @State private var remoteEndpoint = ""
+    @State private var remotePairingCode = ""
+    @State private var remoteDeviceName = ProcessInfo.processInfo.hostName
+    @State private var remoteStatusMessage = ""
+    @State private var isPairing = false
     private let columns = [GridItem(.adaptive(minimum: 320), spacing: 14)]
 
     var body: some View {
@@ -267,6 +272,56 @@ struct DevicesView: View {
                     }
                 }
 
+                VQPanel("Remote Mac Host", systemImage: "antenna.radiowaves.left.and.right") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 8) {
+                            StatusPill(
+                                title: store.remoteHost.isEnabled && store.remoteHost.isPaired ? "Remote Enabled" : "Offline",
+                                tint: store.remoteHost.isEnabled && store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber
+                            )
+                            StatusPill(title: "HMAC", tint: VQTheme.accent)
+                            StatusPill(title: "Keychain", tint: VQTheme.green)
+                            Spacer()
+                        }
+
+                        KeyValueLine(key: "Saved endpoint", value: store.remoteHost.displayEndpoint)
+                        KeyValueLine(key: "Device ID", value: store.remoteHost.deviceID.isEmpty ? "Not paired" : "\(store.remoteHost.deviceID.prefix(8))...")
+                        KeyValueLine(key: "Execution", value: store.remoteHost.isEnabled ? "iPhone/iPad -> Tailscale -> Mac Host -> Hermes" : "Mac Catalyst or mock only")
+
+                        RemoteConnectionField(title: "Endpoint", placeholder: store.workspace.macHostEndpoint, text: $remoteEndpoint)
+                        RemoteConnectionField(title: "Pairing code", placeholder: "8-character code from menu bar QR", text: $remotePairingCode)
+                        RemoteConnectionField(title: "This device name", placeholder: "iPhone / iPad", text: $remoteDeviceName)
+
+                        HStack(spacing: 8) {
+                            Button {
+                                pairRemoteHost()
+                            } label: {
+                                Label(isPairing ? "Pairing" : "Pair", systemImage: "link.badge.plus")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                            .disabled(isPairing || remoteEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || remotePairingCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                            Button {
+                                store.disableRemoteHost()
+                                remoteStatusMessage = "Remote Host disabled. Pairing data remains in Keychain."
+                            } label: {
+                                Label("Disable", systemImage: "wifi.slash")
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                        }
+                        .font(.footnote.weight(.semibold))
+
+                        if !remoteStatusMessage.isEmpty {
+                            Text(remoteStatusMessage)
+                                .font(.caption)
+                                .foregroundStyle(remoteStatusMessage.contains("failed") || remoteStatusMessage.contains("失敗") ? VQTheme.amber : VQTheme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
                 VQPanel("Mac Host Pairing", systemImage: "qrcode.viewfinder") {
                     HStack(alignment: .top, spacing: 16) {
                         QRCodeView(payload: store.pairingPayload)
@@ -274,9 +329,13 @@ struct DevicesView: View {
 
                         VStack(alignment: .leading, spacing: 12) {
                             KeyValueLine(key: "Endpoint", value: store.workspace.macHostEndpoint)
-                            KeyValueLine(key: "Token", value: "\(store.pairingToken.prefix(8))...")
+                            KeyValueLine(key: "Code", value: "\(store.pairingToken.prefix(8))...")
                             KeyValueLine(key: "Transport", value: "Tailscale WebSocket")
-                            KeyValueLine(key: "Host app", value: "Menu bar agent, login item")
+                            KeyValueLine(key: "Host app", value: "Menu bar app shows the real QR")
+                            Text("For P0, launch VeqralHost on the Mac, open Show Pairing QR from the menu bar, then paste the endpoint and code above.")
+                                .font(.caption)
+                                .foregroundStyle(VQTheme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
                             HStack {
                                 Button(action: store.rotatePairingToken) {
                                     Label("Rotate", systemImage: "arrow.clockwise")
@@ -294,6 +353,35 @@ struct DevicesView: View {
                     }
                 }
             }
+        }
+        .onAppear(perform: syncRemoteFields)
+        .onChange(of: store.remoteHost) { _, _ in
+            syncRemoteFields()
+        }
+    }
+
+    private func syncRemoteFields() {
+        remoteEndpoint = store.remoteHost.endpoint.isEmpty ? store.workspace.macHostEndpoint : store.remoteHost.endpoint
+        if remoteDeviceName.isEmpty {
+            remoteDeviceName = ProcessInfo.processInfo.hostName
+        }
+    }
+
+    private func pairRemoteHost() {
+        isPairing = true
+        remoteStatusMessage = "Pairing with Mac Host..."
+        let endpoint = remoteEndpoint
+        let code = remotePairingCode
+        let deviceName = remoteDeviceName.isEmpty ? ProcessInfo.processInfo.hostName : remoteDeviceName
+        Task { @MainActor in
+            do {
+                try await store.pairRemoteHost(endpoint: endpoint, pairingCode: code, deviceName: deviceName)
+                remotePairingCode = ""
+                remoteStatusMessage = "Paired. Future runs will launch through Mac Host."
+            } catch {
+                remoteStatusMessage = "Pairing failed: \(error.localizedDescription)"
+            }
+            isPairing = false
         }
     }
 }
@@ -987,6 +1075,33 @@ private struct ReviewNote: View {
                 .font(.subheadline)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
+        }
+    }
+}
+
+private struct RemoteConnectionField: View {
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VQTheme.secondaryText)
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(.footnote)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 9)
+                .background(VQTheme.control.opacity(0.64))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(VQTheme.hairline, lineWidth: 1)
+                }
         }
     }
 }
