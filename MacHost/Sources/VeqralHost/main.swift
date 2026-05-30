@@ -15,6 +15,8 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
     private let state = HostState()
 
     static func main() {
+        // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
+        _ = Darwin.chdir("/")
         let app = NSApplication.shared
         let delegate = VeqralHostApp()
         app.delegate = delegate
