@@ -7,6 +7,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     case projects
     case devices
     case agents
+    case models
     case runs
     case terminal
     case diff
@@ -25,11 +26,12 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .projects: "Projects"
         case .devices: "Devices"
         case .agents: "Agents"
+        case .models: "Models"
         case .runs: "Runs"
         case .terminal: "Terminal"
         case .diff: "Diff"
         case .artifacts: "Artifacts"
-        case .approvals: "承認"
+        case .approvals: "Approvals"
         case .memory: "Memory"
         case .github: "GitHub"
         }
@@ -43,6 +45,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .projects: "folder"
         case .devices: "macbook.and.iphone"
         case .agents: "person.3.sequence"
+        case .models: "cpu"
         case .runs: "play.rectangle.on.rectangle"
         case .terminal: "terminal"
         case .diff: "plus.forwardslash.minus"
@@ -55,7 +58,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 
     static let primaryTabs: [AppSection] = [.home, .approvals, .projects, .devices]
     static let commandGroup: [AppSection] = [.home, .chat, .requirements]
-    static let operationGroup: [AppSection] = [.projects, .agents, .runs, .terminal, .diff, .artifacts]
+    static let operationGroup: [AppSection] = [.projects, .agents, .models, .runs, .terminal, .diff, .artifacts]
     static let systemGroup: [AppSection] = [.devices, .approvals, .memory, .github]
     static let compactMore: [AppSection] = allCases.filter { !primaryTabs.contains($0) }
 }
@@ -89,11 +92,11 @@ enum RunStatus: String, Codable {
 
     var title: String {
         switch self {
-        case .running: "実行中"
+        case .running: "Running"
         case .waiting: "Waiting"
         case .complete: "Complete"
         case .failed: "Failed"
-        case .approval: "承認待ち"
+        case .approval: "Approval"
         }
     }
 
@@ -239,6 +242,19 @@ struct AgentProfile: Identifiable {
     let device: String
     let status: RunStatus
     let permissions: [String]
+}
+
+struct ModelProfile: Identifiable {
+    let id = UUID()
+    let role: String
+    let provider: String
+    let modelName: String
+    let costLevel: String
+    let speedLevel: String
+    let reasoningLevel: String
+    let toolSupport: [String]
+    let contextPolicy: String
+    let assignedDevice: String
 }
 
 struct AgentRun: Identifiable {

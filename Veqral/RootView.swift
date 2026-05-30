@@ -2,11 +2,6 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @AppStorage("appearanceMode") private var appearanceMode = AppearanceMode.dark.rawValue
-
-    private var mode: AppearanceMode {
-        AppearanceMode(rawValue: appearanceMode) ?? .dark
-    }
 
     var body: some View {
         Group {
@@ -16,7 +11,7 @@ struct RootView: View {
                 RegularRootView()
             }
         }
-        .preferredColorScheme(mode.colorScheme)
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -53,6 +48,9 @@ private struct CompactRootView: View {
             .tabItem { Label("More", systemImage: "ellipsis.circle") }
             .tag(AppSection.github)
         }
+        .tint(VQTheme.accent)
+        .toolbarBackground(VQTheme.canvas, for: .tabBar)
+        .toolbarBackground(.visible, for: .tabBar)
     }
 }
 
@@ -91,12 +89,12 @@ private struct MoreView: View {
 }
 
 private struct RegularRootView: View {
-    @State private var selectedSection: AppSection? = .runs
+    @State private var selectedSection: AppSection? = .home
 
     var body: some View {
         HStack(spacing: 0) {
             CommandCenterSidebar(selection: $selectedSection)
-                .frame(width: 250)
+                .frame(width: 278)
 
             Divider()
                 .overlay(VQTheme.hairline)
@@ -110,9 +108,23 @@ private struct RegularRootView: View {
                 .overlay(VQTheme.hairline)
 
             CommandCenterInspectorView()
-                .frame(width: 330)
+                .frame(width: 326)
         }
-        .background(VQTheme.canvas.ignoresSafeArea())
+        .background {
+            ZStack {
+                VQTheme.canvas.ignoresSafeArea()
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.025),
+                        Color.clear,
+                        Color.black.opacity(0.22)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+            }
+        }
     }
 }
 
@@ -182,8 +194,10 @@ private func sectionDestination(_ section: AppSection) -> some View {
         DevicesView()
     case .agents:
         AgentsView()
+    case .models:
+        ModelAssignmentView()
     case .runs:
-        CommandCenterRunView()
+        RunsView()
     case .terminal:
         TerminalView()
     case .diff:
