@@ -204,12 +204,14 @@ struct VQPanel<Content: View>: View {
     let title: String
     let systemImage: String?
     let actionImage: String?
+    let action: (() -> Void)?
     let content: Content
 
-    init(_ title: String, systemImage: String? = nil, actionImage: String? = nil, @ViewBuilder content: () -> Content) {
+    init(_ title: String, systemImage: String? = nil, actionImage: String? = nil, action: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
         self.systemImage = systemImage
         self.actionImage = actionImage
+        self.action = action
         self.content = content()
     }
 
@@ -226,12 +228,18 @@ struct VQPanel<Content: View>: View {
                     .foregroundStyle(VQTheme.ink)
                 Spacer()
                 if let actionImage {
-                    Button(action: {}) {
+                    if let action {
+                        Button(action: action) {
+                            Image(systemName: actionImage)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .help(title)
+                    } else {
                         Image(systemName: actionImage)
+                            .foregroundStyle(VQTheme.secondaryText)
+                            .accessibilityHidden(true)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(VQTheme.secondaryText)
-                    .help(title)
                 }
             }
 
@@ -962,18 +970,11 @@ struct ApprovalRow: View {
                 }
 
                 HStack(spacing: 8) {
-                    Button("Approve", action: {})
-                        .buttonStyle(.borderedProminent)
-                        .buttonBorderShape(.roundedRectangle(radius: 8))
-                    Button("Reject", action: {})
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.roundedRectangle(radius: 8))
-                    Button(action: {}) {
-                        Image(systemName: "text.bubble")
-                    }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.roundedRectangle(radius: 8))
-                    .help("Ask follow-up")
+                    StatusPill(title: "Review in Approvals", tint: VQTheme.accent)
+                    Text("Approve, reject, or follow up from the live approval queue.")
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .font(.footnote.weight(.semibold))
             }
