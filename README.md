@@ -13,9 +13,13 @@ The default UI is the dark Agent Command Center concept.
 - Hermes prompts run through `hermes chat -Q --source veqral --checkpoints --worktree` on Mac.
 - The Swift Mac Host lives in `MacHost/` and runs as a menu bar app.
 - Mac Host exposes `GET /v1/health`, `GET /v1/pairing`, `POST /v1/pair`, `POST /v1/runs`, `GET /v1/runs/:id/events`, and approve/reject/cancel/resume actions.
+- Mac Host exposes unattended remote-operation status/apply/revert endpoints, plus a local menu bar setup window that requires confirmation, admin authorization, and a one-time login password entry before changing macOS autologin, screen-lock, sleep, display-sleep, and autorestart settings.
+- The unattended setup flow checks FileVault, warns when FileVault blocks autologin, skips autologin when allowed, reads settings back after changes, and can revert the settings.
 - iPhone/iPad remote requests use per-device HMAC headers and the device token is stored in Keychain.
 - Remote PTY logs stream line-by-line over WebSocket and are redacted before leaving the Mac Host.
 - Host runs, logs, audit entries, and Hermes `session_id` values persist under `~/.veqral-host`.
+- Mac Host exposes HMAC-protected Hermes memory APIs for `~/.hermes/memories/USER.md`, `~/.hermes/memories/MEMORY.md`, and Markdown files under `~/.hermes/skills`.
+- The Memory screen can list remote Hermes memory files, load content, preview a unified diff before saving, and write the selected file back through Mac Host.
 - Read-only commands run locally in the Mac Catalyst app through `/bin/zsh -lc`.
 - Mutating or risky commands such as file changes, package installs, `rm`, `sudo`, production deploys, secrets, and screen-control commands stop in the approval queue.
 - Risky Hermes prompts such as deletion, production, secrets, billing, browser, and screen-control requests also stop in the approval queue before launching Hermes.
@@ -43,11 +47,12 @@ The current local check passed with Hermes Agent v0.15.1. `hermes doctor` report
 
 P1 after this Host:
 
-- Store user/project/decision memory in SwiftData or SQLite, with edit, pin, forget, and memory-candidate review actions.
+- Store user/project/decision memory metadata in SwiftData or SQLite, with pin, forget, memory-candidate review actions, and Mac-to-Mac memory sync.
 - Generate real Context Packages from memory, requirements, repo summary, relevant files, safety policy, and device capabilities.
 - Add real artifacts: screenshots, web preview URLs, PDFs, test reports, and build products.
 - Add GitHub operations for branch, commit, PR, CI, review response, and guarded deploy.
 - Add login item installation, device revocation UI, QR scanning, diff/artifact endpoints, and deeper Hermes internal approval correlation.
+- Add Mac mini as a second Host, multi-model PM/Reviewer organization, skill creation/update flows, MCP setup, gateways, cron, and delegation visualization.
 
 ## Run Mac Host
 
@@ -61,6 +66,8 @@ Open the menu bar item and choose `Show Pairing QR`, or fetch pairing data direc
 ```sh
 curl http://127.0.0.1:7878/v1/pairing
 ```
+
+For a dedicated Mac mini or always-on Host, open the menu bar item and choose `Unattended Remote Setup...`. This flow is intentionally local and explicit because it changes security and power settings.
 
 ## Open
 
