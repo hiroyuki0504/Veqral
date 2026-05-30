@@ -58,6 +58,145 @@ struct ScreenScaffold<Content: View>: View {
     }
 }
 
+struct SpinningCommandNodeMark: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var spin = false
+
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            VQTheme.elevated.opacity(0.95),
+                            VQTheme.control.opacity(0.74)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay {
+                    Circle()
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                }
+                .shadow(color: VQTheme.accent.opacity(0.18), radius: size * 0.18, x: 0, y: 0)
+                .shadow(color: .black.opacity(0.28), radius: size * 0.16, x: 0, y: size * 0.08)
+
+            RotatingNodeConstellation(size: size)
+                .rotationEffect(.degrees(reduceMotion ? 24 : (spin ? 360 : 0)))
+
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            Color.white.opacity(0.96),
+                            VQTheme.amber,
+                            VQTheme.amber.opacity(0.30)
+                        ],
+                        center: .topLeading,
+                        startRadius: 0,
+                        endRadius: size * 0.18
+                    )
+                )
+                .frame(width: size * 0.26, height: size * 0.26)
+                .overlay {
+                    Circle()
+                        .stroke(VQTheme.amber.opacity(0.86), lineWidth: max(1, size * 0.035))
+                }
+                .shadow(color: VQTheme.amber.opacity(0.46), radius: size * 0.16, x: 0, y: 0)
+        }
+        .frame(width: size, height: size)
+        .onAppear {
+            guard !reduceMotion else { return }
+            startSpinning()
+        }
+        .onChange(of: reduceMotion) { _, isReduced in
+            if isReduced {
+                spin = false
+            } else {
+                startSpinning()
+            }
+        }
+        .accessibilityLabel("Command node mark")
+    }
+
+    private func startSpinning() {
+        spin = false
+        withAnimation(.linear(duration: 5.8).repeatForever(autoreverses: false)) {
+            spin = true
+        }
+    }
+}
+
+private struct RotatingNodeConstellation: View {
+    let size: CGFloat
+
+    private let nodeColors: [Color] = [
+        VQTheme.accent,
+        VQTheme.green,
+        VQTheme.amber,
+        VQTheme.violet,
+        VQTheme.steel
+    ]
+
+    var body: some View {
+        GeometryReader { proxy in
+            let side = min(proxy.size.width, proxy.size.height)
+            let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            let radius = side * 0.34
+            let nodeSize = side * 0.118
+            let lineWidth = max(1, side * 0.045)
+
+            ZStack {
+                Circle()
+                    .trim(from: 0.06, to: 0.31)
+                    .stroke(VQTheme.steel.opacity(0.82), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    .frame(width: radius * 2, height: radius * 2)
+                    .position(center)
+                    .rotationEffect(.degrees(16))
+
+                Circle()
+                    .trim(from: 0.42, to: 0.66)
+                    .stroke(VQTheme.steel.opacity(0.66), style: StrokeStyle(lineWidth: lineWidth * 0.78, lineCap: .round))
+                    .frame(width: radius * 2, height: radius * 2)
+                    .position(center)
+                    .rotationEffect(.degrees(16))
+
+                ForEach(0..<5, id: \.self) { index in
+                    let nodePoint = point(index: index, radius: radius, center: center)
+
+                    Path { path in
+                        path.move(to: center)
+                        path.addLine(to: nodePoint)
+                    }
+                    .stroke(VQTheme.steel.opacity(0.78), style: StrokeStyle(lineWidth: max(1, side * 0.033), lineCap: .round))
+
+                    Circle()
+                        .fill(nodeColors[index])
+                        .frame(width: nodeSize, height: nodeSize)
+                        .overlay {
+                            Circle()
+                                .stroke(Color.white.opacity(0.72), lineWidth: max(1, side * 0.022))
+                        }
+                        .shadow(color: nodeColors[index].opacity(0.44), radius: side * 0.070, x: 0, y: 0)
+                        .position(nodePoint)
+                }
+            }
+        }
+        .frame(width: size, height: size)
+    }
+
+    private func point(index: Int, radius: CGFloat, center: CGPoint) -> CGPoint {
+        let angle = (-CGFloat.pi / 2) + (CGFloat(index) * 2 * .pi / 5)
+        return CGPoint(
+            x: center.x + cos(angle) * radius,
+            y: center.y + sin(angle) * radius
+        )
+    }
+}
+
 struct VQPanel<Content: View>: View {
     let title: String
     let systemImage: String?
