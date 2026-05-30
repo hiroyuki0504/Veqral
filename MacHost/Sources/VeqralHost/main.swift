@@ -936,8 +936,8 @@ enum PTYProcess {
             return
         }
         defer {
-            close(master)
-            close(slave)
+            if master >= 0 { close(master) }
+            if slave >= 0 { close(slave) }
         }
 
         var actions: posix_spawn_file_actions_t?
@@ -972,6 +972,7 @@ enum PTYProcess {
             }
         }
         close(slave)
+        slave = -1
         if status != 0 {
             await state.appendLog(runID: runID, stream: "error", message: "Failed to spawn Hermes: \(status)")
             await state.finish(runID: runID, exitCode: 127)
