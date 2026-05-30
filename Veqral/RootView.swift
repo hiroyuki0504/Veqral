@@ -82,6 +82,12 @@ private struct MoreView: View {
             }
         }
         .navigationTitle("Veqral")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                SpinningCommandNodeMark(size: 20)
+            }
+        }
         .navigationDestination(for: AppSection.self) { section in
             sectionDestination(section)
         }
@@ -155,6 +161,12 @@ private struct SidebarView: View {
             }
         }
         .navigationTitle("Veqral")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                SpinningCommandNodeMark(size: 20)
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             VStack(alignment: .leading, spacing: 8) {
                 EmptyDivider()

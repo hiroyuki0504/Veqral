@@ -48,15 +48,23 @@ struct CommandCenterSidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                TimelineView(.periodic(from: .now, by: 60)) { context in
-                    HStack(spacing: 8) {
-                        Text(context.date, format: .dateTime.hour().minute())
-                        Text(context.date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
-                    }
+            VStack(spacing: 12) {
+                HStack {
+                    Spacer()
+                    SpinningCommandNodeMark(size: 28)
+                    Spacer()
                 }
-                Spacer()
-                AppearanceToggleButton()
+
+                HStack(spacing: 8) {
+                    TimelineView(.periodic(from: .now, by: 60)) { context in
+                        HStack(spacing: 8) {
+                            Text(context.date, format: .dateTime.hour().minute())
+                            Text(context.date, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
+                        }
+                    }
+                    Spacer()
+                    AppearanceToggleButton()
+                }
             }
             .font(.caption.weight(.semibold))
             .foregroundStyle(VQTheme.ink)
