@@ -3,6 +3,7 @@ import SwiftUI
 import Darwin
 import CryptoKit
 import Security
+import UserNotifications
 
 enum CommandRuntime: String, Codable, CaseIterable, Identifiable {
     case hermesAgent
@@ -239,6 +240,106 @@ struct RemotePairResponse: Codable, Sendable {
     var token: String
 }
 
+struct RemoteHealthResponse: Codable, Sendable {
+    var status: String
+    var host: String
+    var tailscaleIP: String?
+    var port: UInt16
+    var hermesVersion: String
+}
+
+struct RemoteRunRecord: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var prompt: String
+    var workingDirectory: String
+    var sessionID: String?
+    var status: String
+    var startedAt: Date
+    var completedAt: Date?
+    var exitCode: Int32?
+    var pid: Int32?
+    var approvalReason: String?
+}
+
+struct RemoteRunListResponse: Codable, Sendable {
+    var runs: [RemoteRunRecord]
+}
+
+struct RemoteRunLogResponse: Codable, Sendable {
+    var logs: [RemoteHostLogEvent]
+}
+
+struct RemoteGitDiffEntry: Codable, Equatable, Sendable {
+    var path: String
+    var additions: Int
+    var deletions: Int
+}
+
+struct RemoteGitDiffResponse: Codable, Sendable {
+    var files: [RemoteGitDiffEntry]
+}
+
+struct RemoteArtifactRecord: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var title: String
+    var type: String
+    var path: String
+    var bytes: Int
+    var updatedAt: Date?
+}
+
+struct RemoteArtifactListResponse: Codable, Sendable {
+    var artifacts: [RemoteArtifactRecord]
+}
+
+struct RemoteDeviceRecord: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var pairedAt: Date
+    var lastSeenAt: Date?
+}
+
+struct RemoteDeviceListResponse: Codable, Sendable {
+    var devices: [RemoteDeviceRecord]
+}
+
+struct RemoteAuditLogResponse: Codable, Sendable {
+    var lines: [String]
+}
+
+struct RemoteGitHubStatus: Codable, Equatable, Sendable {
+    var workingDirectory: String
+    var gitRoot: String
+    var branch: String
+    var remote: String
+    var changedFiles: Int
+    var aheadBehind: String
+    var ghAuthenticated: Bool
+    var pullRequestURL: String
+    var pullRequestState: String
+    var checksSummary: String
+    var error: String?
+
+    static let empty = RemoteGitHubStatus(
+        workingDirectory: "",
+        gitRoot: "",
+        branch: "",
+        remote: "",
+        changedFiles: 0,
+        aheadBehind: "",
+        ghAuthenticated: false,
+        pullRequestURL: "",
+        pullRequestState: "Not loaded",
+        checksSummary: "Not loaded",
+        error: nil
+    )
+}
+
+struct RemoteDraftPRResponse: Codable, Sendable {
+    var ok: Bool
+    var url: String
+}
+
 struct RemoteMemoryFile: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var title: String
@@ -299,6 +400,13 @@ final class CommandCenterStore: ObservableObject {
     @Published var remoteMemoryDiff: String = ""
     @Published var remoteMemoryMessage: String = ""
     @Published var isLoadingRemoteMemory = false
+    @Published var remoteHostMessage: String = ""
+    @Published var remoteHostHealth: RemoteHealthResponse?
+    @Published var remoteDevices: [RemoteDeviceRecord] = []
+    @Published var remoteAuditLines: [String] = []
+    @Published var remoteGitHubStatus: RemoteGitHubStatus = .empty
+    @Published var remoteArtifacts: [RemoteArtifactRecord] = []
+    @Published var isRefreshingRemoteHost = false
     @Published var workingDirectory: String {
         didSet {
             guard isReadyForAutosave, oldValue != workingDirectory else { return }
@@ -369,6 +477,9 @@ final class CommandCenterStore: ObservableObject {
         }
         isReadyForAutosave = true
         scheduleWorkspaceRefresh(delayNanoseconds: 0)
+        requestNotificationPermission()
+        reconnectRemoteRuns()
+        refreshRemoteHostStatus()
     }
 
     func selectRun(_ id: UUID) {
@@ -459,11 +570,129 @@ final class CommandCenterStore: ObservableObject {
         let cleanCode = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
         let response = try await RemoteHostClient.pair(endpoint: cleanEndpoint, deviceName: deviceName, pairingCode: cleanCode)
         configureRemoteHost(endpoint: cleanEndpoint, deviceID: response.deviceID, token: response.token, name: "Mac Host")
+        refreshRemoteHostStatus()
     }
 
     func disableRemoteHost() {
         remoteHost.isEnabled = false
+        remoteHostHealth = nil
         persist()
+    }
+
+    func handlePairingURL(_ url: URL) {
+        guard url.scheme == "veqral",
+              url.host == "pair",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return
+        }
+        let values = Dictionary(uniqueKeysWithValues: components.queryItems?.compactMap { item in
+            item.value.map { (item.name, $0) }
+        } ?? [])
+        guard let endpoint = values["endpoint"], let code = values["code"] else {
+            remoteHostMessage = "Pairing URL is missing endpoint or code."
+            return
+        }
+        remoteHostMessage = "Pairing from QR link..."
+        Task { @MainActor in
+            do {
+                try await pairRemoteHost(endpoint: endpoint, pairingCode: code, deviceName: ProcessInfo.processInfo.hostName)
+                remoteHostMessage = "Paired from QR link."
+            } catch {
+                remoteHostMessage = "QR pairing failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func refreshRemoteHostStatus() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else { return }
+        isRefreshingRemoteHost = true
+        remoteHostMessage = "Refreshing Mac Host..."
+        let configuration = remoteHost
+        let directory = workingDirectory
+        Task { @MainActor in
+            let client = RemoteHostClient(configuration: configuration)
+            do {
+                async let health = client.health()
+                async let runList = client.runList()
+                async let devices = client.devices()
+                async let audit = client.audit()
+                async let github = client.githubStatus(workingDirectory: directory)
+                let healthResponse = try await health
+                let runListResponse = try await runList
+                let deviceResponse = try await devices
+                let auditResponse = try await audit
+                let githubResponse = try await github
+                remoteHostHealth = healthResponse
+                await mergeRemoteRuns(runListResponse.runs, client: client)
+                remoteDevices = deviceResponse.devices
+                remoteAuditLines = auditResponse.lines
+                remoteGitHubStatus = githubResponse
+                remoteHostMessage = "Mac Host online."
+            } catch {
+                remoteHostHealth = nil
+                remoteHostMessage = "Mac Host offline: \(error.localizedDescription)"
+            }
+            isRefreshingRemoteHost = false
+        }
+    }
+
+    func refreshGitHubStatus() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            remoteHostMessage = "GitHub status requires Mac Host pairing."
+            return
+        }
+        let configuration = remoteHost
+        let directory = workingDirectory
+        remoteHostMessage = "Refreshing GitHub status..."
+        Task { @MainActor in
+            do {
+                remoteGitHubStatus = try await RemoteHostClient(configuration: configuration).githubStatus(workingDirectory: directory)
+                remoteHostMessage = "GitHub status refreshed."
+            } catch {
+                remoteHostMessage = "GitHub status failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func createDraftPRFromHost() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            remoteHostMessage = "Draft PR requires Mac Host pairing."
+            return
+        }
+        let configuration = remoteHost
+        let title = selectedRun?.title ?? "Veqral update"
+        let body = "Created from Veqral Mac Host."
+        remoteHostMessage = "Creating draft PR..."
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).createDraftPR(
+                    workingDirectory: workingDirectory,
+                    title: title,
+                    body: body
+                )
+                remoteHostMessage = "Draft PR created: \(response.url)"
+                refreshGitHubStatus()
+            } catch {
+                remoteHostMessage = "Draft PR failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func revokeRemoteDevice(_ device: RemoteDeviceRecord) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else { return }
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                try await RemoteHostClient(configuration: configuration).revokeDevice(deviceID: device.id)
+                remoteDevices.removeAll { $0.id == device.id }
+                remoteHostMessage = "Revoked \(device.name)."
+                if device.id == configuration.deviceID {
+                    disableRemoteHost()
+                }
+            } catch {
+                remoteHostMessage = "Revoke failed: \(error.localizedDescription)"
+            }
+        }
     }
 
     func refreshRemoteMemory() {
@@ -659,6 +888,118 @@ final class CommandCenterStore: ObservableObject {
         return Array(pending.prefix(limit))
     }
 
+    private func reconnectRemoteRuns() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else { return }
+        for run in runs where [.running, .waiting, .approval].contains(run.status) {
+            if let remoteRunID = remoteRunIDs[run.id.uuidString] {
+                startRemoteStream(localRun: run, remoteRunID: remoteRunID)
+            }
+        }
+    }
+
+    private func mergeRemoteRuns(_ remoteRuns: [RemoteRunRecord], client: RemoteHostClient) async {
+        for remoteRun in remoteRuns {
+            let localID = remoteRunIDs.first { $0.value == remoteRun.id }.flatMap { UUID(uuidString: $0.key) }
+            if let localID, let index = runs.firstIndex(where: { $0.id == localID }) {
+                runs[index].status = Self.localStatus(from: remoteRun.status)
+                runs[index].progress = Self.progress(for: remoteRun.status)
+                runs[index].completedAt = remoteRun.completedAt
+                runs[index].device = remoteHost.name.isEmpty ? remoteHost.endpoint : remoteHost.name
+                runs[index].model = "Hermes via Mac Host"
+                if remoteRun.status == "waitingApproval", !approvals.contains(where: { $0.runID == localID && $0.status == .pending }) {
+                    insertRemoteApproval(for: runs[index], reason: remoteRun.approvalReason ?? "Remote approval required")
+                }
+                await syncRemoteRunDetails(localRunID: localID, remoteRunID: remoteRun.id, client: client)
+                continue
+            }
+
+            let localRun = CommandRun(
+                id: UUID(),
+                title: title(for: remoteRun.prompt),
+                command: remoteRun.prompt,
+                runtime: .hermesAgent,
+                phase: .implementation,
+                status: Self.localStatus(from: remoteRun.status),
+                agent: "Hermes",
+                device: remoteHost.name.isEmpty ? remoteHost.endpoint : remoteHost.name,
+                model: "Hermes via Mac Host",
+                progress: Self.progress(for: remoteRun.status),
+                startedAt: remoteRun.startedAt,
+                completedAt: remoteRun.completedAt,
+                workingDirectory: remoteRun.workingDirectory
+            )
+            runs.append(localRun)
+            remoteRunIDs[localRun.id.uuidString] = remoteRun.id
+            if remoteRun.status == "waitingApproval" {
+                insertRemoteApproval(for: localRun, reason: remoteRun.approvalReason ?? "Remote approval required")
+            }
+
+            do {
+                let response = try await client.runLogs(remoteRunID: remoteRun.id)
+                let existing = Set(logs.filter { $0.runID == localRun.id }.map { "\($0.time.timeIntervalSince1970)-\($0.stream)-\($0.message)" })
+                for event in response.logs {
+                    let key = "\(event.createdAt.timeIntervalSince1970)-\(event.stream)-\(event.message)"
+                    guard !existing.contains(key) else { continue }
+                    logs.append(CommandLogEntry(id: UUID(), runID: localRun.id, time: event.createdAt, stream: event.stream, message: event.message))
+                }
+            } catch {
+                appendLog(runID: localRun.id, stream: "warn", message: "Remote log sync failed: \(error.localizedDescription)")
+            }
+            await syncRemoteRunDetails(localRunID: localRun.id, remoteRunID: remoteRun.id, client: client)
+        }
+        runs.sort { $0.startedAt > $1.startedAt }
+        selectedRunID = selectedRunID ?? runs.first?.id
+        persist()
+        reconnectRemoteRuns()
+    }
+
+    private func syncRemoteRunDetails(localRunID: UUID, remoteRunID: String, client: RemoteHostClient) async {
+        do {
+            let response = try await client.runDiff(remoteRunID: remoteRunID)
+            diffs.removeAll { $0.runID == localRunID }
+            diffs.append(contentsOf: response.files.map { file in
+                CommandDiffEntry(
+                    id: UUID(),
+                    runID: localRunID,
+                    path: file.path,
+                    additions: file.additions,
+                    deletions: file.deletions
+                )
+            })
+        } catch {
+            appendLog(runID: localRunID, stream: "warn", message: "Remote diff sync failed: \(error.localizedDescription)")
+        }
+
+        do {
+            let response = try await client.runArtifacts(remoteRunID: remoteRunID)
+            let incomingIDs = Set(response.artifacts.map(\.id))
+            remoteArtifacts.removeAll { incomingIDs.contains($0.id) }
+            remoteArtifacts.append(contentsOf: response.artifacts)
+            remoteArtifacts.sort { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
+            remoteArtifacts = Array(remoteArtifacts.prefix(80))
+        } catch {
+            appendLog(runID: localRunID, stream: "warn", message: "Remote artifact sync failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func insertRemoteApproval(for run: CommandRun, reason: String) {
+        approvals.insert(
+            CommandApproval(
+                id: UUID(),
+                runID: run.id,
+                title: run.title,
+                detail: reason,
+                command: run.command,
+                risk: "高",
+                tintName: "red",
+                status: .pending,
+                createdAt: Date()
+            ),
+            at: 0
+        )
+        notify(title: "Veqral approval required", body: reason)
+    }
+
     private func executeIfAvailable(_ run: CommandRun) {
         if remoteHost.isEnabled {
             executeRemote(run)
@@ -730,6 +1071,7 @@ final class CommandCenterStore: ObservableObject {
                         at: 0
                     )
                     appendLog(runID: run.id, stream: "approval", message: "Remote approval required: \(message)")
+                    notify(title: "Veqral approval required", body: message)
                     persist()
                 }
             } catch RemoteHostError.approvalRequired(let message) {
@@ -752,6 +1094,7 @@ final class CommandCenterStore: ObservableObject {
                     at: 0
                 )
                 appendLog(runID: run.id, stream: "approval", message: "Remote approval required: \(message)")
+                notify(title: "Veqral approval required", body: message)
                 persist()
             } catch {
                 appendLog(runID: run.id, stream: "warn", message: "Remote run failed: \(error.localizedDescription)")
@@ -782,8 +1125,14 @@ final class CommandCenterStore: ObservableObject {
                             runs[index].progress = 1.0
                             runs[index].completedAt = Date()
                         }
+                        notify(
+                            title: event.exitCode == 0 ? "Veqral run complete" : "Veqral run failed",
+                            body: run.title
+                        )
                         persist()
                         scheduleWorkspaceRefresh(delayNanoseconds: 0)
+                    } else if event.kind == "approval" {
+                        notify(title: "Veqral approval required", body: event.message)
                     }
                 }
             } catch {
@@ -838,6 +1187,53 @@ final class CommandCenterStore: ObservableObject {
             return command
         }
         return String(command.prefix(49)) + "..."
+    }
+
+    private static func localStatus(from remoteStatus: String) -> RunStatus {
+        switch remoteStatus {
+        case "queued", "running":
+            .running
+        case "waitingApproval":
+            .approval
+        case "cancelled", "needsAttention":
+            .waiting
+        case "complete":
+            .complete
+        case "failed":
+            .failed
+        default:
+            .waiting
+        }
+    }
+
+    private static func progress(for remoteStatus: String) -> Double {
+        switch remoteStatus {
+        case "queued":
+            0.12
+        case "running":
+            0.45
+        case "waitingApproval":
+            0
+        case "complete":
+            1
+        case "failed", "cancelled":
+            1
+        default:
+            0.2
+        }
+    }
+
+    private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+    }
+
+    private func notify(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
     }
 
     private func riskDescription(for command: String) -> (label: String, detail: String, tintName: String)? {
@@ -1537,6 +1933,17 @@ struct RemoteHostClient: Sendable {
         return try JSONDecoder.commandCenter.decode(RemotePairResponse.self, from: data)
     }
 
+    func health() async throws -> RemoteHealthResponse {
+        guard let url = URL(string: "/v1/health", relativeTo: URL(string: configuration.endpoint)) else {
+            throw RemoteHostError.invalidConfiguration
+        }
+        let (data, response) = try await URLSession.shared.data(from: url.absoluteURL)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw RemoteHostError.server("Health check failed")
+        }
+        return try JSONDecoder.commandCenter.decode(RemoteHealthResponse.self, from: data)
+    }
+
     func createRun(prompt: String, workingDirectory: String) async throws -> RemoteCreateRunResponse {
         let body = try JSONEncoder.commandCenter.encode([
             "prompt": prompt,
@@ -1544,6 +1951,26 @@ struct RemoteHostClient: Sendable {
         ])
         let data = try await request(path: "/v1/runs", method: "POST", body: body)
         return try JSONDecoder.commandCenter.decode(RemoteCreateRunResponse.self, from: data)
+    }
+
+    func runList() async throws -> RemoteRunListResponse {
+        let data = try await request(path: "/v1/runs", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteRunListResponse.self, from: data)
+    }
+
+    func runLogs(remoteRunID: String) async throws -> RemoteRunLogResponse {
+        let data = try await request(path: "/v1/runs/\(remoteRunID)/logs", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteRunLogResponse.self, from: data)
+    }
+
+    func runDiff(remoteRunID: String) async throws -> RemoteGitDiffResponse {
+        let data = try await request(path: "/v1/runs/\(remoteRunID)/diff", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteGitDiffResponse.self, from: data)
+    }
+
+    func runArtifacts(remoteRunID: String) async throws -> RemoteArtifactListResponse {
+        let data = try await request(path: "/v1/runs/\(remoteRunID)/artifacts", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteArtifactListResponse.self, from: data)
     }
 
     func cancel(remoteRunID: String) async throws {
@@ -1560,6 +1987,36 @@ struct RemoteHostClient: Sendable {
 
     func reject(remoteRunID: String) async throws {
         _ = try await request(path: "/v1/runs/\(remoteRunID)/reject", method: "POST", body: Data())
+    }
+
+    func devices() async throws -> RemoteDeviceListResponse {
+        let data = try await request(path: "/v1/devices", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteDeviceListResponse.self, from: data)
+    }
+
+    func revokeDevice(deviceID: String) async throws {
+        _ = try await request(path: "/v1/devices/\(deviceID)/revoke", method: "POST", body: Data())
+    }
+
+    func audit() async throws -> RemoteAuditLogResponse {
+        let data = try await request(path: "/v1/audit", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteAuditLogResponse.self, from: data)
+    }
+
+    func githubStatus(workingDirectory: String) async throws -> RemoteGitHubStatus {
+        let body = try JSONEncoder.commandCenter.encode(["workingDirectory": workingDirectory])
+        let data = try await request(path: "/v1/github/status", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteGitHubStatus.self, from: data)
+    }
+
+    func createDraftPR(workingDirectory: String, title: String, body: String) async throws -> RemoteDraftPRResponse {
+        let bodyData = try JSONEncoder.commandCenter.encode([
+            "workingDirectory": workingDirectory,
+            "title": title,
+            "body": body
+        ])
+        let data = try await request(path: "/v1/github/draft-pr", method: "POST", body: bodyData)
+        return try JSONDecoder.commandCenter.decode(RemoteDraftPRResponse.self, from: data)
     }
 
     func memoryList() async throws -> RemoteMemoryListResponse {

@@ -276,8 +276,8 @@ struct DevicesView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack(spacing: 8) {
                             StatusPill(
-                                title: store.remoteHost.isEnabled && store.remoteHost.isPaired ? "Remote Enabled" : "Offline",
-                                tint: store.remoteHost.isEnabled && store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber
+                                title: remoteStatusTitle,
+                                tint: remoteOnline ? VQTheme.green : VQTheme.amber
                             )
                             StatusPill(title: "HMAC", tint: VQTheme.accent)
                             StatusPill(title: "Keychain", tint: VQTheme.green)
@@ -286,6 +286,9 @@ struct DevicesView: View {
 
                         KeyValueLine(key: "Saved endpoint", value: store.remoteHost.displayEndpoint)
                         KeyValueLine(key: "Device ID", value: store.remoteHost.deviceID.isEmpty ? "Not paired" : "\(store.remoteHost.deviceID.prefix(8))...")
+                        KeyValueLine(key: "Tailscale", value: store.remoteHostHealth?.tailscaleIP ?? (store.workspace.tailscaleIP.isEmpty ? "Not verified" : store.workspace.tailscaleIP))
+                        KeyValueLine(key: "Host", value: store.remoteHostHealth?.host ?? "Not connected")
+                        KeyValueLine(key: "Hermes", value: store.remoteHostHealth?.hermesVersion ?? "Not checked")
                         KeyValueLine(key: "Execution", value: store.remoteHost.isEnabled ? "iPhone/iPad -> Tailscale -> Mac Host -> Hermes" : "Mac Catalyst or mock only")
 
                         RemoteConnectionField(title: "Endpoint", placeholder: store.workspace.macHostEndpoint, text: $remoteEndpoint)
@@ -310,13 +313,100 @@ struct DevicesView: View {
                             }
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                            Button {
+                                store.refreshRemoteHostStatus()
+                            } label: {
+                                Label(store.isRefreshingRemoteHost ? "Refreshing" : "Refresh Host", systemImage: "arrow.clockwise")
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                            .disabled(!store.remoteHost.isPaired || store.isRefreshingRemoteHost)
                         }
                         .font(.footnote.weight(.semibold))
+
+                        if !store.remoteHostMessage.isEmpty {
+                            Text(store.remoteHostMessage)
+                                .font(.caption)
+                                .foregroundStyle(store.remoteHostMessage.localizedCaseInsensitiveContains("failed") || store.remoteHostMessage.localizedCaseInsensitiveContains("offline") ? VQTheme.amber : VQTheme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
 
                         if !remoteStatusMessage.isEmpty {
                             Text(remoteStatusMessage)
                                 .font(.caption)
                                 .foregroundStyle(remoteStatusMessage.contains("failed") || remoteStatusMessage.contains("失敗") ? VQTheme.amber : VQTheme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                VQPanel("Paired Devices", systemImage: "iphone.gen3.radiowaves.left.and.right") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if store.remoteDevices.isEmpty {
+                            Text(store.remoteHost.isPaired ? "No paired devices reported yet. Refresh the Host once it is reachable." : "Pair a Mac Host to list trusted iPhone/iPad clients.")
+                                .font(.subheadline)
+                                .foregroundStyle(VQTheme.secondaryText)
+                        }
+
+                        ForEach(store.remoteDevices) { device in
+                            HStack(alignment: .center, spacing: 10) {
+                                Image(systemName: device.id == store.remoteHost.deviceID ? "iphone.gen3" : "rectangle.connected.to.line.below")
+                                    .foregroundStyle(device.lastSeenAt == nil ? VQTheme.secondaryText : VQTheme.accent)
+                                    .frame(width: 28)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(device.name)
+                                        .font(.subheadline.weight(.semibold))
+                                    Text("Last seen \(dateLabel(device.lastSeenAt))")
+                                        .font(.caption)
+                                        .foregroundStyle(VQTheme.secondaryText)
+                                    Text(device.id)
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(VQTheme.secondaryText)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Spacer()
+                                Button(role: .destructive) {
+                                    store.revokeRemoteDevice(device)
+                                } label: {
+                                    Label(device.id == store.remoteHost.deviceID ? "Unpair" : "Revoke", systemImage: "xmark.circle")
+                                }
+                                .buttonStyle(.bordered)
+                                .buttonBorderShape(.roundedRectangle(radius: 8))
+                            }
+                            if device.id != store.remoteDevices.last?.id {
+                                EmptyDivider()
+                            }
+                        }
+                    }
+                }
+
+                VQPanel("Host Audit", systemImage: "list.bullet.rectangle") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            StatusPill(title: "\(store.remoteAuditLines.count) events", tint: VQTheme.steel)
+                            Spacer()
+                            Button(action: store.refreshRemoteHostStatus) {
+                                Label("Refresh", systemImage: "arrow.clockwise")
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                            .font(.footnote.weight(.semibold))
+                            .disabled(!store.remoteHost.isPaired)
+                        }
+
+                        if store.remoteAuditLines.isEmpty {
+                            Text("No audit events loaded yet.")
+                                .font(.subheadline)
+                                .foregroundStyle(VQTheme.secondaryText)
+                        }
+
+                        ForEach(Array(store.remoteAuditLines.suffix(8).enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(VQTheme.secondaryText)
+                                .lineLimit(3)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -384,6 +474,28 @@ struct DevicesView: View {
             isPairing = false
         }
     }
+
+    private var remoteOnline: Bool {
+        store.remoteHost.isEnabled && store.remoteHost.isPaired && store.remoteHostHealth?.status == "ok"
+    }
+
+    private var remoteStatusTitle: String {
+        if remoteOnline { return "Online" }
+        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "Offline" }
+        return "Not Paired"
+    }
+
+    private func dateLabel(_ date: Date?) -> String {
+        guard let date else { return "Never" }
+        return Self.deviceDateFormatter.string(from: date)
+    }
+
+    private static let deviceDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
 }
 
 struct ProjectsView: View {
@@ -730,8 +842,8 @@ struct DiffView: View {
             VQPanel("Review Notes", systemImage: "text.badge.checkmark") {
                 VStack(alignment: .leading, spacing: 10) {
                     ReviewNote(symbol: "checkmark.circle", text: "Responsive navigation separates iPhone tabs from iPad inspection.")
-                    ReviewNote(symbol: "exclamationmark.triangle", text: "Mac Host transport remains mocked until MVP 1.")
-                    ReviewNote(symbol: "arrow.triangle.2.circlepath", text: "Diff summaries should later come from git plus agent review.")
+                    ReviewNote(symbol: "antenna.radiowaves.left.and.right", text: "Mac Host can now stream Hermes logs and sync run diffs over the remote transport.")
+                    ReviewNote(symbol: "arrow.triangle.2.circlepath", text: "Diff summaries are populated from the paired Host when a remote run is available.")
                 }
             }
         }
@@ -739,32 +851,90 @@ struct DiffView: View {
 }
 
 struct ArtifactsView: View {
+    @EnvironmentObject private var store: CommandCenterStore
     private let columns = [GridItem(.adaptive(minimum: 220), spacing: 14)]
 
     var body: some View {
         ScreenScaffold(title: "Artifacts", systemImage: "shippingbox") {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
-                ForEach(MockData.artifacts) { artifact in
-                    VQPanel(artifact.title, systemImage: artifact.symbol) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ZStack {
-                                Rectangle()
-                                    .fill(VQTheme.steel.opacity(0.08))
-                                Image(systemName: artifact.symbol)
-                                    .font(.system(size: 44, weight: .light))
-                                    .foregroundStyle(VQTheme.accent)
-                            }
-                            .frame(height: 118)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                if store.remoteArtifacts.isEmpty {
+                    ForEach(MockData.artifacts) { artifact in
+                        VQPanel(artifact.title, systemImage: artifact.symbol) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                ZStack {
+                                    Rectangle()
+                                        .fill(VQTheme.steel.opacity(0.08))
+                                    Image(systemName: artifact.symbol)
+                                        .font(.system(size: 44, weight: .light))
+                                        .foregroundStyle(VQTheme.accent)
+                                }
+                                .frame(height: 118)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-                            KeyValueLine(key: "Type", value: artifact.type)
-                            KeyValueLine(key: "Source", value: artifact.source)
-                            StatusPill(title: artifact.status, tint: artifact.status == "Ready" ? VQTheme.green : VQTheme.amber)
+                                KeyValueLine(key: "Type", value: artifact.type)
+                                KeyValueLine(key: "Source", value: artifact.source)
+                                StatusPill(title: artifact.status, tint: artifact.status == "Ready" ? VQTheme.green : VQTheme.amber)
+                            }
+                        }
+                    }
+                } else {
+                    ForEach(store.remoteArtifacts) { artifact in
+                        VQPanel(artifact.title, systemImage: symbol(for: artifact.type)) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                ZStack {
+                                    Rectangle()
+                                        .fill(VQTheme.steel.opacity(0.08))
+                                    Image(systemName: symbol(for: artifact.type))
+                                        .font(.system(size: 44, weight: .light))
+                                        .foregroundStyle(VQTheme.accent)
+                                }
+                                .frame(height: 118)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                                KeyValueLine(key: "Type", value: artifact.type.uppercased())
+                                KeyValueLine(key: "Source", value: artifact.path)
+                                KeyValueLine(key: "Size", value: byteLabel(artifact.bytes))
+                                StatusPill(title: "Synced from Host", tint: VQTheme.green)
+                            }
                         }
                     }
                 }
             }
         }
+        .onAppear {
+            if store.remoteHost.isEnabled, store.remoteHost.isPaired {
+                store.refreshRemoteHostStatus()
+            }
+        }
+    }
+
+    private func symbol(for type: String) -> String {
+        switch type.lowercased() {
+        case "png", "jpg", "jpeg", "gif":
+            return "photo"
+        case "pdf":
+            return "doc.richtext"
+        case "html", "htm":
+            return "safari"
+        case "json":
+            return "curlybraces.square"
+        case "log", "txt":
+            return "doc.text"
+        case "md":
+            return "text.alignleft"
+        default:
+            return "shippingbox"
+        }
+    }
+
+    private func byteLabel(_ bytes: Int) -> String {
+        if bytes >= 1_048_576 {
+            return String(format: "%.1f MB", Double(bytes) / 1_048_576)
+        }
+        if bytes >= 1024 {
+            return String(format: "%.1f KB", Double(bytes) / 1024)
+        }
+        return "\(bytes) B"
     }
 }
 
@@ -937,20 +1107,80 @@ struct GitHubOpsView: View {
         ScreenScaffold(title: "GitHub", systemImage: "point.3.connected.trianglepath.dotted") {
             VQPanel("Release Flow", systemImage: "arrow.triangle.branch") {
                 VStack(alignment: .leading, spacing: 14) {
-                    GitHubStep(title: "Branch", value: store.workspace.branchLabel, status: store.workspace.branch.isEmpty ? "Missing" : "Ready", tint: store.workspace.branch.isEmpty ? VQTheme.amber : VQTheme.green)
-                    GitHubStep(title: "Working Tree", value: store.workspace.statusSummary, status: store.workspace.changedFiles == 0 ? "Clean" : "Dirty", tint: store.workspace.changedFiles == 0 ? VQTheme.green : VQTheme.amber)
-                    GitHubStep(title: "Pull Request", value: "Not opened", status: "Next", tint: VQTheme.secondaryText)
-                    GitHubStep(title: "CI", value: "No checks yet", status: "Idle", tint: VQTheme.secondaryText)
+                    HStack(spacing: 8) {
+                        StatusPill(title: store.remoteHost.isPaired ? "Mac Host" : "Local Snapshot", tint: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber)
+                        StatusPill(title: github.ghAuthenticated ? "gh auth OK" : "gh auth needed", tint: github.ghAuthenticated ? VQTheme.green : VQTheme.amber)
+                        Spacer()
+                    }
+
+                    GitHubStep(title: "Branch", value: branchLabel, status: branchLabel == "No branch" ? "Missing" : "Ready", tint: branchLabel == "No branch" ? VQTheme.amber : VQTheme.green)
+                    GitHubStep(title: "Working Tree", value: workingTreeLabel, status: changedFiles == 0 ? "Clean" : "Dirty", tint: changedFiles == 0 ? VQTheme.green : VQTheme.amber)
+                    GitHubStep(title: "Pull Request", value: github.pullRequestURL.isEmpty ? "Not opened" : github.pullRequestURL, status: github.pullRequestState, tint: github.pullRequestURL.isEmpty ? VQTheme.secondaryText : VQTheme.accent)
+                    GitHubStep(title: "CI", value: github.checksSummary, status: github.checksSummary.localizedCaseInsensitiveContains("failing") ? "Failing" : "Status", tint: github.checksSummary.localizedCaseInsensitiveContains("failing") ? VQTheme.red : VQTheme.secondaryText)
                     GitHubStep(title: "Deploy", value: "Approval required", status: "Locked", tint: VQTheme.red)
+
+                    HStack(spacing: 8) {
+                        Button(action: store.refreshGitHubStatus) {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                        .disabled(!store.remoteHost.isPaired)
+
+                        Button(action: store.createDraftPRFromHost) {
+                            Label("Create Draft PR", systemImage: "plus.square.on.square")
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                        .disabled(!store.remoteHost.isPaired || branchLabel == "No branch")
+                    }
+                    .font(.footnote.weight(.semibold))
                 }
             }
 
             VQPanel("Repository", systemImage: "tray.full") {
-                KeyValueLine(key: "Remote", value: store.workspace.remoteLabel)
-                KeyValueLine(key: "Working tree", value: store.workspace.statusSummary)
-                KeyValueLine(key: "Review mode", value: "Agent + human approval")
+                VStack(alignment: .leading, spacing: 12) {
+                    KeyValueLine(key: "Remote", value: github.remote.isEmpty ? store.workspace.remoteLabel : github.remote)
+                    KeyValueLine(key: "Git root", value: github.gitRoot.isEmpty ? store.workspace.rootPath : github.gitRoot)
+                    KeyValueLine(key: "Ahead/behind", value: github.aheadBehind.isEmpty ? "No upstream data" : github.aheadBehind)
+                    KeyValueLine(key: "Review mode", value: "Branch + commit + draft PR automatic, merge/deploy approval")
+                    if let error = github.error, !error.isEmpty {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.amber)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !store.remoteHostMessage.isEmpty {
+                        Text(store.remoteHostMessage)
+                            .font(.caption)
+                            .foregroundStyle(store.remoteHostMessage.localizedCaseInsensitiveContains("failed") ? VQTheme.amber : VQTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
         }
+        .onAppear {
+            if store.remoteHost.isEnabled, store.remoteHost.isPaired {
+                store.refreshGitHubStatus()
+            }
+        }
+    }
+
+    private var github: RemoteGitHubStatus {
+        store.remoteGitHubStatus
+    }
+
+    private var branchLabel: String {
+        if !github.branch.isEmpty { return github.branch }
+        return store.workspace.branchLabel
+    }
+
+    private var changedFiles: Int {
+        github.gitRoot.isEmpty ? store.workspace.changedFiles : github.changedFiles
+    }
+
+    private var workingTreeLabel: String {
+        changedFiles == 0 ? "Clean" : "\(changedFiles) changed files"
     }
 }
 
