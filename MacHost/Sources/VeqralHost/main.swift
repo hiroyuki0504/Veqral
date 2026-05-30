@@ -463,6 +463,7 @@ final class HostServer: @unchecked Sendable {
     private let state: HostState
     private let listener: NWListener
     private let runner: HermesRunner
+    private let memoryStore = HermesMemoryStore()
     private let connectionLock = NSLock()
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
 
@@ -561,6 +562,54 @@ final class HostServer: @unchecked Sendable {
             }
 
             try await authenticate(request)
+
+            if request.path == "/v1/setup/unattended/status", request.method == "GET" {
+                sendJSON(UnattendedSetupManager.status(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/setup/unattended/apply", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(UnattendedApplyRequest.self, from: request.body)
+                let result = try UnattendedSetupManager.apply(
+                    loginPassword: body.loginPassword,
+                    allowSkipAutologin: body.allowSkipAutologin
+                )
+                await state.recordAudit("unattended setup applied autologinSkipped=\(result.autologinSkipped)")
+                sendJSON(result, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/setup/unattended/revert", request.method == "POST" {
+                let result = try UnattendedSetupManager.revert()
+                await state.recordAudit("unattended setup reverted")
+                sendJSON(result, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/memory", request.method == "GET" {
+                sendJSON(try memoryStore.list(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/memory/read", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(MemoryFileRequest.self, from: request.body)
+                sendJSON(try memoryStore.read(id: body.id), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/memory/diff", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(MemoryWriteRequest.self, from: request.body)
+                sendJSON(try memoryStore.diff(id: body.id, proposedContent: body.content), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/memory/write", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(MemoryWriteRequest.self, from: request.body)
+                let response = try memoryStore.write(id: body.id, content: body.content)
+                await state.recordAudit("memory wrote id=\(body.id) bytes=\(body.content.utf8.count)")
+                sendJSON(response, connection: connection)
+                return
+            }
 
             if request.headers["upgrade"]?.lowercased() == "websocket",
                request.path.hasPrefix("/v1/runs/"),
@@ -899,6 +948,10 @@ final class StatusController {
     private let state: HostState
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var window: NSWindow?
+    private var setupWindow: NSWindow?
+    private weak var setupStatusView: NSTextView?
+    private weak var setupPasswordField: NSSecureTextField?
+    private weak var setupSkipAutologinButton: NSButton?
 
     init(state: HostState) {
         self.state = state
@@ -919,6 +972,9 @@ final class StatusController {
         menu.addItem(NSMenuItem(title: "Copy Pairing URL", action: #selector(copyPairingURL), keyEquivalent: "c"))
         menu.items.last?.target = self
         menu.addItem(NSMenuItem(title: "Rotate Pairing Code", action: #selector(rotatePairing), keyEquivalent: "r"))
+        menu.items.last?.target = self
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Unattended Remote Setup...", action: #selector(showUnattendedSetup), keyEquivalent: "u"))
         menu.items.last?.target = self
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -964,6 +1020,141 @@ final class StatusController {
             }
         }
     }
+
+    @objc private func showUnattendedSetup() {
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 540, height: 470))
+
+        let title = NSTextField(labelWithString: "Unattended Remote Operation")
+        title.font = .systemFont(ofSize: 18, weight: .semibold)
+        title.frame = NSRect(x: 22, y: 430, width: 496, height: 24)
+        content.addSubview(title)
+
+        let explanation = NSTextField(wrappingLabelWithString: "Use this on a dedicated Mac mini or always-on Mac Host. It can disable screen-lock password, prevent sleep, enable restart after power loss, and optionally enable macOS autologin. The login password is used only for this operation and is never saved.")
+        explanation.font = .systemFont(ofSize: 12)
+        explanation.textColor = .secondaryLabelColor
+        explanation.frame = NSRect(x: 22, y: 368, width: 496, height: 54)
+        content.addSubview(explanation)
+
+        let statusScroll = NSScrollView(frame: NSRect(x: 22, y: 156, width: 496, height: 196))
+        statusScroll.borderType = .bezelBorder
+        statusScroll.hasVerticalScroller = true
+        let statusView = NSTextView(frame: statusScroll.bounds)
+        statusView.isEditable = false
+        statusView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        statusView.string = Self.statusText(UnattendedSetupManager.status())
+        statusScroll.documentView = statusView
+        content.addSubview(statusScroll)
+        setupStatusView = statusView
+
+        let passwordLabel = NSTextField(labelWithString: "Login password (only used to set autologin)")
+        passwordLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        passwordLabel.frame = NSRect(x: 22, y: 124, width: 260, height: 18)
+        content.addSubview(passwordLabel)
+
+        let password = NSSecureTextField(frame: NSRect(x: 286, y: 118, width: 232, height: 28))
+        password.placeholderString = "Not saved"
+        content.addSubview(password)
+        setupPasswordField = password
+
+        let skipAutologin = NSButton(checkboxWithTitle: "Skip autologin when FileVault is On", target: nil, action: nil)
+        skipAutologin.frame = NSRect(x: 22, y: 86, width: 300, height: 24)
+        skipAutologin.state = .on
+        content.addSubview(skipAutologin)
+        setupSkipAutologinButton = skipAutologin
+
+        let refresh = NSButton(title: "Refresh", target: self, action: #selector(refreshUnattendedStatus))
+        refresh.frame = NSRect(x: 22, y: 34, width: 92, height: 32)
+        content.addSubview(refresh)
+
+        let revert = NSButton(title: "Revert", target: self, action: #selector(revertUnattendedSetup))
+        revert.frame = NSRect(x: 318, y: 34, width: 90, height: 32)
+        content.addSubview(revert)
+
+        let apply = NSButton(title: "Apply", target: self, action: #selector(applyUnattendedSetup))
+        apply.bezelStyle = .rounded
+        apply.keyEquivalent = "\r"
+        apply.frame = NSRect(x: 426, y: 34, width: 92, height: 32)
+        content.addSubview(apply)
+
+        let window = NSWindow(contentRect: content.frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "Veqral Mac Host Setup"
+        window.contentView = content
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        setupWindow = window
+    }
+
+    @objc private func refreshUnattendedStatus() {
+        setupStatusView?.string = Self.statusText(UnattendedSetupManager.status())
+    }
+
+    @objc private func applyUnattendedSetup() {
+        let alert = NSAlert()
+        alert.messageText = "Apply unattended remote operation settings?"
+        alert.informativeText = "This changes macOS security and power settings so the Mac can recover and accept remote work. Use it only on a Mac you are comfortable leaving available for remote agent execution."
+        alert.addButton(withTitle: "Apply")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let password = setupPasswordField?.stringValue ?? ""
+        let allowSkip = setupSkipAutologinButton?.state == .on
+        Task {
+            do {
+                let result = try UnattendedSetupManager.apply(loginPassword: password, allowSkipAutologin: allowSkip)
+                await state.recordAudit("unattended setup applied from menu autologinSkipped=\(result.autologinSkipped)")
+                await MainActor.run {
+                    setupPasswordField?.stringValue = ""
+                    setupStatusView?.string = "\(result.message)\n\n\(Self.statusText(result.status))"
+                }
+            } catch {
+                await MainActor.run {
+                    setupStatusView?.string = "Apply failed:\n\(error.localizedDescription)\n\n\(Self.statusText(UnattendedSetupManager.status()))"
+                }
+            }
+        }
+    }
+
+    @objc private func revertUnattendedSetup() {
+        let alert = NSAlert()
+        alert.messageText = "Revert unattended remote operation settings?"
+        alert.informativeText = "This turns autologin off, restores screen-lock password, allows sleep again, and disables autorestart."
+        alert.addButton(withTitle: "Revert")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        Task {
+            do {
+                let result = try UnattendedSetupManager.revert()
+                await state.recordAudit("unattended setup reverted from menu")
+                await MainActor.run {
+                    setupStatusView?.string = "\(result.message)\n\n\(Self.statusText(result.status))"
+                }
+            } catch {
+                await MainActor.run {
+                    setupStatusView?.string = "Revert failed:\n\(error.localizedDescription)\n\n\(Self.statusText(UnattendedSetupManager.status()))"
+                }
+            }
+        }
+    }
+
+    private static func statusText(_ status: UnattendedSetupStatus) -> String {
+        var lines = [
+            "FileVault: \(status.fileVaultStatus)",
+            "Autologin: \(status.autologinStatus)",
+            "Screen lock password: \(status.askForPassword)",
+            "Screen lock delay: \(status.askForPasswordDelay)",
+            "System sleep: \(status.sleep)",
+            "Display sleep: \(status.displaySleep)",
+            "Autorestart: \(status.autorestart)"
+        ]
+        if !status.warnings.isEmpty {
+            lines.append("")
+            lines.append("Warnings:")
+            lines.append(contentsOf: status.warnings.map { "- \($0)" })
+        }
+        return lines.joined(separator: "\n")
+    }
 }
 
 enum QRCode {
@@ -976,6 +1167,421 @@ enum QRCode {
         let image = NSImage(size: rep.size)
         image.addRepresentation(rep)
         return image
+    }
+}
+
+struct UnattendedSetupStatus: Codable {
+    var fileVaultStatus: String
+    var autologinStatus: String
+    var askForPassword: String
+    var askForPasswordDelay: String
+    var sleep: String
+    var displaySleep: String
+    var autorestart: String
+    var warnings: [String]
+    var updatedAt: Date
+}
+
+struct UnattendedApplyRequest: Codable {
+    var loginPassword: String
+    var allowSkipAutologin: Bool
+}
+
+struct UnattendedSetupResult: Codable {
+    var ok: Bool
+    var autologinSkipped: Bool
+    var status: UnattendedSetupStatus
+    var message: String
+}
+
+enum UnattendedSetupManager {
+    static func status() -> UnattendedSetupStatus {
+        let fileVault = ProcessRunner.run("/usr/bin/fdesetup", ["status"], timeout: 10).combinedTrimmed
+        let autologin = ProcessRunner.run("/usr/sbin/sysadminctl", ["-autologin", "status"], timeout: 10).combinedTrimmed
+        let askForPassword = defaultsValue(["-currentHost", "read", "com.apple.screensaver", "askForPassword"])
+        let askForPasswordDelay = defaultsValue(["-currentHost", "read", "com.apple.screensaver", "askForPasswordDelay"])
+        let pmset = ProcessRunner.run("/usr/bin/pmset", ["-g", "custom"], timeout: 10).combinedTrimmed
+        var warnings: [String] = []
+        if fileVault.localizedCaseInsensitiveContains("On") {
+            warnings.append("FileVault is On. macOS autologin cannot be fully enabled until FileVault is disabled.")
+        }
+        if askForPassword == "0" {
+            warnings.append("Screen lock password is disabled for unattended operation.")
+        }
+        return UnattendedSetupStatus(
+            fileVaultStatus: fileVault.isEmpty ? "Unknown" : fileVault,
+            autologinStatus: autologin.isEmpty ? "Unknown" : autologin,
+            askForPassword: askForPassword,
+            askForPasswordDelay: askForPasswordDelay,
+            sleep: pmsetValue(" sleep", in: pmset),
+            displaySleep: pmsetValue(" displaysleep", in: pmset),
+            autorestart: pmsetValue(" autorestart", in: pmset),
+            warnings: warnings,
+            updatedAt: Date()
+        )
+    }
+
+    static func apply(loginPassword: String, allowSkipAutologin: Bool = true) throws -> UnattendedSetupResult {
+        let current = status()
+        let fileVaultOn = current.fileVaultStatus.localizedCaseInsensitiveContains("On")
+        let shouldSkipAutologin = fileVaultOn && allowSkipAutologin
+        if fileVaultOn && !allowSkipAutologin {
+            throw HostError.approvalRequired("FileVault is On. Disable FileVault first or allow skipping autologin.")
+        }
+        if !shouldSkipAutologin && loginPassword.isEmpty {
+            throw HostError.badRequest("Login password is required to enable autologin.")
+        }
+
+        try runChecked("/usr/bin/defaults", ["-currentHost", "write", "com.apple.screensaver", "askForPassword", "-int", "0"])
+        try runChecked("/usr/bin/defaults", ["-currentHost", "write", "com.apple.screensaver", "askForPasswordDelay", "-int", "0"])
+
+        var scriptLines: [String] = []
+        if !shouldSkipAutologin {
+            scriptLines.append("/usr/sbin/sysadminctl -autologin set -userName \(shellQuoted(NSUserName())) -password \(shellQuoted(loginPassword))")
+        }
+        scriptLines.append("/usr/bin/pmset -a sleep 0 displaysleep 0")
+        scriptLines.append("/usr/bin/pmset autorestart 1")
+        try runAsAdmin(scriptLines.joined(separator: "\n"))
+
+        let updated = status()
+        let message = shouldSkipAutologin
+            ? "Applied sleep, display, screen-lock, and autorestart settings. Autologin was skipped because FileVault is On."
+            : "Applied autologin, sleep, display, screen-lock, and autorestart settings."
+        return UnattendedSetupResult(ok: true, autologinSkipped: shouldSkipAutologin, status: updated, message: message)
+    }
+
+    static func revert() throws -> UnattendedSetupResult {
+        try runChecked("/usr/bin/defaults", ["-currentHost", "write", "com.apple.screensaver", "askForPassword", "-int", "1"])
+        try runAsAdmin([
+            "/usr/sbin/sysadminctl -autologin off",
+            "/usr/bin/pmset -a sleep 1 displaysleep 10",
+            "/usr/bin/pmset autorestart 0"
+        ].joined(separator: "\n"))
+        let updated = status()
+        return UnattendedSetupResult(ok: true, autologinSkipped: false, status: updated, message: "Reverted unattended operation settings.")
+    }
+
+    private static func defaultsValue(_ arguments: [String]) -> String {
+        let output = ProcessRunner.run("/usr/bin/defaults", arguments, timeout: 10).combinedTrimmed
+        return output.isEmpty ? "unset" : output
+    }
+
+    private static func pmsetValue(_ key: String, in text: String) -> String {
+        for line in text.components(separatedBy: .newlines) where line.contains(key) {
+            let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            if let value = tokens.last {
+                return value
+            }
+        }
+        return "unknown"
+    }
+
+    private static func runChecked(_ executable: String, _ arguments: [String]) throws {
+        let output = ProcessRunner.run(executable, arguments, timeout: 20)
+        guard output.exitCode == 0 else {
+            throw HostError.badRequest(Redactor.redact(output.combinedTrimmed))
+        }
+    }
+
+    private static func runAsAdmin(_ shellScript: String) throws {
+        let script = "do shell script \(appleScriptQuoted(shellScript)) with administrator privileges"
+        let output = ProcessRunner.run("/usr/bin/osascript", ["-e", script], timeout: 120)
+        guard output.exitCode == 0 else {
+            throw HostError.badRequest(Redactor.redact(output.combinedTrimmed))
+        }
+    }
+}
+
+struct MemoryFileRecord: Codable, Identifiable {
+    var id: String
+    var title: String
+    var kind: String
+    var path: String
+    var relativePath: String
+    var updatedAt: Date?
+    var bytes: Int
+    var isEditable: Bool
+}
+
+struct MemoryListResponse: Codable {
+    var files: [MemoryFileRecord]
+}
+
+struct MemoryFileRequest: Codable {
+    var id: String
+}
+
+struct MemoryWriteRequest: Codable {
+    var id: String
+    var content: String
+}
+
+struct MemoryFileContentResponse: Codable {
+    var file: MemoryFileRecord
+    var content: String
+}
+
+struct MemoryDiffResponse: Codable {
+    var id: String
+    var diff: String
+    var hasChanges: Bool
+}
+
+struct MemoryWriteResponse: Codable {
+    var file: MemoryFileRecord
+    var diff: String
+    var hasChanges: Bool
+}
+
+struct HermesMemoryStore {
+    private let memoriesFolder = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".hermes/memories", isDirectory: true)
+    private let skillsFolder = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".hermes/skills", isDirectory: true)
+    private let maxReadableBytes = 1_048_576
+
+    func list() throws -> MemoryListResponse {
+        var files = [
+            record(id: "user", kind: "user", title: "USER.md", url: userURL, relativePath: "~/.hermes/memories/USER.md", isEditable: true),
+            record(id: "memory", kind: "memory", title: "MEMORY.md", url: memoryURL, relativePath: "~/.hermes/memories/MEMORY.md", isEditable: true)
+        ]
+        files.append(contentsOf: skillRecords())
+        return MemoryListResponse(files: files)
+    }
+
+    func read(id: String) throws -> MemoryFileContentResponse {
+        let file = try fileRecord(for: id)
+        guard file.bytes <= maxReadableBytes else {
+            throw HostError.badRequest("Memory file is too large to edit safely.")
+        }
+        let url = try url(for: id)
+        let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        return MemoryFileContentResponse(file: file, content: content)
+    }
+
+    func diff(id: String, proposedContent: String) throws -> MemoryDiffResponse {
+        let file = try fileRecord(for: id)
+        let current = (try? String(contentsOf: try url(for: id), encoding: .utf8)) ?? ""
+        let diffText = try unifiedDiff(original: current, proposed: proposedContent, label: file.relativePath)
+        return MemoryDiffResponse(id: id, diff: diffText, hasChanges: current != proposedContent)
+    }
+
+    func write(id: String, content: String) throws -> MemoryWriteResponse {
+        let existing = try fileRecord(for: id)
+        guard existing.isEditable else {
+            throw HostError.badRequest("This memory file is read-only.")
+        }
+        let diffResponse = try diff(id: id, proposedContent: content)
+        let destination = try url(for: id)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(content.utf8).write(to: destination, options: .atomic)
+        let updated = try fileRecord(for: id)
+        return MemoryWriteResponse(file: updated, diff: diffResponse.diff, hasChanges: diffResponse.hasChanges)
+    }
+
+    private var userURL: URL {
+        memoriesFolder.appendingPathComponent("USER.md")
+    }
+
+    private var memoryURL: URL {
+        memoriesFolder.appendingPathComponent("MEMORY.md")
+    }
+
+    private func skillRecords() -> [MemoryFileRecord] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: skillsFolder,
+            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return []
+        }
+        var records: [MemoryFileRecord] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension.lowercased() == "md",
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
+                  let relative = relativeSkillPath(for: url) else {
+                continue
+            }
+            records.append(record(
+                id: "skill:\(relative)",
+                kind: "skill",
+                title: url.lastPathComponent,
+                url: url,
+                relativePath: "~/.hermes/skills/\(relative)",
+                isEditable: true
+            ))
+        }
+        return records.sorted { $0.relativePath < $1.relativePath }
+    }
+
+    private func fileRecord(for id: String) throws -> MemoryFileRecord {
+        switch id {
+        case "user":
+            return record(id: id, kind: "user", title: "USER.md", url: userURL, relativePath: "~/.hermes/memories/USER.md", isEditable: true)
+        case "memory":
+            return record(id: id, kind: "memory", title: "MEMORY.md", url: memoryURL, relativePath: "~/.hermes/memories/MEMORY.md", isEditable: true)
+        default:
+            guard id.hasPrefix("skill:") else {
+                throw HostError.notFound("Unknown memory file")
+            }
+            let relative = String(id.dropFirst("skill:".count))
+            let url = try skillURL(relativePath: relative)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw HostError.notFound("Skill memory file not found")
+            }
+            return record(id: id, kind: "skill", title: url.lastPathComponent, url: url, relativePath: "~/.hermes/skills/\(relative)", isEditable: true)
+        }
+    }
+
+    private func url(for id: String) throws -> URL {
+        switch id {
+        case "user":
+            return userURL
+        case "memory":
+            return memoryURL
+        default:
+            guard id.hasPrefix("skill:") else {
+                throw HostError.notFound("Unknown memory file")
+            }
+            return try skillURL(relativePath: String(id.dropFirst("skill:".count)))
+        }
+    }
+
+    private func skillURL(relativePath: String) throws -> URL {
+        guard !relativePath.isEmpty,
+              !relativePath.hasPrefix("/"),
+              relativePath.pathExtensionLowercased == "md",
+              !relativePath.split(separator: "/").contains("..") else {
+            throw HostError.badRequest("Invalid skill memory path")
+        }
+        let url = skillsFolder.appendingPathComponent(relativePath)
+        let standardized = url.standardizedFileURL.path
+        guard standardized.hasPrefix(skillsFolder.standardizedFileURL.path + "/") else {
+            throw HostError.badRequest("Skill path escapes ~/.hermes/skills")
+        }
+        return url
+    }
+
+    private func record(id: String, kind: String, title: String, url: URL, relativePath: String, isEditable: Bool) -> MemoryFileRecord {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        return MemoryFileRecord(
+            id: id,
+            title: title,
+            kind: kind,
+            path: url.path,
+            relativePath: relativePath,
+            updatedAt: values?.contentModificationDate,
+            bytes: values?.fileSize ?? 0,
+            isEditable: isEditable
+        )
+    }
+
+    private func relativeSkillPath(for url: URL) -> String? {
+        let base = skillsFolder.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix(base + "/") else { return nil }
+        return String(path.dropFirst(base.count + 1))
+    }
+
+    private func unifiedDiff(original: String, proposed: String, label: String) throws -> String {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VeqralMemoryDiff-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let before = folder.appendingPathComponent("before.md")
+        let after = folder.appendingPathComponent("after.md")
+        try Data(original.utf8).write(to: before, options: .atomic)
+        try Data(proposed.utf8).write(to: after, options: .atomic)
+        let output = ProcessRunner.run("/usr/bin/diff", ["-u", before.path, after.path], timeout: 20)
+        if output.exitCode > 1 {
+            throw HostError.badRequest(output.combinedTrimmed)
+        }
+        var lines = output.stdout.components(separatedBy: .newlines)
+        if lines.indices.contains(0) {
+            lines[0] = "--- \(label)"
+        }
+        if lines.indices.contains(1) {
+            lines[1] = "+++ \(label) (proposed)"
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+struct ProcessOutput {
+    var exitCode: Int32
+    var stdout: String
+    var stderr: String
+
+    var combinedTrimmed: String {
+        [stdout, stderr]
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+enum ProcessRunner {
+    static func run(_ executable: String, _ arguments: [String], timeout: TimeInterval = 30) -> ProcessOutput {
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            return ProcessOutput(exitCode: 127, stdout: "", stderr: error.localizedDescription)
+        }
+
+        let stdoutFD = stdout.fileHandleForReading.fileDescriptor
+        let stderrFD = stderr.fileHandleForReading.fileDescriptor
+        setNonBlocking(stdoutFD)
+        setNonBlocking(stderrFD)
+        var stdoutData = Data()
+        var stderrData = Data()
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning {
+            readAvailable(from: stdoutFD, into: &stdoutData)
+            readAvailable(from: stderrFD, into: &stderrData)
+            if Date() >= deadline {
+                process.terminate()
+                Thread.sleep(forTimeInterval: 0.2)
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        process.waitUntilExit()
+        readAvailable(from: stdoutFD, into: &stdoutData)
+        readAvailable(from: stderrFD, into: &stderrData)
+        return ProcessOutput(
+            exitCode: process.terminationStatus,
+            stdout: String(data: stdoutData, encoding: .utf8) ?? "",
+            stderr: String(data: stderrData, encoding: .utf8) ?? ""
+        )
+    }
+
+    private static func setNonBlocking(_ fd: Int32) {
+        let flags = fcntl(fd, F_GETFL, 0)
+        if flags >= 0 {
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        }
+    }
+
+    private static func readAvailable(from fd: Int32, into data: inout Data) {
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let readCount = Darwin.read(fd, &buffer, buffer.count)
+            if readCount > 0 {
+                data.append(buffer, count: readCount)
+            } else {
+                break
+            }
+        }
     }
 }
 
@@ -1245,9 +1851,21 @@ private func localHostName() -> String {
     ProcessInfo.processInfo.hostName
 }
 
+private func shellQuoted(_ value: String) -> String {
+    "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+}
+
+private func appleScriptQuoted(_ value: String) -> String {
+    "\"\(value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
+}
+
 private extension String {
     var expandingTilde: String {
         NSString(string: self).expandingTildeInPath
+    }
+
+    var pathExtensionLowercased: String {
+        NSString(string: self).pathExtension.lowercased()
     }
 
     var urlQueryEscaped: String {
