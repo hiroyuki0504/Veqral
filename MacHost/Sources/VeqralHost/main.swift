@@ -206,8 +206,19 @@ actor HostState {
         devices
     }
 
+    func runsList() -> [HostRun] {
+        runs.values.sorted { $0.startedAt > $1.startedAt }
+    }
+
     func recordAudit(_ line: String) {
         appendAudit(line)
+    }
+
+    func auditLines(limit: Int = 200) -> [String] {
+        guard let text = try? String(contentsOf: Self.auditURL, encoding: .utf8) else {
+            return []
+        }
+        return Array(text.split(whereSeparator: \.isNewline).suffix(limit)).map(String.init)
     }
 
     func recoverableRunIDs() -> [String] {
@@ -611,11 +622,52 @@ final class HostServer: @unchecked Sendable {
                 return
             }
 
+            if request.path == "/v1/devices", request.method == "GET" {
+                sendJSON(DeviceListResponse(devices: await state.devicesList()), connection: connection)
+                return
+            }
+
+            if request.path.hasPrefix("/v1/devices/"), request.path.hasSuffix("/revoke"), request.method == "POST" {
+                let parts = request.path.split(separator: "/").map(String.init)
+                guard parts.count == 4 else { throw HostError.notFound("Invalid device path") }
+                await state.revoke(deviceID: parts[2])
+                sendJSON(SimpleResponse(ok: true), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/audit", request.method == "GET" {
+                sendJSON(AuditLogResponse(lines: await state.auditLines()), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/github/status", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(GitHubStatusRequest.self, from: request.body)
+                sendJSON(GitHubInspector.status(workingDirectory: body.workingDirectory), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/github/draft-pr", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(CreateDraftPRRequest.self, from: request.body)
+                let response = try GitHubInspector.createDraftPR(
+                    workingDirectory: body.workingDirectory,
+                    title: body.title,
+                    body: body.body
+                )
+                await state.recordAudit("github draft-pr url=\(response.url)")
+                sendJSON(response, connection: connection)
+                return
+            }
+
             if request.headers["upgrade"]?.lowercased() == "websocket",
                request.path.hasPrefix("/v1/runs/"),
                request.path.hasSuffix("/events") {
                 await state.recordAudit("websocket upgrade path=\(request.path)")
                 try await upgradeToWebSocket(request, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/runs", request.method == "GET" {
+                sendJSON(RunListResponse(runs: await state.runsList()), connection: connection)
                 return
             }
 
@@ -640,10 +692,32 @@ final class HostServer: @unchecked Sendable {
 
             if request.path.hasPrefix("/v1/runs/") {
                 let parts = request.path.split(separator: "/").map(String.init)
-                guard parts.count >= 4 else { throw HostError.notFound("Invalid run path") }
+                guard parts.count >= 3 else { throw HostError.notFound("Invalid run path") }
                 let runID = parts[2]
+                if request.method == "GET", parts.count == 3 {
+                    guard let run = await state.run(runID: runID) else { throw HostError.notFound("Run not found") }
+                    sendJSON(
+                        RunSnapshotResponse(
+                            run: run,
+                            logs: await state.replayLogs(runID: runID),
+                            diff: GitDiffInspector.entries(workingDirectory: run.workingDirectory),
+                            artifacts: ArtifactScanner.artifacts(for: run)
+                        ),
+                        connection: connection
+                    )
+                    return
+                }
+                guard parts.count >= 4 else { throw HostError.notFound("Invalid run path") }
                 let action = parts[3]
                 switch (request.method, action) {
+                case ("GET", "logs"):
+                    sendJSON(RunLogResponse(logs: await state.replayLogs(runID: runID)), connection: connection)
+                case ("GET", "diff"):
+                    guard let run = await state.run(runID: runID) else { throw HostError.notFound("Run not found") }
+                    sendJSON(GitDiffResponse(files: GitDiffInspector.entries(workingDirectory: run.workingDirectory)), connection: connection)
+                case ("GET", "artifacts"):
+                    guard let run = await state.run(runID: runID) else { throw HostError.notFound("Run not found") }
+                    sendJSON(ArtifactListResponse(artifacts: ArtifactScanner.artifacts(for: run)), connection: connection)
                 case ("POST", "cancel"):
                     await state.cancel(runID: runID)
                     sendJSON(SimpleResponse(ok: true), connection: connection)
@@ -976,6 +1050,10 @@ final class StatusController {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Unattended Remote Setup...", action: #selector(showUnattendedSetup), keyEquivalent: "u"))
         menu.items.last?.target = self
+        menu.addItem(NSMenuItem(title: "Install Login Agent", action: #selector(installLoginAgent), keyEquivalent: "i"))
+        menu.items.last?.target = self
+        menu.addItem(NSMenuItem(title: "Remove Login Agent", action: #selector(removeLoginAgent), keyEquivalent: ""))
+        menu.items.last?.target = self
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         item.menu = menu
@@ -1018,6 +1096,24 @@ final class StatusController {
                 NSApp.activate(ignoringOtherApps: true)
                 self.window = window
             }
+        }
+    }
+
+    @objc private func installLoginAgent() {
+        do {
+            try LaunchAgentManager.install()
+            setStatus("Login agent installed")
+        } catch {
+            setStatus("Login agent failed")
+        }
+    }
+
+    @objc private func removeLoginAgent() {
+        do {
+            try LaunchAgentManager.remove()
+            setStatus("Login agent removed")
+        } catch {
+            setStatus("Login agent remove failed")
         }
     }
 
@@ -1167,6 +1263,195 @@ enum QRCode {
         let image = NSImage(size: rep.size)
         image.addRepresentation(rep)
         return image
+    }
+}
+
+enum LaunchAgentManager {
+    private static let label = "dev.hiroyuki.veqral.host"
+
+    private static var plistURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(label).plist")
+    }
+
+    static func install() throws {
+        guard let executable = ProcessInfo.processInfo.arguments.first else {
+            throw HostError.badRequest("Cannot resolve current host executable path.")
+        }
+        let logFolder = HostConfig.folder.appendingPathComponent("launchd", isDirectory: true)
+        try FileManager.default.createDirectory(at: logFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let plist: [String: Any] = [
+            "Label": label,
+            "ProgramArguments": [executable],
+            "RunAtLoad": true,
+            "KeepAlive": true,
+            "StandardOutPath": logFolder.appendingPathComponent("stdout.log").path,
+            "StandardErrorPath": logFolder.appendingPathComponent("stderr.log").path,
+            "WorkingDirectory": FileManager.default.currentDirectoryPath,
+            "EnvironmentVariables": [
+                "PATH": "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                "HOME": NSHomeDirectory(),
+                "LANG": "en_US.UTF-8"
+            ]
+        ]
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try data.write(to: plistURL, options: .atomic)
+        _ = ProcessRunner.run("/bin/launchctl", ["bootout", "gui/\(getuid())/\(label)"], timeout: 10)
+        let output = ProcessRunner.run("/bin/launchctl", ["bootstrap", "gui/\(getuid())", plistURL.path], timeout: 20)
+        guard output.exitCode == 0 else {
+            throw HostError.badRequest(output.combinedTrimmed)
+        }
+    }
+
+    static func remove() throws {
+        _ = ProcessRunner.run("/bin/launchctl", ["bootout", "gui/\(getuid())/\(label)"], timeout: 10)
+        if FileManager.default.fileExists(atPath: plistURL.path) {
+            try FileManager.default.removeItem(at: plistURL)
+        }
+    }
+}
+
+enum GitDiffInspector {
+    static func entries(workingDirectory: String) -> [GitDiffEntry] {
+        let output = runGit("git diff --numstat", workingDirectory: workingDirectory)
+        guard output.exitCode == 0 else { return [] }
+        return output.stdout
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line in
+                let parts = line.split(separator: "\t").map(String.init)
+                guard parts.count >= 3,
+                      let additions = Int(parts[0]),
+                      let deletions = Int(parts[1]) else {
+                    return nil
+                }
+                return GitDiffEntry(path: parts[2], additions: additions, deletions: deletions)
+            }
+    }
+
+    static func runGit(_ command: String, workingDirectory: String) -> ProcessOutput {
+        ProcessRunner.run(
+            "/bin/zsh",
+            ["-lc", "cd \(shellQuoted(workingDirectory.expandingTilde)) && \(command)"],
+            timeout: 30
+        )
+    }
+}
+
+enum ArtifactScanner {
+    static func artifacts(for run: HostRun) -> [HostArtifact] {
+        let root = URL(fileURLWithPath: run.workingDirectory.expandingTilde)
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return []
+        }
+        let extensions: Set<String> = ["png", "jpg", "jpeg", "gif", "pdf", "html", "htm", "json", "log", "txt", "md"]
+        var artifacts: [HostArtifact] = []
+        for case let url as URL in enumerator {
+            guard extensions.contains(url.pathExtension.lowercased()),
+                  (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else {
+                continue
+            }
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            if let updatedAt = values?.contentModificationDate, updatedAt < run.startedAt {
+                continue
+            }
+            artifacts.append(HostArtifact(
+                id: url.path,
+                title: url.lastPathComponent,
+                type: url.pathExtension.lowercased(),
+                path: url.path,
+                bytes: values?.fileSize ?? 0,
+                updatedAt: values?.contentModificationDate
+            ))
+        }
+        return artifacts.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }.prefix(50).map { $0 }
+    }
+}
+
+enum GitHubInspector {
+    static func status(workingDirectory: String) -> GitHubStatusResponse {
+        let directory = workingDirectory.expandingTilde
+        let root = firstLine(shell("git rev-parse --show-toplevel", in: directory))
+        guard !root.isEmpty else {
+            return GitHubStatusResponse(
+                workingDirectory: directory,
+                gitRoot: "",
+                branch: "",
+                remote: "",
+                changedFiles: 0,
+                aheadBehind: "",
+                ghAuthenticated: false,
+                pullRequestURL: "",
+                pullRequestState: "No repository",
+                checksSummary: "No checks",
+                error: "Not a Git repository"
+            )
+        }
+        let branch = firstLine(shell("git branch --show-current", in: root))
+        let remote = firstLine(shell("git remote get-url origin", in: root))
+        let status = shell("git status --porcelain", in: root)
+        let upstream = shell("git rev-list --left-right --count @{upstream}...HEAD 2>/dev/null", in: root)
+        let auth = shell("gh auth status -h github.com >/dev/null 2>&1 && echo yes || echo no", in: root)
+        let prJSON = shell("gh pr view --json url,state,statusCheckRollup 2>/dev/null || true", in: root)
+        let pr = parsePR(prJSON.stdout)
+        return GitHubStatusResponse(
+            workingDirectory: directory,
+            gitRoot: root,
+            branch: branch,
+            remote: remote,
+            changedFiles: status.stdout.split(whereSeparator: \.isNewline).count,
+            aheadBehind: firstLine(upstream),
+            ghAuthenticated: firstLine(auth).lowercased() == "yes",
+            pullRequestURL: pr.url,
+            pullRequestState: pr.state,
+            checksSummary: pr.checks,
+            error: status.exitCode == 0 ? nil : status.combinedTrimmed
+        )
+    }
+
+    static func createDraftPR(workingDirectory: String, title: String, body: String) throws -> CreateDraftPRResponse {
+        let directory = workingDirectory.expandingTilde
+        let titleArg = title.isEmpty ? "--fill" : "--title \(shellQuoted(title))"
+        let bodyArg = body.isEmpty ? "" : "--body \(shellQuoted(body))"
+        let output = shell("gh pr create --draft \(titleArg) \(bodyArg)", in: directory, timeout: 60)
+        guard output.exitCode == 0 else {
+            throw HostError.badRequest(Redactor.redact(output.combinedTrimmed))
+        }
+        return CreateDraftPRResponse(ok: true, url: firstLine(output))
+    }
+
+    private static func shell(_ command: String, in directory: String, timeout: TimeInterval = 30) -> ProcessOutput {
+        ProcessRunner.run("/bin/zsh", ["-lc", "cd \(shellQuoted(directory)) && \(command)"], timeout: timeout)
+    }
+
+    private static func firstLine(_ output: ProcessOutput) -> String {
+        firstLine(output.stdout)
+    }
+
+    private static func firstLine(_ text: String) -> String {
+        text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+    }
+
+    private static func parsePR(_ text: String) -> (url: String, state: String, checks: String) {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ("", "Not opened", "No checks")
+        }
+        let url = object["url"] as? String ?? ""
+        let state = object["state"] as? String ?? (url.isEmpty ? "Not opened" : "Unknown")
+        let checks = object["statusCheckRollup"] as? [[String: Any]] ?? []
+        if checks.isEmpty {
+            return (url, state, "No checks")
+        }
+        let failed = checks.filter { ($0["conclusion"] as? String)?.lowercased() == "failure" }.count
+        let pending = checks.filter { ($0["status"] as? String)?.lowercased() != "completed" }.count
+        if failed > 0 { return (url, state, "\(failed) failing") }
+        if pending > 0 { return (url, state, "\(pending) pending") }
+        return (url, state, "\(checks.count) passing")
     }
 }
 
@@ -1671,6 +1956,81 @@ struct CreateRunResponse: Codable {
     var status: String
     var approvalRequired: Bool
     var approvalReason: String?
+}
+
+struct RunListResponse: Codable {
+    var runs: [HostRun]
+}
+
+struct RunLogResponse: Codable {
+    var logs: [HostLogEvent]
+}
+
+struct RunSnapshotResponse: Codable {
+    var run: HostRun
+    var logs: [HostLogEvent]
+    var diff: [GitDiffEntry]
+    var artifacts: [HostArtifact]
+}
+
+struct DeviceListResponse: Codable {
+    var devices: [DeviceRecord]
+}
+
+struct AuditLogResponse: Codable {
+    var lines: [String]
+}
+
+struct GitDiffEntry: Codable {
+    var path: String
+    var additions: Int
+    var deletions: Int
+}
+
+struct GitDiffResponse: Codable {
+    var files: [GitDiffEntry]
+}
+
+struct HostArtifact: Codable, Identifiable {
+    var id: String
+    var title: String
+    var type: String
+    var path: String
+    var bytes: Int
+    var updatedAt: Date?
+}
+
+struct ArtifactListResponse: Codable {
+    var artifacts: [HostArtifact]
+}
+
+struct GitHubStatusRequest: Codable {
+    var workingDirectory: String
+}
+
+struct GitHubStatusResponse: Codable {
+    var workingDirectory: String
+    var gitRoot: String
+    var branch: String
+    var remote: String
+    var changedFiles: Int
+    var aheadBehind: String
+    var ghAuthenticated: Bool
+    var pullRequestURL: String
+    var pullRequestState: String
+    var checksSummary: String
+    var error: String?
+}
+
+struct CreateDraftPRRequest: Codable {
+    var workingDirectory: String
+    var title: String
+    var body: String
+}
+
+struct CreateDraftPRResponse: Codable {
+    var ok: Bool
+    var url: String
 }
 
 struct SimpleResponse: Codable {
