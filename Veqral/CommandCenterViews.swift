@@ -235,16 +235,15 @@ struct CommandCenterInspectorView: View {
                     InspectorLinkedRow(
                         symbol: "doc.badge.gearshape",
                         title: "\(store.workspace.projectName) Pack",
-                        detail: "\(MockData.contextPackage.count) items - \(store.workspace.branchLabel)"
+                        detail: "\(ContextPackage.items.count) items - \(store.workspace.branchLabel)"
                     )
                 }
 
                 InspectorPanel(title: "Assigned Agent") {
                     VStack(spacing: 8) {
-                        InspectorAgentRow(color: .blue, title: "PM", detail: "Product Manager", status: VQTheme.green)
-                        InspectorAgentRow(color: VQTheme.violet, title: "Architect", detail: "System Architect", status: VQTheme.green)
-                        InspectorAgentRow(color: VQTheme.amber, title: "Reviewer", detail: "Code Reviewer", status: VQTheme.amber)
-                        InspectorAgentRow(color: VQTheme.ink, title: "Codex", detail: "Implementer", status: VQTheme.accent)
+                        InspectorAgentRow(color: VQTheme.accent, title: "Hermes", detail: store.remoteHost.isPaired ? "Mac Host runtime" : "Pairing required", status: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber)
+                        InspectorAgentRow(color: VQTheme.ink, title: "Codex CLI", detail: "Configured through Hermes", status: store.remoteHost.isPaired ? VQTheme.accent : VQTheme.secondaryText)
+                        InspectorAgentRow(color: VQTheme.green, title: "Context", detail: "\(ContextPackage.items.count) package items", status: VQTheme.green)
                     }
                 }
 
@@ -321,10 +320,10 @@ struct CommandCenterPhoneDashboard: View {
                     }
                 }
 
-                PhoneSectionHeader(title: "Devices", count: nil, trailing: "All Healthy")
+                PhoneSectionHeader(title: "Devices", count: nil, trailing: store.remoteHost.isPaired ? "Connected" : "Pair Host")
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                    PhoneDeviceCard(name: store.workspace.deviceName, detail: store.workspace.hostName)
-                    PhoneDeviceCard(name: store.workspace.projectName, detail: store.workspace.statusSummary)
+                    PhoneDeviceCard(name: store.remoteHost.name.isEmpty ? store.workspace.deviceName : store.remoteHost.name, detail: store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : "Not paired", isOnline: store.remoteHost.isPaired)
+                    PhoneDeviceCard(name: store.workspace.projectName, detail: store.workspace.statusSummary, isOnline: store.workspace.errorMessage == nil)
                 }
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
@@ -619,6 +618,8 @@ private struct CommandSubmitPanel: View {
                 .font(.caption)
                 .foregroundStyle(VQTheme.secondaryText)
             #endif
+
+            CommandAttachmentControls()
         }
         .padding(12)
         .commandPanel()
@@ -668,7 +669,7 @@ private struct RunWorkSurface: View {
             let useColumns = geometry.size.width > 610
             Group {
                 if selectedSurface == .preview {
-                    PreviewPlaceholder()
+                    PreviewEmptyState()
                 } else if selectedSurface == .diff {
                     DiffListPanel(diffs: diffs)
                 } else {
@@ -793,7 +794,7 @@ private struct DiffListPanel: View {
     }
 }
 
-private struct PreviewPlaceholder: View {
+private struct PreviewEmptyState: View {
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "safari")
@@ -1136,6 +1137,8 @@ private struct PhoneComposer: View {
                 CommandChip(title: "", symbol: "ellipsis")
                 Spacer()
             }
+
+            CommandAttachmentControls()
         }
         .padding(8)
         .commandPanel()
@@ -1233,6 +1236,7 @@ private struct CompactGuardrailStrip: View {
 private struct PhoneDeviceCard: View {
     let name: String
     let detail: String
+    let isOnline: Bool
 
     var body: some View {
         HStack(spacing: 9) {
@@ -1246,9 +1250,9 @@ private struct PhoneDeviceCard: View {
                 Text(detail)
                     .font(.caption2)
                     .foregroundStyle(VQTheme.secondaryText)
-                Label("Online", systemImage: "circle.fill")
+                Label(isOnline ? "Online" : "Offline", systemImage: "circle.fill")
                     .font(.caption2)
-                    .foregroundStyle(VQTheme.green)
+                    .foregroundStyle(isOnline ? VQTheme.green : VQTheme.amber)
             }
             Spacer()
         }
@@ -1258,6 +1262,8 @@ private struct PhoneDeviceCard: View {
 }
 
 private struct PhoneArtifactsPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -1269,32 +1275,26 @@ private struct PhoneArtifactsPanel: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(VQTheme.accent)
             }
-            ForEach(MockData.artifacts.prefix(2)) { artifact in
+            if store.remoteArtifacts.isEmpty {
+                Text("No artifacts yet")
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+            }
+            ForEach(store.remoteArtifacts.prefix(2)) { artifact in
                 HStack {
-                    Image(systemName: artifact.symbol)
+                    Image(systemName: artifact.type.lowercased().contains("image") || ["png", "jpg", "jpeg"].contains(artifact.type.lowercased()) ? "photo" : "shippingbox")
                         .foregroundStyle(VQTheme.accent)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(artifact.title)
                             .font(.caption2.weight(.semibold))
                             .lineLimit(1)
-                        Text("2分前")
+                        Text(artifact.type)
                             .font(.caption2)
                             .foregroundStyle(VQTheme.secondaryText)
                     }
                     Spacer()
                 }
             }
-            Rectangle()
-                .fill(VQTheme.control)
-                .frame(height: 40)
-                .overlay {
-                    HStack(spacing: 4) {
-                        Image(systemName: "terminal")
-                        Image(systemName: "doc.text.image")
-                        Image(systemName: "chart.bar")
-                    }
-                    .foregroundStyle(VQTheme.secondaryText)
-                }
         }
         .padding(10)
         .commandPanel()

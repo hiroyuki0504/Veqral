@@ -216,6 +216,8 @@ private func sectionDestination(_ section: AppSection) -> some View {
         DiffView()
     case .artifacts:
         ArtifactsView()
+    case .history:
+        HistoryView()
     case .approvals:
         ApprovalsView()
     case .memory:
