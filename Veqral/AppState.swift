@@ -113,6 +113,18 @@ struct CommandDiffEntry: Identifiable, Codable, Equatable {
     var deletions: Int
 }
 
+struct CommandAttachment: Identifiable, Codable, Equatable, Sendable {
+    var id: UUID
+    var fileName: String
+    var mimeType: String
+    var data: Data
+    var createdAt: Date
+
+    var byteCount: Int {
+        data.count
+    }
+}
+
 struct WorkspaceSnapshot: Codable, Equatable, Sendable {
     var projectName: String
     var rootPath: String
@@ -159,7 +171,7 @@ struct WorkspaceSnapshot: Codable, Equatable, Sendable {
         return "http://\(host):7878"
     }
 
-    static func placeholder(workingDirectory: String) -> WorkspaceSnapshot {
+    static func empty(workingDirectory: String) -> WorkspaceSnapshot {
         let expanded = NSString(string: workingDirectory).expandingTildeInPath
         let name = URL(fileURLWithPath: expanded).lastPathComponent
         return WorkspaceSnapshot(
@@ -182,7 +194,7 @@ struct WorkspaceSnapshot: Codable, Equatable, Sendable {
     }
 
     static func unavailable(workingDirectory: String, message: String) -> WorkspaceSnapshot {
-        var snapshot = placeholder(workingDirectory: workingDirectory)
+        var snapshot = empty(workingDirectory: workingDirectory)
         snapshot.statusSummary = "Unavailable"
         snapshot.errorMessage = message
         return snapshot
@@ -229,6 +241,13 @@ struct RemoteCreateRunResponse: Codable, Sendable {
     var status: String
     var approvalRequired: Bool?
     var approvalReason: String?
+}
+
+struct RemoteRunAttachment: Codable, Sendable {
+    var id: UUID
+    var fileName: String
+    var mimeType: String
+    var data: Data
 }
 
 struct RemoteSimpleResponse: Codable, Sendable {
@@ -372,6 +391,60 @@ struct RemoteMemoryWriteResponse: Codable, Sendable {
     var hasChanges: Bool
 }
 
+enum RemoteHistoryTool: String, Codable, CaseIterable, Identifiable, Sendable {
+    case claude
+    case codex
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .claude:
+            "Claude"
+        case .codex:
+            "Codex"
+        }
+    }
+}
+
+struct RemoteHistorySession: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var tool: RemoteHistoryTool
+    var project: String
+    var projectPath: String
+    var startedAt: Date?
+    var updatedAt: Date?
+    var messageCount: Int
+    var model: String?
+    var summary: String
+    var filePath: String
+    var bytes: Int
+}
+
+struct RemoteHistoryListResponse: Codable, Sendable {
+    var sessions: [RemoteHistorySession]
+    var total: Int
+    var page: Int
+    var limit: Int
+    var projects: [String]
+    var tools: [RemoteHistoryTool]
+}
+
+struct RemoteHistoryTurn: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var role: String
+    var kind: String
+    var timestamp: Date?
+    var text: String
+    var metadata: String?
+}
+
+struct RemoteHistoryDetailResponse: Codable, Sendable {
+    var session: RemoteHistorySession
+    var turns: [RemoteHistoryTurn]
+    var truncated: Bool
+}
+
 @MainActor
 final class CommandCenterStore: ObservableObject {
     @Published var runs: [CommandRun]
@@ -406,7 +479,16 @@ final class CommandCenterStore: ObservableObject {
     @Published var remoteAuditLines: [String] = []
     @Published var remoteGitHubStatus: RemoteGitHubStatus = .empty
     @Published var remoteArtifacts: [RemoteArtifactRecord] = []
+    @Published var remoteHistorySessions: [RemoteHistorySession] = []
+    @Published var remoteHistoryProjects: [String] = []
+    @Published var selectedHistorySession: RemoteHistorySession?
+    @Published var remoteHistoryTurns: [RemoteHistoryTurn] = []
+    @Published var remoteHistoryTotal: Int = 0
+    @Published var remoteHistoryMessage: String = ""
+    @Published var isLoadingRemoteHistory = false
     @Published var isRefreshingRemoteHost = false
+    @Published var pendingAttachments: [CommandAttachment] = []
+    @Published var attachmentMessage: String = ""
     @Published var workingDirectory: String {
         didSet {
             guard isReadyForAutosave, oldValue != workingDirectory else { return }
@@ -451,28 +533,32 @@ final class CommandCenterStore: ObservableObject {
         selectedRuntime = LocalCommandExecutor.defaultRuntime()
         remoteHost = .empty
         remoteRunIDs = [:]
-        workspace = WorkspaceSnapshot.placeholder(workingDirectory: defaultWorkingDirectory)
+        workspace = WorkspaceSnapshot.empty(workingDirectory: defaultWorkingDirectory)
 
         if let snapshot = Self.loadSnapshot(from: persistenceURL) {
-            runs = snapshot.runs
-            approvals = Self.sanitizedApprovals(snapshot.approvals)
-            logs = snapshot.logs
-            diffs = snapshot.diffs
-            selectedRunID = snapshot.selectedRunID ?? snapshot.runs.first?.id
+            let cleaned = Self.productionCleanedSnapshot(snapshot)
+            runs = cleaned.runs
+            approvals = Self.sanitizedApprovals(cleaned.approvals)
+            logs = cleaned.logs
+            diffs = cleaned.diffs
+            selectedRunID = cleaned.selectedRunID ?? cleaned.runs.first?.id
             workingDirectory = snapshot.workingDirectory
-            selectedRuntime = snapshot.selectedRuntime ?? selectedRuntime
-            remoteHost = Self.hydrateRemoteHost(snapshot.remoteHost ?? .empty)
-            remoteRunIDs = snapshot.remoteRunIDs ?? [:]
+            selectedRuntime = cleaned.selectedRuntime ?? selectedRuntime
+            remoteHost = Self.hydrateRemoteHost(cleaned.remoteHost ?? .empty)
+            remoteRunIDs = cleaned.remoteRunIDs ?? [:]
+            if cleaned.runs.count != snapshot.runs.count || cleaned.approvals.count != snapshot.approvals.count || cleaned.logs.count != snapshot.logs.count || cleaned.diffs.count != snapshot.diffs.count {
+                persist()
+            }
         } else {
-            let seed = Self.seedSnapshot(defaultWorkingDirectory: defaultWorkingDirectory)
-            runs = seed.runs
-            approvals = seed.approvals
-            logs = seed.logs
-            diffs = seed.diffs
-            selectedRunID = seed.selectedRunID
-            selectedRuntime = seed.selectedRuntime ?? selectedRuntime
-            remoteHost = seed.remoteHost ?? .empty
-            remoteRunIDs = seed.remoteRunIDs ?? [:]
+            let empty = Self.emptySnapshot(defaultWorkingDirectory: defaultWorkingDirectory)
+            runs = empty.runs
+            approvals = empty.approvals
+            logs = empty.logs
+            diffs = empty.diffs
+            selectedRunID = empty.selectedRunID
+            selectedRuntime = empty.selectedRuntime ?? selectedRuntime
+            remoteHost = empty.remoteHost ?? .empty
+            remoteRunIDs = empty.remoteRunIDs ?? [:]
             persist()
         }
         isReadyForAutosave = true
@@ -494,8 +580,13 @@ final class CommandCenterStore: ObservableObject {
         submitCommand(trimmed)
     }
 
-    func submitCommand(_ command: String, runtime: CommandRuntime? = nil) {
+    func submitCommand(_ command: String, runtime: CommandRuntime? = nil, attachments explicitAttachments: [CommandAttachment]? = nil) {
         let runtime = runtime ?? selectedRuntime
+        let attachments = explicitAttachments ?? pendingAttachments
+        if explicitAttachments == nil {
+            pendingAttachments = []
+            attachmentMessage = ""
+        }
         let remoteWillClassifyRisk = remoteHost.isEnabled && remoteHost.isPaired
         let risky = remoteWillClassifyRisk ? nil : (runtime == .hermesAgent ? hermesRiskDescription(for: command) : riskDescription(for: command))
         let run = CommandRun(
@@ -516,6 +607,9 @@ final class CommandCenterStore: ObservableObject {
         runs.insert(run, at: 0)
         selectedRunID = run.id
         appendLog(runID: run.id, stream: "info", message: "\(runtime.title) request accepted: \(command)")
+        if !attachments.isEmpty {
+            appendLog(runID: run.id, stream: "attachment", message: "\(attachments.count) image attachment(s) queued.")
+        }
 
         if let risky {
             approvals.insert(
@@ -538,7 +632,30 @@ final class CommandCenterStore: ObservableObject {
         }
 
         persist()
-        executeIfAvailable(run)
+        executeIfAvailable(run, attachments: attachments)
+    }
+
+    func addImageAttachment(data: Data, fileExtension: String = "jpg", mimeType: String = "image/jpeg") {
+        let safeExtension = fileExtension.trimmingCharacters(in: CharacterSet(charactersIn: ".")).isEmpty ? "jpg" : fileExtension.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let attachment = CommandAttachment(
+            id: UUID(),
+            fileName: "veqral-\(Self.attachmentTimestamp()).\(safeExtension.lowercased())",
+            mimeType: mimeType,
+            data: data,
+            createdAt: Date()
+        )
+        pendingAttachments.append(attachment)
+        attachmentMessage = "\(pendingAttachments.count) attachment(s) ready for the next run."
+    }
+
+    func removeAttachment(_ attachment: CommandAttachment) {
+        pendingAttachments.removeAll { $0.id == attachment.id }
+        attachmentMessage = pendingAttachments.isEmpty ? "" : "\(pendingAttachments.count) attachment(s) ready for the next run."
+    }
+
+    func clearAttachments() {
+        pendingAttachments = []
+        attachmentMessage = ""
     }
 
     func refreshWorkspace() {
@@ -630,7 +747,7 @@ final class CommandCenterStore: ObservableObject {
                 remoteHostMessage = "Mac Host online."
             } catch {
                 remoteHostHealth = nil
-                remoteHostMessage = "Mac Host offline: \(error.localizedDescription)"
+                remoteHostMessage = Self.remoteFailureMessage(error, context: "Mac Host")
             }
             isRefreshingRemoteHost = false
         }
@@ -649,7 +766,7 @@ final class CommandCenterStore: ObservableObject {
                 remoteGitHubStatus = try await RemoteHostClient(configuration: configuration).githubStatus(workingDirectory: directory)
                 remoteHostMessage = "GitHub status refreshed."
             } catch {
-                remoteHostMessage = "GitHub status failed: \(error.localizedDescription)"
+                remoteHostMessage = Self.remoteFailureMessage(error, context: "GitHub status")
             }
         }
     }
@@ -673,7 +790,7 @@ final class CommandCenterStore: ObservableObject {
                 remoteHostMessage = "Draft PR created: \(response.url)"
                 refreshGitHubStatus()
             } catch {
-                remoteHostMessage = "Draft PR failed: \(error.localizedDescription)"
+                remoteHostMessage = Self.remoteFailureMessage(error, context: "Draft PR")
             }
         }
     }
@@ -784,6 +901,69 @@ final class CommandCenterStore: ObservableObject {
         }
     }
 
+    func refreshRemoteHistory(
+        tool: RemoteHistoryTool? = nil,
+        project: String? = nil,
+        query: String? = nil,
+        date: String? = nil,
+        page: Int = 0
+    ) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            remoteHistoryMessage = "Mac Host pairing is required to load Claude/Codex history."
+            return
+        }
+        isLoadingRemoteHistory = true
+        remoteHistoryMessage = "Loading agent history..."
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).historySessions(
+                    tool: tool,
+                    project: project,
+                    query: query,
+                    date: date,
+                    page: page,
+                    limit: 50
+                )
+                remoteHistorySessions = response.sessions
+                remoteHistoryProjects = response.projects
+                remoteHistoryTotal = response.total
+                if let selectedHistorySession, !response.sessions.contains(where: { $0.id == selectedHistorySession.id }) {
+                    self.selectedHistorySession = response.sessions.first
+                    remoteHistoryTurns = []
+                } else if selectedHistorySession == nil {
+                    selectedHistorySession = response.sessions.first
+                }
+                remoteHistoryMessage = response.sessions.isEmpty ? "No Claude/Codex history found on Mac Host." : "\(response.total) sessions loaded."
+            } catch {
+                remoteHistoryMessage = Self.remoteFailureMessage(error, context: "History")
+            }
+            isLoadingRemoteHistory = false
+        }
+    }
+
+    func loadRemoteHistoryDetail(_ session: RemoteHistorySession) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            remoteHistoryMessage = "Mac Host pairing is required to load history detail."
+            return
+        }
+        selectedHistorySession = session
+        isLoadingRemoteHistory = true
+        remoteHistoryMessage = "Loading \(session.tool.title) session..."
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).historyDetail(id: session.id, tool: session.tool)
+                selectedHistorySession = response.session
+                remoteHistoryTurns = response.turns
+                remoteHistoryMessage = response.truncated ? "Session loaded. Some old events were truncated." : "Session loaded."
+            } catch {
+                remoteHistoryMessage = Self.remoteFailureMessage(error, context: "History detail")
+            }
+            isLoadingRemoteHistory = false
+        }
+    }
+
     func approve(_ approval: CommandApproval) {
         guard let index = approvals.firstIndex(where: { $0.id == approval.id }) else { return }
         approvals[index].status = .approved
@@ -862,13 +1042,13 @@ final class CommandCenterStore: ObservableObject {
         persist()
     }
 
-    func resetDemoData() {
-        let seed = Self.seedSnapshot(defaultWorkingDirectory: workingDirectory)
-        runs = seed.runs
-        approvals = seed.approvals
-        logs = seed.logs
-        diffs = seed.diffs
-        selectedRunID = seed.selectedRunID
+    func clearLocalHistory() {
+        runs = []
+        approvals = []
+        logs = []
+        diffs = []
+        selectedRunID = nil
+        remoteRunIDs = [:]
         persist()
     }
 
@@ -1000,9 +1180,9 @@ final class CommandCenterStore: ObservableObject {
         notify(title: "Veqral approval required", body: reason)
     }
 
-    private func executeIfAvailable(_ run: CommandRun) {
+    private func executeIfAvailable(_ run: CommandRun, attachments: [CommandAttachment] = []) {
         if remoteHost.isEnabled {
-            executeRemote(run)
+            executeRemote(run, attachments: attachments)
             return
         }
 
@@ -1029,7 +1209,7 @@ final class CommandCenterStore: ObservableObject {
         #endif
     }
 
-    private func executeRemote(_ run: CommandRun) {
+    private func executeRemote(_ run: CommandRun, attachments: [CommandAttachment]) {
         guard remoteHost.isPaired else {
             appendLog(runID: run.id, stream: "warn", message: "Remote Host is enabled but not paired.")
             if let index = runs.firstIndex(where: { $0.id == run.id }) {
@@ -1043,7 +1223,7 @@ final class CommandCenterStore: ObservableObject {
         let configuration = remoteHost
         Task {
             do {
-                let response = try await RemoteHostClient(configuration: configuration).createRun(prompt: run.command, workingDirectory: run.workingDirectory)
+                let response = try await RemoteHostClient(configuration: configuration).createRun(prompt: run.command, workingDirectory: run.workingDirectory, attachments: attachments)
                 remoteRunIDs[run.id.uuidString] = response.runID
                 if let index = runs.firstIndex(where: { $0.id == run.id }) {
                     runs[index].status = response.approvalRequired == true || response.status == "waitingApproval" ? .approval : .running
@@ -1097,7 +1277,9 @@ final class CommandCenterStore: ObservableObject {
                 notify(title: "Veqral approval required", body: message)
                 persist()
             } catch {
-                appendLog(runID: run.id, stream: "warn", message: "Remote run failed: \(error.localizedDescription)")
+                let message = Self.remoteFailureMessage(error, context: "Remote run")
+                remoteHostMessage = message
+                appendLog(runID: run.id, stream: "warn", message: message)
                 if let index = runs.firstIndex(where: { $0.id == run.id }) {
                     runs[index].status = .waiting
                     runs[index].progress = 0.10
@@ -1107,7 +1289,7 @@ final class CommandCenterStore: ObservableObject {
         }
     }
 
-    private func startRemoteStream(localRun run: CommandRun, remoteRunID: String) {
+    private func startRemoteStream(localRun run: CommandRun, remoteRunID: String, retryAttempts: Int = 2) {
         remoteStreamTasks[run.id]?.cancel()
         let configuration = remoteHost
         remoteStreamTasks[run.id] = Task {
@@ -1136,13 +1318,52 @@ final class CommandCenterStore: ObservableObject {
                     }
                 }
             } catch {
-                appendLog(runID: run.id, stream: "warn", message: "Remote stream disconnected: \(error.localizedDescription)")
+                let message = Self.remoteFailureMessage(error, context: "Remote stream")
+                remoteHostMessage = message
+                appendLog(runID: run.id, stream: "warn", message: message)
+                if !Self.isRemoteAuthenticationFailure(error), retryAttempts > 0 {
+                    appendLog(runID: run.id, stream: "info", message: "Reconnecting log stream...")
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    guard !Task.isCancelled else { return }
+                    startRemoteStream(localRun: run, remoteRunID: remoteRunID, retryAttempts: retryAttempts - 1)
+                    return
+                }
                 if let index = runs.firstIndex(where: { $0.id == run.id }), runs[index].status == .running {
                     runs[index].status = .waiting
                 }
                 persist()
             }
         }
+    }
+
+    private static func remoteFailureMessage(_ error: Error, context: String) -> String {
+        if isRemoteAuthenticationFailure(error) {
+            return "\(context) authentication failed. Pair this device with Mac Host again."
+        }
+
+        let message = error.localizedDescription
+        if message.localizedCaseInsensitiveContains("timed out")
+            || message.localizedCaseInsensitiveContains("cannot connect")
+            || message.localizedCaseInsensitiveContains("network connection was lost")
+            || message.localizedCaseInsensitiveContains("not connected to the internet") {
+            return "\(context) disconnected. Check Tailscale and Mac Host, then retry."
+        }
+
+        return "\(context) failed: \(message)"
+    }
+
+    private static func isRemoteAuthenticationFailure(_ error: Error) -> Bool {
+        if let remoteError = error as? RemoteHostError {
+            if case .authentication = remoteError {
+                return true
+            }
+        }
+        let message = error.localizedDescription
+        return message.localizedCaseInsensitiveContains("unauthorized")
+            || message.localizedCaseInsensitiveContains("forbidden")
+            || message.localizedCaseInsensitiveContains("invalid signature")
+            || message.localizedCaseInsensitiveContains("expired signature")
+            || message.localizedCaseInsensitiveContains("unknown device")
     }
 
     private func applyExecutionResult(_ result: LocalCommandResult, runID: UUID) {
@@ -1344,7 +1565,7 @@ final class CommandCenterStore: ObservableObject {
     private func scheduleWorkspaceRefresh(delayNanoseconds: UInt64 = 350_000_000) {
         workspaceRefreshTask?.cancel()
         let directory = workingDirectory
-        workspace = WorkspaceSnapshot.placeholder(workingDirectory: directory)
+        workspace = WorkspaceSnapshot.empty(workingDirectory: directory)
 
         #if targetEnvironment(macCatalyst)
         workspaceRefreshTask = Task { [weak self] in
@@ -1371,6 +1592,7 @@ final class CommandCenterStore: ObservableObject {
         var persistedRemoteHost = remoteHost
         persistedRemoteHost.token = ""
         let snapshot = CommandCenterSnapshot(
+            schemaVersion: 2,
             runs: runs,
             approvals: approvals,
             logs: logs,
@@ -1394,40 +1616,72 @@ final class CommandCenterStore: ObservableObject {
         return try? JSONDecoder.commandCenter.decode(CommandCenterSnapshot.self, from: data)
     }
 
-    private static func seedSnapshot(defaultWorkingDirectory: String) -> CommandCenterSnapshot {
-        let now = Date()
-        let readyRun = CommandRun(
-            id: UUID(),
-            title: "Veqral local command center ready",
-            command: "pwd",
-            runtime: .localShell,
-            phase: .implementation,
-            status: .waiting,
-            agent: "Local Mac",
-            device: ProcessInfo.processInfo.hostName,
-            model: "Local Shell",
-            progress: 0.0,
-            startedAt: now,
-            completedAt: nil,
-            workingDirectory: defaultWorkingDirectory
-        )
-        let runs = [readyRun]
-        let selected = runs.first?.id
-        let logs = [
-            CommandLogEntry(id: UUID(), runID: readyRun.id, time: now, stream: "ok", message: "Veqral is ready. Safe read-only commands run immediately on Mac."),
-            CommandLogEntry(id: UUID(), runID: readyRun.id, time: now, stream: "approval", message: "Mutating, secret, production, or screen-control commands require approval.")
-        ]
+    private static func emptySnapshot(defaultWorkingDirectory: String) -> CommandCenterSnapshot {
         return CommandCenterSnapshot(
-            runs: runs,
+            schemaVersion: 2,
+            runs: [],
             approvals: [],
-            logs: logs,
+            logs: [],
             diffs: [],
-            selectedRunID: selected,
+            selectedRunID: nil,
             selectedRuntime: .hermesAgent,
             remoteHost: .empty,
             remoteRunIDs: [:],
             workingDirectory: defaultWorkingDirectory
         )
+    }
+
+    private static func productionCleanedSnapshot(_ snapshot: CommandCenterSnapshot) -> CommandCenterSnapshot {
+        let removedRunIDs = Set(snapshot.runs.filter(isLegacySeedOrDiagnosticRun).map(\.id))
+        var cleaned = snapshot
+        cleaned.schemaVersion = 2
+        cleaned.runs = snapshot.runs.filter { !removedRunIDs.contains($0.id) }
+        cleaned.approvals = snapshot.approvals.filter { approval in
+            if let runID = approval.runID, removedRunIDs.contains(runID) { return false }
+            return !isLegacySeedApproval(approval)
+        }
+        cleaned.logs = snapshot.logs.filter { !removedRunIDs.contains($0.runID) && !isLegacySeedLog($0) }
+        cleaned.diffs = snapshot.diffs.filter { !removedRunIDs.contains($0.runID) }
+        cleaned.remoteRunIDs = snapshot.remoteRunIDs?.filter { key, _ in
+            guard let id = UUID(uuidString: key) else { return true }
+            return !removedRunIDs.contains(id)
+        }
+        if let selected = cleaned.selectedRunID, removedRunIDs.contains(selected) {
+            cleaned.selectedRunID = cleaned.runs.first?.id
+        }
+        return cleaned
+    }
+
+    private static func isLegacySeedOrDiagnosticRun(_ run: CommandRun) -> Bool {
+        let text = "\(run.title)\n\(run.command)".lowercased()
+        let markers = [
+            "veqral local command center ready",
+            "veqral_ios_e2e_ok",
+            "veqral_ws_ready",
+            "veqral_persist_ready",
+            "veqral_smoke_ok",
+            "go-live",
+            "reply pong only",
+            "ping only.",
+            "codex smoke",
+            "delete /tmp/veqral_should_not_delete"
+        ]
+        return markers.contains { text.contains($0) }
+    }
+
+    private static func isLegacySeedApproval(_ approval: CommandApproval) -> Bool {
+        let text = "\(approval.title)\n\(approval.detail)\n\(approval.command)".lowercased()
+        return text.contains("jsontheftoken") ||
+            text.contains("jwt_secret") ||
+            text.contains("rails db:migrate") ||
+            text.contains("veqral_should_not_delete")
+    }
+
+    private static func isLegacySeedLog(_ log: CommandLogEntry) -> Bool {
+        let text = log.message.lowercased()
+        return text.contains("veqral is ready") ||
+            text.contains("safe read-only commands run immediately") ||
+            text.contains("mutating, secret, production")
     }
 
     private static func sanitizedApprovals(_ approvals: [CommandApproval]) -> [CommandApproval] {
@@ -1442,6 +1696,16 @@ final class CommandCenterStore: ObservableObject {
     private static func makePairingToken() -> String {
         UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
+
+    private static func attachmentTimestamp() -> String {
+        Self.attachmentDateFormatter.string(from: Date())
+    }
+
+    private static let attachmentDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter
+    }()
 
     private static func urlEncoded(_ value: String) -> String {
         var allowed = CharacterSet.alphanumerics
@@ -1893,6 +2157,7 @@ enum LocalCommandExecutor {
 
 enum RemoteHostError: Error, LocalizedError {
     case invalidConfiguration
+    case authentication(String)
     case approvalRequired(String)
     case server(String)
 
@@ -1900,6 +2165,8 @@ enum RemoteHostError: Error, LocalizedError {
         switch self {
         case .invalidConfiguration:
             "Remote Host is not configured."
+        case .authentication(let message):
+            message
         case .approvalRequired(let message):
             message
         case .server(let message):
@@ -1926,6 +2193,10 @@ struct RemoteHostClient: Sendable {
         guard let http = response as? HTTPURLResponse else {
             throw RemoteHostError.server("Invalid response")
         }
+        if [401, 403].contains(http.statusCode) {
+            let message = (try? JSONDecoder.commandCenter.decode([String: String].self, from: data)["error"]) ?? "Unauthorized"
+            throw RemoteHostError.authentication(message)
+        }
         guard (200..<300).contains(http.statusCode) else {
             let message = (try? JSONDecoder.commandCenter.decode([String: String].self, from: data)["error"]) ?? "HTTP \(http.statusCode)"
             throw RemoteHostError.server(message)
@@ -1944,11 +2215,19 @@ struct RemoteHostClient: Sendable {
         return try JSONDecoder.commandCenter.decode(RemoteHealthResponse.self, from: data)
     }
 
-    func createRun(prompt: String, workingDirectory: String) async throws -> RemoteCreateRunResponse {
-        let body = try JSONEncoder.commandCenter.encode([
-            "prompt": prompt,
-            "workingDirectory": workingDirectory
-        ])
+    func createRun(prompt: String, workingDirectory: String, attachments: [CommandAttachment] = []) async throws -> RemoteCreateRunResponse {
+        struct Body: Encodable {
+            var prompt: String
+            var workingDirectory: String
+            var attachments: [RemoteRunAttachment]
+        }
+        let body = try JSONEncoder.commandCenter.encode(Body(
+            prompt: prompt,
+            workingDirectory: workingDirectory,
+            attachments: attachments.map {
+                RemoteRunAttachment(id: $0.id, fileName: $0.fileName, mimeType: $0.mimeType, data: $0.data)
+            }
+        ))
         let data = try await request(path: "/v1/runs", method: "POST", body: body)
         return try JSONDecoder.commandCenter.decode(RemoteCreateRunResponse.self, from: data)
     }
@@ -2042,6 +2321,44 @@ struct RemoteHostClient: Sendable {
         return try JSONDecoder.commandCenter.decode(RemoteMemoryWriteResponse.self, from: data)
     }
 
+    func historySessions(
+        tool: RemoteHistoryTool?,
+        project: String?,
+        query: String?,
+        date: String?,
+        page: Int,
+        limit: Int
+    ) async throws -> RemoteHistoryListResponse {
+        struct Body: Encodable {
+            var tool: RemoteHistoryTool?
+            var project: String?
+            var query: String?
+            var date: String?
+            var page: Int?
+            var limit: Int?
+        }
+        let body = try JSONEncoder.commandCenter.encode(Body(
+            tool: tool,
+            project: project?.isEmpty == true ? nil : project,
+            query: query?.isEmpty == true ? nil : query,
+            date: date?.isEmpty == true ? nil : date,
+            page: page,
+            limit: limit
+        ))
+        let data = try await request(path: "/v1/history/sessions", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteHistoryListResponse.self, from: data)
+    }
+
+    func historyDetail(id: String, tool: RemoteHistoryTool) async throws -> RemoteHistoryDetailResponse {
+        struct Body: Encodable {
+            var id: String
+            var tool: RemoteHistoryTool
+        }
+        let body = try JSONEncoder.commandCenter.encode(Body(id: id, tool: tool))
+        let data = try await request(path: "/v1/history/session", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteHistoryDetailResponse.self, from: data)
+    }
+
     func stream(remoteRunID: String) -> AsyncThrowingStream<RemoteHostLogEvent, Error> {
         AsyncThrowingStream { continuation in
             guard let baseURL = URL(string: configuration.endpoint) else {
@@ -2106,6 +2423,10 @@ struct RemoteHostClient: Sendable {
         if http.statusCode == 409 {
             let message = (try? JSONDecoder.commandCenter.decode([String: String].self, from: data)["error"]) ?? "Remote approval required"
             throw RemoteHostError.approvalRequired(message)
+        }
+        if [401, 403].contains(http.statusCode) {
+            let message = (try? JSONDecoder.commandCenter.decode([String: String].self, from: data)["error"]) ?? "Unauthorized"
+            throw RemoteHostError.authentication(message)
         }
         guard (200..<300).contains(http.statusCode) else {
             let message = (try? JSONDecoder.commandCenter.decode([String: String].self, from: data)["error"]) ?? "HTTP \(http.statusCode)"
