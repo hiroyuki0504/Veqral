@@ -238,7 +238,7 @@ actor HostState {
             && activeRuns < config.maxActiveRuns
     }
 
-    func createRun(prompt: String, workingDirectory: String) throws -> HostRun {
+    func createRun(prompt: String, workingDirectory: String, attachments: [RunAttachmentUpload] = []) throws -> HostRun {
         let directory = (workingDirectory.isEmpty ? config.defaultWorkingDirectory : workingDirectory).expandingTilde
         guard FileManager.default.fileExists(atPath: directory) else {
             throw HostError.badRequest("Working directory does not exist")
@@ -251,7 +251,7 @@ actor HostState {
         } else {
             nil
         }
-        let run = HostRun(
+        var run = HostRun(
             id: UUID().uuidString,
             prompt: prompt,
             workingDirectory: directory,
@@ -263,6 +263,12 @@ actor HostState {
             pid: nil,
             approvalReason: approvalReason
         )
+        let savedAttachments = try AttachmentStore.save(attachments, runID: run.id)
+        if !savedAttachments.isEmpty {
+            run.prompt += "\n\nAttached files from Veqral iOS:\n"
+            run.prompt += savedAttachments.map { "- \($0.title): \($0.path)" }.joined(separator: "\n")
+            appendAudit("saved attachments run id=\(run.id) count=\(savedAttachments.count)")
+        }
         runs[run.id] = run
         persistRuns()
         if let approvalReason {
@@ -475,6 +481,7 @@ final class HostServer: @unchecked Sendable {
     private let listener: NWListener
     private let runner: HermesRunner
     private let memoryStore = HermesMemoryStore()
+    private let historyStore = AgentHistoryStore()
     private let connectionLock = NSLock()
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
 
@@ -640,6 +647,18 @@ final class HostServer: @unchecked Sendable {
                 return
             }
 
+            if request.path == "/v1/history/sessions", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(HistorySessionListRequest.self, from: request.body)
+                sendJSON(try historyStore.list(body), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/history/session", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(HistorySessionDetailRequest.self, from: request.body)
+                sendJSON(try historyStore.detail(body), connection: connection)
+                return
+            }
+
             if request.path == "/v1/github/status", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(GitHubStatusRequest.self, from: request.body)
                 sendJSON(GitHubInspector.status(workingDirectory: body.workingDirectory), connection: connection)
@@ -673,7 +692,7 @@ final class HostServer: @unchecked Sendable {
 
             if request.path == "/v1/runs", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(CreateRunRequest.self, from: request.body)
-                let run = try await state.createRun(prompt: body.prompt, workingDirectory: body.workingDirectory)
+                let run = try await state.createRun(prompt: body.prompt, workingDirectory: body.workingDirectory, attachments: body.attachments ?? [])
                 sendJSON(
                     CreateRunResponse(
                         runID: run.id,
@@ -1017,46 +1036,409 @@ enum PTYProcess {
     }
 }
 
+enum HostMenuLanguage: String, Codable, CaseIterable {
+    case system
+    case english
+    case japanese
+
+    var effective: HostMenuLanguage {
+        switch self {
+        case .system:
+            Locale.current.identifier.lowercased().hasPrefix("ja") ? .japanese : .english
+        case .english, .japanese:
+            self
+        }
+    }
+
+    var menuTitle: String {
+        switch self {
+        case .system:
+            "System"
+        case .english:
+            "English"
+        case .japanese:
+            "日本語"
+        }
+    }
+}
+
+enum HostMenuBarStyle: String, Codable, CaseIterable {
+    case textOnly
+    case iconAndText
+    case iconOnly
+
+    func title(language: HostMenuLanguage) -> String {
+        let japanese = language.effective == .japanese
+        switch self {
+        case .textOnly:
+            return japanese ? "文字のみ" : "Text only"
+        case .iconAndText:
+            return japanese ? "アイコン + 文字" : "Icon + text"
+        case .iconOnly:
+            return japanese ? "アイコンのみ" : "Icon only"
+        }
+    }
+}
+
+enum HostMenuBarSymbol: String, Codable, CaseIterable {
+    case commandNode
+    case terminal
+    case spark
+    case network
+    case bolt
+
+    var systemName: String {
+        switch self {
+        case .commandNode:
+            "point.3.connected.trianglepath.dotted"
+        case .terminal:
+            "terminal"
+        case .spark:
+            "sparkles"
+        case .network:
+            "network"
+        case .bolt:
+            "bolt.horizontal.circle"
+        }
+    }
+
+    func title(language: HostMenuLanguage) -> String {
+        let japanese = language.effective == .japanese
+        switch self {
+        case .commandNode:
+            return japanese ? "コマンドノード" : "Command node"
+        case .terminal:
+            return japanese ? "ターミナル" : "Terminal"
+        case .spark:
+            return japanese ? "スパーク" : "Spark"
+        case .network:
+            return japanese ? "ネットワーク" : "Network"
+        case .bolt:
+            return japanese ? "ボルト" : "Bolt"
+        }
+    }
+}
+
+struct HostAppearanceSettings: Codable, Equatable {
+    var title: String = "Veqral"
+    var style: HostMenuBarStyle = .textOnly
+    var symbol: HostMenuBarSymbol = .commandNode
+    var language: HostMenuLanguage = .system
+    var animateWhileListening: Bool = false
+
+    static let defaultsKey = "dev.hiroyuki.veqral.host.appearance"
+
+    static func load() -> HostAppearanceSettings {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+              let settings = try? JSONDecoder().decode(HostAppearanceSettings.self, from: data) else {
+            return HostAppearanceSettings()
+        }
+        return settings.normalized()
+    }
+
+    func save() {
+        guard let data = try? JSONEncoder().encode(normalized()) else { return }
+        UserDefaults.standard.set(data, forKey: Self.defaultsKey)
+    }
+
+    func normalized() -> HostAppearanceSettings {
+        var copy = self
+        copy.title = copy.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if copy.title.isEmpty {
+            copy.title = "Veqral"
+        }
+        return copy
+    }
+}
+
+struct HostMenuLabels {
+    let language: HostMenuLanguage
+
+    private var japanese: Bool {
+        language.effective == .japanese
+    }
+
+    var appearanceSettings: String { japanese ? "メニューバー表示設定..." : "Menu Bar Appearance..." }
+    var showPairingQR: String { japanese ? "ペアリングQRを表示" : "Show Pairing QR" }
+    var copyPairingURL: String { japanese ? "ペアリングURLをコピー" : "Copy Pairing URL" }
+    var rotatePairingCode: String { japanese ? "ペアリングコードを更新" : "Rotate Pairing Code" }
+    var unattendedSetup: String { japanese ? "無人運用設定..." : "Unattended Remote Setup..." }
+    var installLoginAgent: String { japanese ? "ログインエージェントを登録" : "Install Login Agent" }
+    var removeLoginAgent: String { japanese ? "ログインエージェントを削除" : "Remove Login Agent" }
+    var quit: String { japanese ? "終了" : "Quit" }
+    var settingsTitle: String { japanese ? "メニューバー表示設定" : "Menu Bar Appearance" }
+    var displayName: String { japanese ? "表示名" : "Display name" }
+    var style: String { japanese ? "スタイル" : "Style" }
+    var icon: String { japanese ? "アイコン" : "Icon" }
+    var languageTitle: String { japanese ? "言語" : "Language" }
+    var animate: String { japanese ? "待受中にアイコンをゆっくり動かす" : "Animate icon while listening" }
+    var reset: String { japanese ? "リセット" : "Reset" }
+    var cancel: String { japanese ? "キャンセル" : "Cancel" }
+    var apply: String { japanese ? "適用" : "Apply" }
+    var pairWindowTitle: String { japanese ? "Veqral をペアリング" : "Pair Veqral" }
+    var starting: String { japanese ? "起動中" : "Starting" }
+    var pairingRotated: String { japanese ? "ペアリングコードを更新しました" : "Pairing rotated" }
+    var loginAgentInstalled: String { japanese ? "ログインエージェントを登録しました" : "Login agent installed" }
+    var loginAgentFailed: String { japanese ? "ログインエージェント登録に失敗しました" : "Login agent failed" }
+    var loginAgentRemoved: String { japanese ? "ログインエージェントを削除しました" : "Login agent removed" }
+    var loginAgentRemoveFailed: String { japanese ? "ログインエージェント削除に失敗しました" : "Login agent remove failed" }
+
+    func status(_ status: String) -> String {
+        guard japanese else { return status }
+        if status == "Starting" { return starting }
+        if status == "Pairing rotated" { return pairingRotated }
+        if status == "Login agent installed" { return loginAgentInstalled }
+        if status == "Login agent failed" { return loginAgentFailed }
+        if status == "Login agent removed" { return loginAgentRemoved }
+        if status == "Login agent remove failed" { return loginAgentRemoveFailed }
+        if status.hasPrefix("Listening on ") {
+            return "待受中: \(status.replacingOccurrences(of: "Listening on ", with: ""))"
+        }
+        if status.hasPrefix("Failed: ") {
+            return "失敗: \(status.replacingOccurrences(of: "Failed: ", with: ""))"
+        }
+        return status
+    }
+}
+
 @MainActor
 final class StatusController {
     private let state: HostState
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var window: NSWindow?
     private var setupWindow: NSWindow?
+    private var appearanceWindow: NSWindow?
+    private var settings = HostAppearanceSettings.load()
+    private var lastStatus = "Starting"
+    private var animationTimer: Timer?
+    private var animationFrame = 0
     private weak var setupStatusView: NSTextView?
     private weak var setupPasswordField: NSSecureTextField?
     private weak var setupSkipAutologinButton: NSButton?
+    private weak var appearanceTitleField: NSTextField?
+    private weak var appearanceStylePopup: NSPopUpButton?
+    private weak var appearanceSymbolPopup: NSPopUpButton?
+    private weak var appearanceLanguagePopup: NSPopUpButton?
+    private weak var appearanceAnimateButton: NSButton?
+
+    private var labels: HostMenuLabels {
+        HostMenuLabels(language: settings.language)
+    }
 
     init(state: HostState) {
         self.state = state
-        item.button?.title = "Veqral"
-        rebuildMenu(status: "Starting")
+        applyAppearance()
+        rebuildMenu(status: labels.starting)
     }
 
     func setStatus(_ status: String) {
-        rebuildMenu(status: status)
+        lastStatus = status
+        applyAppearance()
+        rebuildMenu(status: labels.status(status))
     }
 
     private func rebuildMenu(status: String) {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: status, action: nil, keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Show Pairing QR", action: #selector(showPairingQR), keyEquivalent: "p"))
-        menu.items.last?.target = self
-        menu.addItem(NSMenuItem(title: "Copy Pairing URL", action: #selector(copyPairingURL), keyEquivalent: "c"))
-        menu.items.last?.target = self
-        menu.addItem(NSMenuItem(title: "Rotate Pairing Code", action: #selector(rotatePairing), keyEquivalent: "r"))
+        menu.addItem(NSMenuItem(title: labels.appearanceSettings, action: #selector(showAppearanceSettings), keyEquivalent: ","))
         menu.items.last?.target = self
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Unattended Remote Setup...", action: #selector(showUnattendedSetup), keyEquivalent: "u"))
+        menu.addItem(NSMenuItem(title: labels.showPairingQR, action: #selector(showPairingQR), keyEquivalent: "p"))
         menu.items.last?.target = self
-        menu.addItem(NSMenuItem(title: "Install Login Agent", action: #selector(installLoginAgent), keyEquivalent: "i"))
+        menu.addItem(NSMenuItem(title: labels.copyPairingURL, action: #selector(copyPairingURL), keyEquivalent: "c"))
         menu.items.last?.target = self
-        menu.addItem(NSMenuItem(title: "Remove Login Agent", action: #selector(removeLoginAgent), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: labels.rotatePairingCode, action: #selector(rotatePairing), keyEquivalent: "r"))
         menu.items.last?.target = self
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: labels.unattendedSetup, action: #selector(showUnattendedSetup), keyEquivalent: "u"))
+        menu.items.last?.target = self
+        menu.addItem(NSMenuItem(title: labels.installLoginAgent, action: #selector(installLoginAgent), keyEquivalent: "i"))
+        menu.items.last?.target = self
+        menu.addItem(NSMenuItem(title: labels.removeLoginAgent, action: #selector(removeLoginAgent), keyEquivalent: ""))
+        menu.items.last?.target = self
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: labels.quit, action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         item.menu = menu
+    }
+
+    private func applyAppearance() {
+        guard let button = item.button else { return }
+        settings = settings.normalized()
+        button.title = settings.style == .iconOnly ? "" : settings.title
+        button.image = settings.style == .textOnly ? nil : statusImage()
+        button.imagePosition = settings.style == .iconOnly ? .imageOnly : .imageLeading
+        button.toolTip = settings.title
+        item.length = settings.style == .iconOnly ? 28 : NSStatusItem.variableLength
+        configureAnimation()
+    }
+
+    private func statusImage() -> NSImage? {
+        let image = NSImage(systemSymbolName: settings.symbol.systemName, accessibilityDescription: settings.title)
+        image?.isTemplate = true
+        return image
+    }
+
+    private var isListeningStatus: Bool {
+        lastStatus.lowercased().hasPrefix("listening")
+    }
+
+    private func configureAnimation() {
+        if settings.animateWhileListening, isListeningStatus, settings.style != .textOnly {
+            guard animationTimer == nil else { return }
+            animationTimer = Timer.scheduledTimer(withTimeInterval: 0.85, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.animationFrame += 1
+                    self.item.button?.alphaValue = self.animationFrame.isMultiple(of: 2) ? 0.62 : 1.0
+                }
+            }
+        } else {
+            animationTimer?.invalidate()
+            animationTimer = nil
+            animationFrame = 0
+            item.button?.alphaValue = 1.0
+        }
+    }
+
+    @objc private func showAppearanceSettings() {
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 290))
+
+        let title = NSTextField(labelWithString: labels.settingsTitle)
+        title.font = .systemFont(ofSize: 18, weight: .semibold)
+        title.frame = NSRect(x: 22, y: 246, width: 396, height: 24)
+        content.addSubview(title)
+
+        let nameLabel = NSTextField(labelWithString: labels.displayName)
+        nameLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        nameLabel.frame = NSRect(x: 22, y: 202, width: 130, height: 18)
+        content.addSubview(nameLabel)
+
+        let titleField = NSTextField(frame: NSRect(x: 170, y: 196, width: 248, height: 28))
+        titleField.stringValue = settings.title
+        content.addSubview(titleField)
+        appearanceTitleField = titleField
+
+        let styleLabel = NSTextField(labelWithString: labels.style)
+        styleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        styleLabel.frame = NSRect(x: 22, y: 160, width: 130, height: 18)
+        content.addSubview(styleLabel)
+
+        let stylePopup = NSPopUpButton(frame: NSRect(x: 170, y: 154, width: 248, height: 28))
+        for style in HostMenuBarStyle.allCases {
+            stylePopup.addItem(withTitle: style.title(language: settings.language))
+            stylePopup.lastItem?.representedObject = style.rawValue
+        }
+        stylePopup.selectItem(withTitle: settings.style.title(language: settings.language))
+        content.addSubview(stylePopup)
+        appearanceStylePopup = stylePopup
+
+        let symbolLabel = NSTextField(labelWithString: labels.icon)
+        symbolLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        symbolLabel.frame = NSRect(x: 22, y: 118, width: 130, height: 18)
+        content.addSubview(symbolLabel)
+
+        let symbolPopup = NSPopUpButton(frame: NSRect(x: 170, y: 112, width: 248, height: 28))
+        for symbol in HostMenuBarSymbol.allCases {
+            symbolPopup.addItem(withTitle: symbol.title(language: settings.language))
+            symbolPopup.lastItem?.representedObject = symbol.rawValue
+        }
+        symbolPopup.selectItem(withTitle: settings.symbol.title(language: settings.language))
+        content.addSubview(symbolPopup)
+        appearanceSymbolPopup = symbolPopup
+
+        let languageLabel = NSTextField(labelWithString: labels.languageTitle)
+        languageLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        languageLabel.frame = NSRect(x: 22, y: 76, width: 130, height: 18)
+        content.addSubview(languageLabel)
+
+        let languagePopup = NSPopUpButton(frame: NSRect(x: 170, y: 70, width: 248, height: 28))
+        for language in HostMenuLanguage.allCases {
+            languagePopup.addItem(withTitle: language.menuTitle)
+            languagePopup.lastItem?.representedObject = language.rawValue
+        }
+        languagePopup.selectItem(withTitle: settings.language.menuTitle)
+        content.addSubview(languagePopup)
+        appearanceLanguagePopup = languagePopup
+
+        let animate = NSButton(checkboxWithTitle: labels.animate, target: nil, action: nil)
+        animate.frame = NSRect(x: 166, y: 36, width: 252, height: 24)
+        animate.state = settings.animateWhileListening ? .on : .off
+        content.addSubview(animate)
+        appearanceAnimateButton = animate
+
+        let reset = NSButton(title: labels.reset, target: self, action: #selector(resetAppearanceSettings))
+        reset.frame = NSRect(x: 22, y: 10, width: 92, height: 28)
+        content.addSubview(reset)
+
+        let cancel = NSButton(title: labels.cancel, target: self, action: #selector(closeAppearanceSettings))
+        cancel.frame = NSRect(x: 226, y: 10, width: 90, height: 28)
+        content.addSubview(cancel)
+
+        let apply = NSButton(title: labels.apply, target: self, action: #selector(applyAppearanceSettings))
+        apply.bezelStyle = .rounded
+        apply.keyEquivalent = "\r"
+        apply.frame = NSRect(x: 328, y: 10, width: 90, height: 28)
+        content.addSubview(apply)
+
+        let window = NSWindow(contentRect: content.frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = labels.settingsTitle
+        window.contentView = content
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        appearanceWindow = window
+    }
+
+    @objc private func applyAppearanceSettings() {
+        settings = HostAppearanceSettings(
+            title: appearanceTitleField?.stringValue ?? "Veqral",
+            style: selectedStyle(),
+            symbol: selectedSymbol(),
+            language: selectedLanguage(),
+            animateWhileListening: appearanceAnimateButton?.state == .on
+        ).normalized()
+        settings.save()
+        applyAppearance()
+        rebuildMenu(status: labels.status(lastStatus))
+        closeAppearanceSettings()
+    }
+
+    @objc private func resetAppearanceSettings() {
+        settings = HostAppearanceSettings()
+        settings.save()
+        applyAppearance()
+        rebuildMenu(status: labels.status(lastStatus))
+        closeAppearanceSettings()
+    }
+
+    @objc private func closeAppearanceSettings() {
+        appearanceWindow?.close()
+        appearanceWindow = nil
+    }
+
+    private func selectedStyle() -> HostMenuBarStyle {
+        guard let value = appearanceStylePopup?.selectedItem?.representedObject as? String,
+              let style = HostMenuBarStyle(rawValue: value) else {
+            return settings.style
+        }
+        return style
+    }
+
+    private func selectedSymbol() -> HostMenuBarSymbol {
+        guard let value = appearanceSymbolPopup?.selectedItem?.representedObject as? String,
+              let symbol = HostMenuBarSymbol(rawValue: value) else {
+            return settings.symbol
+        }
+        return symbol
+    }
+
+    private func selectedLanguage() -> HostMenuLanguage {
+        guard let value = appearanceLanguagePopup?.selectedItem?.representedObject as? String,
+              let language = HostMenuLanguage(rawValue: value) else {
+            return settings.language
+        }
+        return language
     }
 
     @objc private func copyPairingURL() {
@@ -1089,7 +1471,7 @@ final class StatusController {
                 content.addSubview(imageView)
                 content.addSubview(text)
                 let window = NSWindow(contentRect: content.frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
-                window.title = "Pair Veqral"
+                window.title = self.labels.pairWindowTitle
                 window.contentView = content
                 window.center()
                 window.makeKeyAndOrderFront(nil)
@@ -1340,16 +1722,16 @@ enum GitDiffInspector {
 
 enum ArtifactScanner {
     static func artifacts(for run: HostRun) -> [HostArtifact] {
+        var artifacts = AttachmentStore.artifacts(runID: run.id)
         let root = URL(fileURLWithPath: run.workingDirectory.expandingTilde)
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else {
-            return []
+            return artifacts
         }
         let extensions: Set<String> = ["png", "jpg", "jpeg", "gif", "pdf", "html", "htm", "json", "log", "txt", "md"]
-        var artifacts: [HostArtifact] = []
         for case let url as URL in enumerator {
             guard extensions.contains(url.pathExtension.lowercased()),
                   (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else {
@@ -1369,6 +1751,63 @@ enum ArtifactScanner {
             ))
         }
         return artifacts.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }.prefix(50).map { $0 }
+    }
+}
+
+enum AttachmentStore {
+    private static var rootURL: URL {
+        HostConfig.folder.appendingPathComponent("attachments", isDirectory: true)
+    }
+
+    static func save(_ attachments: [RunAttachmentUpload], runID: String) throws -> [HostArtifact] {
+        guard !attachments.isEmpty else { return [] }
+        let runFolder = rootURL.appendingPathComponent(runID, isDirectory: true)
+        try FileManager.default.createDirectory(at: runFolder, withIntermediateDirectories: true)
+
+        return try attachments.prefix(8).map { attachment in
+            let destination = runFolder.appendingPathComponent(safeFileName(attachment.fileName, fallback: "\(attachment.id).bin"))
+            try attachment.data.write(to: destination, options: .atomic)
+            let values = try? destination.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            return HostArtifact(
+                id: "attachment:\(runID):\(destination.lastPathComponent)",
+                title: destination.lastPathComponent,
+                type: attachment.mimeType,
+                path: destination.path,
+                bytes: values?.fileSize ?? attachment.data.count,
+                updatedAt: values?.contentModificationDate ?? Date()
+            )
+        }
+    }
+
+    static func artifacts(runID: String) -> [HostArtifact] {
+        let runFolder = rootURL.appendingPathComponent(runID, isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: runFolder,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        return files.compactMap { url in
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile != false else { return nil }
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            return HostArtifact(
+                id: "attachment:\(runID):\(url.lastPathComponent)",
+                title: url.lastPathComponent,
+                type: url.pathExtension.isEmpty ? "attachment" : url.pathExtension.lowercased(),
+                path: url.path,
+                bytes: values?.fileSize ?? 0,
+                updatedAt: values?.contentModificationDate
+            )
+        }
+    }
+
+    private static func safeFileName(_ name: String, fallback: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = trimmed.isEmpty ? fallback : URL(fileURLWithPath: trimmed).lastPathComponent
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        let sanitized = String(base.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" })
+        return sanitized.isEmpty ? fallback : sanitized
     }
 }
 
@@ -1618,6 +2057,72 @@ struct MemoryWriteResponse: Codable {
     var hasChanges: Bool
 }
 
+enum HistoryTool: String, Codable, CaseIterable {
+    case claude
+    case codex
+
+    var title: String {
+        switch self {
+        case .claude:
+            "Claude"
+        case .codex:
+            "Codex"
+        }
+    }
+}
+
+struct HistorySessionListRequest: Codable {
+    var tool: HistoryTool?
+    var project: String?
+    var query: String?
+    var date: String?
+    var page: Int?
+    var limit: Int?
+}
+
+struct HistorySessionDetailRequest: Codable {
+    var id: String
+    var tool: HistoryTool
+}
+
+struct HistorySessionSummary: Codable, Identifiable {
+    var id: String
+    var tool: HistoryTool
+    var project: String
+    var projectPath: String
+    var startedAt: Date?
+    var updatedAt: Date?
+    var messageCount: Int
+    var model: String?
+    var summary: String
+    var filePath: String
+    var bytes: Int
+}
+
+struct HistorySessionListResponse: Codable {
+    var sessions: [HistorySessionSummary]
+    var total: Int
+    var page: Int
+    var limit: Int
+    var projects: [String]
+    var tools: [HistoryTool]
+}
+
+struct HistoryTurn: Codable, Identifiable {
+    var id: String
+    var role: String
+    var kind: String
+    var timestamp: Date?
+    var text: String
+    var metadata: String?
+}
+
+struct HistorySessionDetailResponse: Codable {
+    var session: HistorySessionSummary
+    var turns: [HistoryTurn]
+    var truncated: Bool
+}
+
 struct HermesMemoryStore {
     private let memoriesFolder = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".hermes/memories", isDirectory: true)
@@ -1792,6 +2297,442 @@ struct HermesMemoryStore {
     }
 }
 
+struct AgentHistoryStore {
+    private let fileManager = FileManager.default
+    private let listMaxFiles = 240
+    private let listScanLines = 160
+    private let listScanBytes = 196_608
+    private let detailScanLines = 5_000
+    private let detailScanBytes = 8_000_000
+
+    func list(_ request: HistorySessionListRequest) throws -> HistorySessionListResponse {
+        let page = max(0, request.page ?? 0)
+        let limit = min(max(1, request.limit ?? 50), 100)
+        let query = request.query?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var sessions = try allSessions(tool: request.tool)
+
+        if let project = request.project, !project.isEmpty {
+            sessions = sessions.filter { $0.project == project || $0.projectPath == project }
+        }
+
+        if let date = request.date, !date.isEmpty {
+            sessions = sessions.filter { session in
+                guard let startedAt = session.startedAt ?? session.updatedAt else { return false }
+                return Self.dayFormatter.string(from: startedAt) == date
+            }
+        }
+
+        if let query, !query.isEmpty {
+            let folded = query.lowercased()
+            sessions = sessions.filter { session in
+                let visible = "\(session.tool.rawValue) \(session.project) \(session.projectPath) \(session.summary) \(session.model ?? "")".lowercased()
+                return visible.contains(folded) || fileContains(session.filePath, query: folded)
+            }
+        }
+
+        sessions.sort {
+            ($0.startedAt ?? $0.updatedAt ?? .distantPast) > ($1.startedAt ?? $1.updatedAt ?? .distantPast)
+        }
+        let total = sessions.count
+        let projects = Array(Set(sessions.map(\.project).filter { !$0.isEmpty })).sorted()
+        let start = min(page * limit, total)
+        let end = min(start + limit, total)
+        let pageItems = start < end ? Array(sessions[start..<end]) : []
+
+        return HistorySessionListResponse(
+            sessions: pageItems,
+            total: total,
+            page: page,
+            limit: limit,
+            projects: projects,
+            tools: HistoryTool.allCases
+        )
+    }
+
+    func detail(_ request: HistorySessionDetailRequest) throws -> HistorySessionDetailResponse {
+        guard let sessionFile = sessionFile(id: request.id, tool: request.tool),
+              let session = summarize(url: sessionFile.url, tool: request.tool, fallbackProject: sessionFile.fallbackProject) else {
+            throw HostError.notFound("History session not found")
+        }
+        let url = URL(fileURLWithPath: session.filePath)
+        var turns: [HistoryTurn] = []
+        var truncated = false
+        var lineNumber = 0
+
+        try HistoryLineReader.forEachLine(url: url, maxLines: detailScanLines, maxBytes: detailScanBytes) { line in
+            lineNumber += 1
+            guard let object = HistoryJSON.object(from: line),
+                  let turn = turn(from: object, tool: request.tool, fallbackID: "\(session.id)-\(lineNumber)") else {
+                return
+            }
+            turns.append(turn)
+        } onTruncated: {
+            truncated = true
+        }
+
+        return HistorySessionDetailResponse(session: session, turns: turns, truncated: truncated)
+    }
+
+    private func allSessions(tool: HistoryTool?) throws -> [HistorySessionSummary] {
+        switch tool {
+        case .claude:
+            return claudeSessions()
+        case .codex:
+            return codexSessions()
+        case nil:
+            return claudeSessions() + codexSessions()
+        }
+    }
+
+    private func sessionFile(id: String, tool: HistoryTool) -> (url: URL, fallbackProject: String)? {
+        switch tool {
+        case .claude:
+            let root = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
+            for url in jsonlFiles(under: root, limit: listMaxFiles) where Self.identifier(for: url) == id {
+                return (url, decodeClaudeProject(url.deletingLastPathComponent().lastPathComponent))
+            }
+        case .codex:
+            let home = ProcessInfo.processInfo.environment["CODEX_HOME"].flatMap { URL(fileURLWithPath: $0.expandingTilde) }
+                ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+            let roots = [
+                home.appendingPathComponent("sessions", isDirectory: true),
+                home.appendingPathComponent("archived_sessions", isDirectory: true)
+            ]
+            for root in roots {
+                for url in jsonlFiles(under: root, limit: listMaxFiles) where Self.identifier(for: url) == id {
+                    return (url, "Codex")
+                }
+            }
+        }
+        return nil
+    }
+
+    private func claudeSessions() -> [HistorySessionSummary] {
+        let root = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
+        return jsonlFiles(under: root, limit: listMaxFiles).compactMap { url in
+            summarize(url: url, tool: .claude, fallbackProject: decodeClaudeProject(url.deletingLastPathComponent().lastPathComponent))
+        }
+    }
+
+    private func codexSessions() -> [HistorySessionSummary] {
+        let home = ProcessInfo.processInfo.environment["CODEX_HOME"].flatMap { URL(fileURLWithPath: $0.expandingTilde) }
+            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        let roots = [
+            home.appendingPathComponent("sessions", isDirectory: true),
+            home.appendingPathComponent("archived_sessions", isDirectory: true)
+        ]
+        return roots.flatMap { jsonlFiles(under: $0, limit: listMaxFiles / roots.count) }
+            .compactMap { summarize(url: $0, tool: .codex, fallbackProject: "Codex") }
+    }
+
+    private func jsonlFiles(under root: URL, limit: Int) -> [URL] {
+        guard fileManager.fileExists(atPath: root.path),
+              let enumerator = fileManager.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+              ) else {
+            return []
+        }
+        var files: [(url: URL, date: Date)] = []
+        for case let url as URL in enumerator where url.pathExtension.lowercased() == "jsonl" {
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            files.append((url, date))
+        }
+        return files.sorted { $0.date > $1.date }.prefix(limit).map(\.url)
+    }
+
+    private func summarize(url: URL, tool: HistoryTool, fallbackProject: String) -> HistorySessionSummary? {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        var startedAt: Date?
+        var projectPath = ""
+        var model: String?
+        var summary = ""
+        var messageCount = 0
+
+        do {
+            try HistoryLineReader.forEachLine(url: url, maxLines: listScanLines, maxBytes: listScanBytes) { line in
+                guard let object = HistoryJSON.object(from: line) else { return }
+                if startedAt == nil {
+                    startedAt = HistoryJSON.date(in: object)
+                }
+                if projectPath.isEmpty {
+                    projectPath = HistoryJSON.projectPath(in: object, tool: tool)
+                }
+                if model == nil {
+                    model = HistoryJSON.model(in: object)
+                }
+                if let turn = turn(from: object, tool: tool, fallbackID: "") {
+                    messageCount += 1
+                    if summary.isEmpty, turn.role == "user" {
+                        summary = turn.text
+                    }
+                }
+            }
+        } catch {
+            return nil
+        }
+
+        if startedAt == nil {
+            startedAt = dateFromCodexFilename(url.lastPathComponent) ?? values?.contentModificationDate
+        }
+        if projectPath.isEmpty {
+            projectPath = fallbackProject
+        }
+        if summary.isEmpty {
+            summary = url.deletingPathExtension().lastPathComponent
+        }
+
+        return HistorySessionSummary(
+            id: Self.identifier(for: url),
+            tool: tool,
+            project: projectName(from: projectPath, fallback: fallbackProject),
+            projectPath: projectPath,
+            startedAt: startedAt,
+            updatedAt: values?.contentModificationDate,
+            messageCount: messageCount,
+            model: model,
+            summary: clipped(Redactor.redact(summary), limit: 240),
+            filePath: url.path,
+            bytes: values?.fileSize ?? 0
+        )
+    }
+
+    private func turn(from object: [String: Any], tool: HistoryTool, fallbackID: String) -> HistoryTurn? {
+        switch tool {
+        case .claude:
+            return claudeTurn(from: object, fallbackID: fallbackID)
+        case .codex:
+            return codexTurn(from: object, fallbackID: fallbackID)
+        }
+    }
+
+    private func claudeTurn(from object: [String: Any], fallbackID: String) -> HistoryTurn? {
+        guard let type = object["type"] as? String else { return nil }
+        let uuid = (object["uuid"] as? String) ?? fallbackID
+        let timestamp = HistoryJSON.date(in: object)
+
+        if type == "user" || type == "assistant" {
+            guard let message = object["message"] as? [String: Any] else { return nil }
+            let text = HistoryJSON.contentText(message["content"])
+            guard !text.isEmpty, object["isMeta"] as? Bool != true else { return nil }
+            return HistoryTurn(id: uuid, role: type, kind: "message", timestamp: timestamp, text: clipped(Redactor.redact(text), limit: 14_000), metadata: nil)
+        }
+
+        if type == "tool_use" || type == "tool_result" || type == "attachment" {
+            let text = HistoryJSON.contentText(object["message"] ?? object["attachment"] ?? object)
+            guard !text.isEmpty else { return nil }
+            return HistoryTurn(id: uuid, role: "tool", kind: type, timestamp: timestamp, text: clipped(Redactor.redact(text), limit: 8_000), metadata: type)
+        }
+
+        return nil
+    }
+
+    private func codexTurn(from object: [String: Any], fallbackID: String) -> HistoryTurn? {
+        let timestamp = HistoryJSON.date(in: object)
+        guard let type = object["type"] as? String else { return nil }
+        if type == "session_meta" { return nil }
+
+        if let payload = object["payload"] as? [String: Any] {
+            let payloadType = payload["type"] as? String
+            if payloadType == "message" {
+                let role = payload["role"] as? String ?? "assistant"
+                let text = HistoryJSON.contentText(payload["content"])
+                guard !text.isEmpty else { return nil }
+                return HistoryTurn(id: fallbackID, role: role, kind: "message", timestamp: timestamp, text: clipped(Redactor.redact(text), limit: 14_000), metadata: nil)
+            }
+            if payloadType == "function_call" || payloadType == "tool_call" || type == "event_msg" {
+                let text = HistoryJSON.contentText(payload)
+                guard !text.isEmpty else { return nil }
+                return HistoryTurn(id: fallbackID, role: "tool", kind: payloadType ?? type, timestamp: timestamp, text: clipped(Redactor.redact(text), limit: 8_000), metadata: payloadType ?? type)
+            }
+        }
+
+        if type == "response_item", let text = object["text"] as? String, !text.isEmpty {
+            return HistoryTurn(id: fallbackID, role: "assistant", kind: "message", timestamp: timestamp, text: clipped(Redactor.redact(text), limit: 14_000), metadata: nil)
+        }
+
+        return nil
+    }
+
+    private func fileContains(_ path: String, query: String) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        var found = false
+        try? HistoryLineReader.forEachLine(url: url, maxLines: 5_000, maxBytes: 5_000_000) { line in
+            if line.lowercased().contains(query) {
+                found = true
+            }
+        }
+        return found
+    }
+
+    private func decodeClaudeProject(_ folderName: String) -> String {
+        guard folderName.hasPrefix("-") else { return folderName }
+        return "/" + folderName.dropFirst().replacingOccurrences(of: "-", with: "/")
+    }
+
+    private func projectName(from path: String, fallback: String) -> String {
+        let clean = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return fallback }
+        let name = URL(fileURLWithPath: clean).lastPathComponent
+        return name.isEmpty ? clean : name
+    }
+
+    private func dateFromCodexFilename(_ name: String) -> Date? {
+        guard let range = name.range(of: #"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}"#, options: .regularExpression) else {
+            return nil
+        }
+        let raw = String(name[range]).replacingOccurrences(of: "rollout-", with: "")
+        let parts = raw.split(separator: "T", maxSplits: 1)
+        guard parts.count == 2 else { return nil }
+        let time = parts[1].replacingOccurrences(of: "-", with: ":")
+        return ISO8601DateFormatter().date(from: "\(parts[0])T\(time)Z")
+    }
+
+    private func clipped(_ value: String, limit: Int) -> String {
+        if value.count <= limit { return value }
+        return String(value.prefix(limit)) + "\n[truncated]"
+    }
+
+    private static func identifier(for url: URL) -> String {
+        SHA256.hash(data: Data(url.path.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+}
+
+enum HistoryJSON {
+    static func object(from line: String) -> [String: Any]? {
+        guard let data = line.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object
+    }
+
+    static func date(in object: [String: Any]) -> Date? {
+        if let timestamp = object["timestamp"] as? String {
+            return parseDate(timestamp)
+        }
+        if let timestamp = object["timestamp"] as? Double {
+            return Date(timeIntervalSince1970: timestamp > 10_000_000_000 ? timestamp / 1000 : timestamp)
+        }
+        if let payload = object["payload"] as? [String: Any] {
+            if let timestamp = payload["timestamp"] as? String {
+                return parseDate(timestamp)
+            }
+            if let startedAt = payload["started_at"] as? Double {
+                return Date(timeIntervalSince1970: startedAt)
+            }
+        }
+        return nil
+    }
+
+    static func projectPath(in object: [String: Any], tool: HistoryTool) -> String {
+        if let cwd = object["cwd"] as? String { return cwd }
+        if let project = object["project"] as? String { return project }
+        if let payload = object["payload"] as? [String: Any] {
+            if let cwd = payload["cwd"] as? String { return cwd }
+            if let project = payload["project"] as? String { return project }
+        }
+        if tool == .codex,
+           let payload = object["payload"] as? [String: Any],
+           let meta = payload["payload"] as? [String: Any],
+           let cwd = meta["cwd"] as? String {
+            return cwd
+        }
+        return ""
+    }
+
+    static func model(in object: [String: Any]) -> String? {
+        if let model = object["model"] as? String { return model }
+        if let version = object["version"] as? String { return version }
+        if let payload = object["payload"] as? [String: Any] {
+            if let model = payload["model"] as? String { return model }
+            if let model = payload["model_provider"] as? String { return model }
+            if let version = payload["cli_version"] as? String { return version }
+        }
+        return nil
+    }
+
+    static func contentText(_ value: Any?) -> String {
+        guard let value else { return "" }
+        if let string = value as? String {
+            return string
+        }
+        if let array = value as? [Any] {
+            return array.map(contentText).filter { !$0.isEmpty }.joined(separator: "\n")
+        }
+        if let dict = value as? [String: Any] {
+            if let text = dict["text"] as? String { return text }
+            if let content = dict["content"] { return contentText(content) }
+            if let name = dict["name"] as? String, let arguments = dict["arguments"] {
+                return "\(name)\n\(contentText(arguments))"
+            }
+            if JSONSerialization.isValidJSONObject(dict),
+               let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]),
+               let string = String(data: data, encoding: .utf8) {
+                return string
+            }
+        }
+        return String(describing: value)
+    }
+
+    private static func parseDate(_ text: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: text) { return date }
+        return ISO8601DateFormatter().date(from: text)
+    }
+}
+
+enum HistoryLineReader {
+    static func forEachLine(
+        url: URL,
+        maxLines: Int,
+        maxBytes: Int,
+        handle: (String) throws -> Void,
+        onTruncated: (() -> Void)? = nil
+    ) throws {
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        var pending = Data()
+        var lines = 0
+        var bytes = 0
+
+        while bytes < maxBytes, lines < maxLines {
+            let chunk = file.readData(ofLength: min(64 * 1024, maxBytes - bytes))
+            if chunk.isEmpty { break }
+            bytes += chunk.count
+            pending.append(chunk)
+
+            while let newline = pending.firstIndex(of: 10), lines < maxLines {
+                let lineData = pending.subdata(in: pending.startIndex..<newline)
+                pending.removeSubrange(pending.startIndex...newline)
+                if let line = String(data: lineData, encoding: .utf8) {
+                    try handle(line)
+                }
+                lines += 1
+            }
+        }
+
+        if !pending.isEmpty, lines < maxLines, bytes < maxBytes,
+           let line = String(data: pending, encoding: .utf8) {
+            try handle(line)
+        } else if bytes >= maxBytes || lines >= maxLines {
+            onTruncated?()
+        }
+    }
+}
+
 struct ProcessOutput {
     var exitCode: Int32
     var stdout: String
@@ -1948,6 +2889,14 @@ struct PairResponse: Codable {
 struct CreateRunRequest: Codable {
     var prompt: String
     var workingDirectory: String
+    var attachments: [RunAttachmentUpload]?
+}
+
+struct RunAttachmentUpload: Codable {
+    var id: UUID
+    var fileName: String
+    var mimeType: String
+    var data: Data
 }
 
 struct CreateRunResponse: Codable {
@@ -2092,7 +3041,7 @@ enum Redactor {
             (#"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]+"#, "$1[REDACTED]"),
             (#"(?i)(token|api[_-]?key|secret|password)\s*[:=]\s*['"]?[^'"\s]+"#, "$1=[REDACTED]"),
             (#"(?i)sk-[A-Za-z0-9]{12,}"#, "[REDACTED]"),
-            (#"(?i)gho_[A-Za-z0-9_]+"#, "[REDACTED]"),
+            (#"(?i)gh[opusr]_[A-Za-z0-9_]+"#, "[REDACTED]"),
             (#"(?i)github_pat_[A-Za-z0-9_]+"#, "[REDACTED]")
         ]
         for (pattern, replacement) in patterns {

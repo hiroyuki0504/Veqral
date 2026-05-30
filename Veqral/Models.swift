@@ -12,6 +12,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     case terminal
     case diff
     case artifacts
+    case history
     case approvals
     case memory
     case github
@@ -31,6 +32,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .terminal: "Terminal"
         case .diff: "Diff"
         case .artifacts: "Artifacts"
+        case .history: "History"
         case .approvals: "Approvals"
         case .memory: "Memory"
         case .github: "GitHub"
@@ -50,6 +52,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .terminal: "terminal"
         case .diff: "plus.forwardslash.minus"
         case .artifacts: "shippingbox"
+        case .history: "clock.arrow.circlepath"
         case .approvals: "hand.raised"
         case .memory: "brain.head.profile"
         case .github: "point.3.connected.trianglepath.dotted"
@@ -58,7 +61,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 
     static let primaryTabs: [AppSection] = [.home, .approvals, .projects, .devices]
     static let commandGroup: [AppSection] = [.home, .chat, .requirements]
-    static let operationGroup: [AppSection] = [.projects, .agents, .models, .runs, .terminal, .diff, .artifacts]
+    static let operationGroup: [AppSection] = [.projects, .agents, .models, .runs, .terminal, .diff, .artifacts, .history]
     static let systemGroup: [AppSection] = [.devices, .approvals, .memory, .github]
     static let compactMore: [AppSection] = allCases.filter { !primaryTabs.contains($0) }
 }
@@ -199,6 +202,24 @@ enum MemoryScope: String, CaseIterable, Identifiable {
         case .agent: "Agent"
         }
     }
+}
+
+enum ContextPackage {
+    static let items = [
+        "User Profile",
+        "Project Memory",
+        "Requirements",
+        "Decision Log",
+        "Current Task",
+        "Repo Summary",
+        "Relevant Files",
+        "Coding Conventions",
+        "Security Policy",
+        "Approval Policy",
+        "Available Tools",
+        "Device Capabilities",
+        "Output Contract"
+    ]
 }
 
 struct CommandMetric: Identifiable {

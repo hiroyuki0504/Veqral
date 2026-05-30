@@ -1,6 +1,9 @@
 import SwiftUI
 import UIKit
 import CoreImage.CIFilterBuiltins
+import AVFoundation
+import PhotosUI
+import UniformTypeIdentifiers
 
 struct ScreenScaffold<Content: View>: View {
     let title: String
@@ -327,9 +330,236 @@ struct CommandComposer: View {
                 QuickCommandButton(title: "Build", symbol: "hammer", command: "xcodebuild -project Veqral.xcodeproj -scheme Veqral -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' CODE_SIGNING_ALLOWED=NO build")
                 QuickCommandButton(title: "Remote", symbol: "arrow.triangle.pull", command: "git remote -v")
             }
+
+            CommandAttachmentControls()
         }
         .padding(14)
         .commandComposerBackground()
+    }
+}
+
+struct CommandAttachmentControls: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    @State private var showCamera = false
+    @State private var selectedPhoto: PhotosPickerItem?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    requestCamera()
+                } label: {
+                    Label("Camera", systemImage: "camera")
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                PhotosPicker(selection: $selectedPhoto, matching: .images, photoLibrary: .shared()) {
+                    Label("Photos", systemImage: "photo.on.rectangle")
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                if !store.pendingAttachments.isEmpty {
+                    Button(role: .destructive) {
+                        store.clearAttachments()
+                    } label: {
+                        Label("Clear", systemImage: "xmark.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                }
+
+                Spacer()
+            }
+            .font(.footnote.weight(.semibold))
+
+            if !store.pendingAttachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(store.pendingAttachments) { attachment in
+                            AttachmentChip(attachment: attachment) {
+                                store.removeAttachment(attachment)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+
+            if !store.attachmentMessage.isEmpty {
+                Text(store.attachmentMessage)
+                    .font(.caption)
+                    .foregroundStyle(store.attachmentMessage.localizedCaseInsensitiveContains("denied") || store.attachmentMessage.localizedCaseInsensitiveContains("restricted") ? VQTheme.amber : VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .sheet(isPresented: $showCamera) {
+            CameraCaptureView { image in
+                if let data = image.jpegData(compressionQuality: 0.82) {
+                    store.addImageAttachment(data: data, fileExtension: "jpg", mimeType: "image/jpeg")
+                } else {
+                    store.attachmentMessage = "Camera capture failed: image data could not be encoded."
+                }
+                showCamera = false
+            } onCancel: {
+                showCamera = false
+            }
+            .ignoresSafeArea()
+        }
+        .onChange(of: selectedPhoto) { _, item in
+            guard let item else { return }
+            Task {
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self) else {
+                        await MainActor.run {
+                            store.attachmentMessage = "Photo could not be loaded."
+                        }
+                        return
+                    }
+                    let type = item.supportedContentTypes.first
+                    await MainActor.run {
+                        store.addImageAttachment(
+                            data: data,
+                            fileExtension: type?.preferredFilenameExtension ?? "jpg",
+                            mimeType: type?.preferredMIMEType ?? "image/jpeg"
+                        )
+                        selectedPhoto = nil
+                    }
+                } catch {
+                    await MainActor.run {
+                        store.attachmentMessage = "Photo load failed: \(error.localizedDescription)"
+                        selectedPhoto = nil
+                    }
+                }
+            }
+        }
+    }
+
+    private func requestCamera() {
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            store.attachmentMessage = "Camera is not available on this device. Use Photos instead."
+            return
+        }
+
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            showCamera = true
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                Task { @MainActor in
+                    if granted {
+                        showCamera = true
+                    } else {
+                        store.attachmentMessage = "Camera permission denied. Enable it in Settings to attach captures."
+                    }
+                }
+            }
+        case .denied:
+            store.attachmentMessage = "Camera permission denied. Enable it in Settings to attach captures."
+        case .restricted:
+            store.attachmentMessage = "Camera access is restricted on this device."
+        @unknown default:
+            store.attachmentMessage = "Camera authorization state is unavailable."
+        }
+    }
+}
+
+private struct AttachmentChip: View {
+    let attachment: CommandAttachment
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let image = UIImage(data: attachment.data) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 34, height: 34)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            } else {
+                Image(systemName: "photo")
+                    .frame(width: 34, height: 34)
+                    .foregroundStyle(VQTheme.accent)
+                    .background(VQTheme.accent.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.fileName)
+                    .font(.caption2.weight(.semibold))
+                    .lineLimit(1)
+                Text(byteLabel(attachment.byteCount))
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+            }
+
+            Button(action: remove) {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.bold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(VQTheme.secondaryText)
+        }
+        .padding(6)
+        .background(VQTheme.control.opacity(0.62))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
+        }
+    }
+
+    private func byteLabel(_ bytes: Int) -> String {
+        if bytes >= 1_048_576 {
+            return String(format: "%.1f MB", Double(bytes) / 1_048_576)
+        }
+        if bytes >= 1024 {
+            return String(format: "%.1f KB", Double(bytes) / 1024)
+        }
+        return "\(bytes) B"
+    }
+}
+
+private struct CameraCaptureView: UIViewControllerRepresentable {
+    let onImage: (UIImage) -> Void
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onImage: onImage, onCancel: onCancel)
+    }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.cameraCaptureMode = .photo
+        picker.delegate = context.coordinator
+        picker.modalPresentationStyle = .fullScreen
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        let onImage: (UIImage) -> Void
+        let onCancel: () -> Void
+
+        init(onImage: @escaping (UIImage) -> Void, onCancel: @escaping () -> Void) {
+            self.onImage = onImage
+            self.onCancel = onCancel
+        }
+
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            if let image = info[.originalImage] as? UIImage {
+                onImage(image)
+            } else {
+                onCancel()
+            }
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            onCancel()
+        }
     }
 }
 
@@ -550,6 +780,35 @@ struct DeviceRow: View {
     }
 }
 
+struct RemoteDeviceSummaryRow: View {
+    let device: RemoteDeviceRecord
+    let isCurrent: Bool
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: isCurrent ? "iphone.gen3" : "rectangle.connected.to.line.below")
+                .frame(width: 28, height: 28)
+                .foregroundStyle(device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green)
+                .background((device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green).opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(device.name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                    .lineLimit(1)
+                Text(device.id)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            StatusPill(title: device.lastSeenAt == nil ? "Paired" : "Seen", tint: device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 struct ContextPackageIndicator: View {
     let title: String
     let subtitle: String
@@ -558,7 +817,7 @@ struct ContextPackageIndicator: View {
     init(
         title: String = "Shared Context Package",
         subtitle: String = "Same memory, requirements, policies, repo context, and output contract are passed to every role.",
-        items: [String] = MockData.contextPackage
+        items: [String] = ContextPackage.items
     ) {
         self.title = title
         self.subtitle = subtitle

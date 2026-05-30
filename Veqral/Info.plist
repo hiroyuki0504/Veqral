@@ -40,6 +40,10 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Veqral connects to your paired Mac Host over Tailscale to start and supervise Hermes runs.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Veqral lets you attach camera captures to agent run instructions.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Veqral lets you attach selected images from Photos to agent run instructions.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
