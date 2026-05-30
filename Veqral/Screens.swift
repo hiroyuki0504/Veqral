@@ -1,15 +1,27 @@
 import SwiftUI
 
 struct DashboardView: View {
+    @EnvironmentObject private var store: CommandCenterStore
     private let columns = [GridItem(.adaptive(minimum: 156), spacing: 12)]
     private let panelColumns = [GridItem(.adaptive(minimum: 300), spacing: 14)]
+
+    private var metrics: [CommandMetric] {
+        let activeCount = store.runs.filter { [.running, .waiting, .approval].contains($0.status) }.count
+        let runningCount = store.runs.filter { $0.status == .running }.count
+        return [
+            CommandMetric(title: "Active runs", value: "\(activeCount)", detail: "\(runningCount) running", symbol: "play.circle", tint: VQTheme.accent),
+            CommandMetric(title: "Approvals", value: "\(store.pendingApprovals().count)", detail: "Deletion, deploy, secrets", symbol: "hand.raised", tint: VQTheme.amber),
+            CommandMetric(title: "Mac Host", value: store.workspace.canRunLocalCommands ? "1" : "0", detail: store.workspace.tailscaleIP.isEmpty ? "Tailscale pending" : store.workspace.tailscaleIP, symbol: "macbook.and.iphone", tint: store.workspace.canRunLocalCommands ? VQTheme.green : VQTheme.amber),
+            CommandMetric(title: "Context", value: "\(MockData.contextPackage.count)", detail: "Shared package items", symbol: "archivebox", tint: VQTheme.green)
+        ]
+    }
 
     var body: some View {
         ScreenScaffold(title: "Command", systemImage: "command") {
             CommandComposer()
 
             LazyVGrid(columns: columns, spacing: 12) {
-                ForEach(MockData.metrics) { metric in
+                ForEach(metrics) { metric in
                     MetricTile(metric: metric)
                 }
             }
@@ -17,9 +29,15 @@ struct DashboardView: View {
             LazyVGrid(columns: panelColumns, spacing: 14) {
                 VQPanel("Active Runs", systemImage: "play.rectangle.on.rectangle", actionImage: "arrow.right") {
                     VStack(alignment: .leading, spacing: 12) {
-                        ForEach(MockData.runs.prefix(3)) { run in
-                            RunRow(run: run)
-                            if run.id != MockData.runs.prefix(3).last?.id {
+                        let visibleRuns = Array(store.runs.prefix(3))
+                        ForEach(visibleRuns) { run in
+                            Button {
+                                store.selectRun(run.id)
+                            } label: {
+                                CommandRunListRow(run: run, isSelected: store.selectedRunID == run.id)
+                            }
+                            .buttonStyle(.plain)
+                            if run.id != visibleRuns.last?.id {
                                 EmptyDivider()
                             }
                         }
@@ -28,9 +46,15 @@ struct DashboardView: View {
 
                 VQPanel("Approval Queue", systemImage: "hand.raised", actionImage: "arrow.right") {
                     VStack(alignment: .leading, spacing: 12) {
-                        ForEach(MockData.approvals.prefix(2)) { approval in
-                            ApprovalRow(approval, compact: true)
-                            if approval.id != MockData.approvals.prefix(2).last?.id {
+                        let pending = store.pendingApprovals(limit: 2)
+                        if pending.isEmpty {
+                            Text("Risky commands and Hermes prompts pause here before execution.")
+                                .font(.subheadline)
+                                .foregroundStyle(VQTheme.secondaryText)
+                        }
+                        ForEach(pending) { approval in
+                            CommandApprovalQueueRow(approval: approval)
+                            if approval.id != pending.last?.id {
                                 EmptyDivider()
                             }
                         }
@@ -194,42 +218,79 @@ struct RequirementsView: View {
 }
 
 struct DevicesView: View {
+    @EnvironmentObject private var store: CommandCenterStore
     private let columns = [GridItem(.adaptive(minimum: 320), spacing: 14)]
 
     var body: some View {
         ScreenScaffold(title: "Devices", systemImage: "macbook.and.iphone") {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
-                VQPanel("Pair Mac Host", systemImage: "qrcode.viewfinder") {
+                VQPanel("This Device", systemImage: "laptopcomputer") {
                     HStack(alignment: .top, spacing: 16) {
-                        QRPlaceholder()
+                        Image(systemName: store.workspace.canRunLocalCommands ? "checkmark.seal" : "exclamationmark.triangle")
+                            .font(.system(size: 44, weight: .light))
+                            .frame(width: 92, height: 92)
+                            .foregroundStyle(store.workspace.canRunLocalCommands ? VQTheme.green : VQTheme.amber)
+                            .background((store.workspace.canRunLocalCommands ? VQTheme.green : VQTheme.amber).opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         VStack(alignment: .leading, spacing: 12) {
-                            KeyValueLine(key: "Transport", value: "Tailscale")
-                            KeyValueLine(key: "Pairing", value: "QR + device key")
-                            KeyValueLine(key: "Host", value: "Menu bar app")
-                            KeyValueLine(key: "Token", value: "Keychain")
+                            KeyValueLine(key: "Device", value: store.workspace.deviceName)
+                            KeyValueLine(key: "Host", value: store.workspace.hostName)
+                            KeyValueLine(key: "Local shell", value: store.workspace.canRunLocalCommands ? "Available" : "Mac Host required")
+                            KeyValueLine(key: "Hermes", value: store.workspace.hermesLabel)
+                            KeyValueLine(key: "Workspace", value: store.workspace.workingDirectory)
                             HStack {
-                                Button(action: {}) {
-                                    Label("Scan", systemImage: "camera.viewfinder")
+                                Button(action: store.refreshWorkspace) {
+                                    Label("Refresh", systemImage: "arrow.clockwise")
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .buttonBorderShape(.roundedRectangle(radius: 8))
-                                Button(action: {}) {
-                                    Image(systemName: "plus")
-                                }
-                                .buttonStyle(.bordered)
-                                .buttonBorderShape(.roundedRectangle(radius: 8))
-                                .help("Add manually")
                             }
                             .font(.footnote.weight(.semibold))
                         }
                     }
                 }
 
-                ForEach(MockData.devices) { device in
-                    VQPanel(device.name, systemImage: device.status == .offline ? "desktopcomputer.trianglebadge.exclamationmark" : "desktopcomputer") {
-                        DeviceRow(device: device)
-                        EmptyDivider()
-                        KeyValueLine(key: "Active run", value: device.activeRun)
+                VQPanel("Workspace", systemImage: "folder") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        KeyValueLine(key: "Project", value: store.workspace.projectName)
+                        KeyValueLine(key: "Git root", value: store.workspace.rootPath.isEmpty ? "Not detected" : store.workspace.rootPath)
+                        KeyValueLine(key: "Branch", value: store.workspace.branchLabel)
+                        KeyValueLine(key: "State", value: store.workspace.statusSummary)
+                        KeyValueLine(key: "Hermes path", value: store.workspace.hermesPath.isEmpty ? "Not detected" : store.workspace.hermesPath)
+                        KeyValueLine(key: "Tailscale", value: store.workspace.tailscaleIP.isEmpty ? "Not detected" : store.workspace.tailscaleIP)
+                        if let error = store.workspace.errorMessage {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(VQTheme.amber)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                VQPanel("Mac Host Pairing", systemImage: "qrcode.viewfinder") {
+                    HStack(alignment: .top, spacing: 16) {
+                        QRCodeView(payload: store.pairingPayload)
+                            .frame(width: 132, height: 132)
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            KeyValueLine(key: "Endpoint", value: store.workspace.macHostEndpoint)
+                            KeyValueLine(key: "Token", value: "\(store.pairingToken.prefix(8))...")
+                            KeyValueLine(key: "Transport", value: "Tailscale WebSocket")
+                            KeyValueLine(key: "Host app", value: "Menu bar agent, login item")
+                            HStack {
+                                Button(action: store.rotatePairingToken) {
+                                    Label("Rotate", systemImage: "arrow.clockwise")
+                                }
+                                .buttonStyle(.bordered)
+                                .buttonBorderShape(.roundedRectangle(radius: 8))
+                                Button(action: store.refreshWorkspace) {
+                                    Label("Check", systemImage: "network")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .buttonBorderShape(.roundedRectangle(radius: 8))
+                            }
+                            .font(.footnote.weight(.semibold))
+                        }
                     }
                 }
             }
@@ -238,23 +299,24 @@ struct DevicesView: View {
 }
 
 struct ProjectsView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
     var body: some View {
         ScreenScaffold(title: "Projects", systemImage: "folder") {
-            ForEach(MockData.projects) { project in
-                VQPanel(project.name, systemImage: "folder.badge.gearshape") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            StatusPill(title: project.status, tint: VQTheme.accent)
-                            Spacer()
-                            Label("\(project.activeRuns)", systemImage: "play.circle")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(VQTheme.secondaryText)
-                        }
-                        KeyValueLine(key: "Repository", value: project.repo)
-                        KeyValueLine(key: "Local path", value: project.localPath)
-                        KeyValueLine(key: "Memory entries", value: "\(project.memoryCount)")
-                        FlowLayout(items: project.team)
+            VQPanel(store.workspace.projectName, systemImage: "folder.badge.gearshape") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        StatusPill(title: store.workspace.statusSummary, tint: store.workspace.changedFiles == 0 ? VQTheme.green : VQTheme.amber)
+                        Spacer()
+                        Label("\(store.runs.count)", systemImage: "play.circle")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(VQTheme.secondaryText)
                     }
+                    KeyValueLine(key: "Repository", value: store.workspace.remoteLabel)
+                    KeyValueLine(key: "Local path", value: store.workspace.workingDirectory)
+                    KeyValueLine(key: "Git root", value: store.workspace.rootPath.isEmpty ? "Not detected" : store.workspace.rootPath)
+                    KeyValueLine(key: "Branch", value: store.workspace.branchLabel)
+                    FlowLayout(items: ["Hermes Agent", "Local Shell", "Approvals", "Persisted Runs", "Git Diff"])
                 }
             }
         }
@@ -266,6 +328,10 @@ struct AgentsView: View {
 
     var body: some View {
         ScreenScaffold(title: "Agents", systemImage: "person.3.sequence") {
+            ContextPackageIndicator(
+                subtitle: "PM, implementer, reviewer, tester, and researcher receive the same project memory and safety contract."
+            )
+
             VQPanel("Organization", systemImage: "point.3.connected.trianglepath.dotted") {
                 OrganizationGraph()
             }
@@ -291,18 +357,109 @@ struct AgentsView: View {
     }
 }
 
+struct ModelAssignmentView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    private let columns = [GridItem(.adaptive(minimum: 300), spacing: 14)]
+
+    var body: some View {
+        ScreenScaffold(title: "Models", systemImage: "cpu") {
+            ContextPackageIndicator(
+                title: "Model-independent Context",
+                subtitle: "Provider prompts can differ, but every role is generated from the same Context Package."
+            )
+
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
+                ForEach(MockData.modelProfiles) { profile in
+                    VQPanel(profile.role, systemImage: modelSymbol(for: profile.role)) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(profile.modelName)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(VQTheme.ink)
+                                    Text(profile.provider)
+                                        .font(.caption)
+                                        .foregroundStyle(VQTheme.secondaryText)
+                                }
+                                Spacer()
+                                StatusPill(title: profile.assignedDevice, tint: VQTheme.accent)
+                            }
+
+                            HStack(spacing: 8) {
+                                ModelTrait(label: "Cost", value: profile.costLevel, tint: profile.costLevel == "High" ? VQTheme.amber : VQTheme.green)
+                                ModelTrait(label: "Speed", value: profile.speedLevel, tint: profile.speedLevel == "High" ? VQTheme.green : VQTheme.steel)
+                                ModelTrait(label: "Reasoning", value: profile.reasoningLevel, tint: VQTheme.violet)
+                            }
+
+                            Text(profile.contextPolicy)
+                                .font(.caption)
+                                .foregroundStyle(VQTheme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            FlowLayout(items: profile.toolSupport)
+                        }
+                    }
+                }
+            }
+
+            VQPanel("Runtime Engines", systemImage: "bolt.horizontal") {
+                VStack(alignment: .leading, spacing: 12) {
+                    KeyValueLine(key: "Selected runtime", value: store.selectedRuntime.title)
+                    KeyValueLine(key: "Hermes", value: store.workspace.hermesLabel)
+                    KeyValueLine(key: "Local shell", value: store.workspace.canRunLocalCommands ? "Available on Mac" : "Requires Mac Host")
+                    KeyValueLine(key: "Output contract", value: "logs / diffs / artifacts / approvals")
+                }
+            }
+        }
+    }
+
+    private func modelSymbol(for role: String) -> String {
+        let lower = role.lowercased()
+        if lower.contains("pm") || lower.contains("manager") { return "person.badge.key" }
+        if lower.contains("architect") { return "square.stack.3d.up" }
+        if lower.contains("implementer") { return "hammer" }
+        if lower.contains("reviewer") { return "checkmark.seal" }
+        if lower.contains("tester") { return "testtube.2" }
+        return "magnifyingglass"
+    }
+}
+
+private struct ModelTrait: View {
+    let label: String
+    let value: String
+    let tint: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(VQTheme.secondaryText)
+            Text(value)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(tint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(tint.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
 struct RunsView: View {
+    @EnvironmentObject private var store: CommandCenterStore
     @State private var selectedPhase: RunPhase? = nil
 
-    private var filteredRuns: [AgentRun] {
-        guard let selectedPhase else { return MockData.runs }
-        return MockData.runs.filter { $0.phase == selectedPhase }
+    private var filteredRuns: [CommandRun] {
+        guard let selectedPhase else { return store.runs }
+        return store.runs.filter { $0.phase == selectedPhase }
     }
 
     var body: some View {
         ScreenScaffold(title: "Runs", systemImage: "play.rectangle.on.rectangle") {
             VQPanel("Pipeline", systemImage: "timeline.selection") {
-                PhaseRail(current: selectedPhase ?? .implementation)
+                PhaseRail(current: selectedPhase ?? store.selectedRun?.phase ?? .implementation)
                 Picker("Phase", selection: $selectedPhase) {
                     Text("All").tag(nil as RunPhase?)
                     ForEach(RunPhase.allCases) { phase in
@@ -314,8 +471,18 @@ struct RunsView: View {
 
             VQPanel("Queue", systemImage: "list.bullet.rectangle") {
                 VStack(alignment: .leading, spacing: 12) {
+                    if filteredRuns.isEmpty {
+                        Text("No runs in this phase yet.")
+                            .font(.subheadline)
+                            .foregroundStyle(VQTheme.secondaryText)
+                    }
                     ForEach(filteredRuns) { run in
-                        RunRow(run: run)
+                        Button {
+                            store.selectRun(run.id)
+                        } label: {
+                            CommandRunListRow(run: run, isSelected: store.selectedRunID == run.id)
+                        }
+                        .buttonStyle(.plain)
                         if run.id != filteredRuns.last?.id {
                             EmptyDivider()
                         }
@@ -334,7 +501,11 @@ struct TerminalView: View {
             VQPanel("Command", systemImage: "paperplane") {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 10) {
-                        TextField("Macで実行するコマンド", text: $store.commandDraft, axis: .vertical)
+                        RuntimeSegmentedControl()
+                    }
+
+                    HStack(spacing: 10) {
+                        TextField("Command to run on Mac", text: $store.commandDraft, axis: .vertical)
                             .textFieldStyle(.plain)
                             .lineLimit(1...3)
                             .font(.body.monospaced())
@@ -354,10 +525,20 @@ struct TerminalView: View {
                         TextField("Working directory", text: $store.workingDirectory)
                             .textFieldStyle(.plain)
                             .font(.caption.monospaced())
+                            .onSubmit {
+                                store.refreshWorkspace()
+                            }
                     }
                     .foregroundStyle(VQTheme.secondaryText)
+                    HStack {
+                        StatusPill(title: store.workspace.statusSummary, tint: store.workspace.changedFiles == 0 ? VQTheme.green : VQTheme.amber)
+                        Text(store.workspace.branchLabel)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(VQTheme.secondaryText)
+                            .lineLimit(1)
+                    }
                     #else
-                    Text("iPhone/iPadではRunを保存します。ローカル実行はMac版で行います。")
+                    Text("On iPhone and iPad this saves the run. Local execution happens from the Mac build.")
                         .font(.caption)
                         .foregroundStyle(VQTheme.secondaryText)
                     #endif
@@ -409,8 +590,8 @@ struct TerminalView: View {
                             .truncationMode(.middle)
                         Spacer()
                         Button {
-                            if let command = store.selectedRun?.command {
-                                store.submitCommand(command)
+                            if let run = store.selectedRun {
+                                store.submitCommand(run.command, runtime: run.runtimeOrDefault)
                             }
                         } label: {
                             Image(systemName: "paperplane")
@@ -503,7 +684,7 @@ struct ApprovalsView: View {
     @EnvironmentObject private var store: CommandCenterStore
 
     var body: some View {
-        ScreenScaffold(title: "承認", systemImage: "hand.raised") {
+        ScreenScaffold(title: "Approvals", systemImage: "hand.raised") {
             VQPanel("Policy", systemImage: "lock.shield") {
                 FlowLayout(items: ["File deletion", "Billing", "Production", "Secrets", "Screen control"])
             }
@@ -511,7 +692,7 @@ struct ApprovalsView: View {
             let pending = store.pendingApprovals()
             if pending.isEmpty {
                 VQPanel("Queue", systemImage: "checkmark.shield") {
-                    Text("承認待ちはありません。危険なコマンドはここで止まり、承認後にMac版で実行されます。")
+                    Text("No pending approvals. Risky commands stop here and run from the Mac build after approval.")
                         .font(.subheadline)
                         .foregroundStyle(VQTheme.secondaryText)
                 }
@@ -557,12 +738,12 @@ private struct CommandApprovalQueueRow: View {
             HStack {
                 StatusPill(title: approval.riskLabel, tint: approval.tint)
                 Spacer()
-                Button("拒否") {
+                Button("Reject") {
                     store.reject(approval)
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle(radius: 8))
-                Button("承認") {
+                Button("Approve") {
                     store.approve(approval)
                 }
                 .buttonStyle(.borderedProminent)
@@ -611,12 +792,14 @@ struct MemoryView: View {
 }
 
 struct GitHubOpsView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
     var body: some View {
         ScreenScaffold(title: "GitHub", systemImage: "point.3.connected.trianglepath.dotted") {
             VQPanel("Release Flow", systemImage: "arrow.triangle.branch") {
                 VStack(alignment: .leading, spacing: 14) {
-                    GitHubStep(title: "Branch", value: "codex/mvp-0-prototype", status: "Ready", tint: VQTheme.green)
-                    GitHubStep(title: "Commit", value: "Waiting for review", status: "Draft", tint: VQTheme.amber)
+                    GitHubStep(title: "Branch", value: store.workspace.branchLabel, status: store.workspace.branch.isEmpty ? "Missing" : "Ready", tint: store.workspace.branch.isEmpty ? VQTheme.amber : VQTheme.green)
+                    GitHubStep(title: "Working Tree", value: store.workspace.statusSummary, status: store.workspace.changedFiles == 0 ? "Clean" : "Dirty", tint: store.workspace.changedFiles == 0 ? VQTheme.green : VQTheme.amber)
                     GitHubStep(title: "Pull Request", value: "Not opened", status: "Next", tint: VQTheme.secondaryText)
                     GitHubStep(title: "CI", value: "No checks yet", status: "Idle", tint: VQTheme.secondaryText)
                     GitHubStep(title: "Deploy", value: "Approval required", status: "Locked", tint: VQTheme.red)
@@ -624,8 +807,8 @@ struct GitHubOpsView: View {
             }
 
             VQPanel("Repository", systemImage: "tray.full") {
-                KeyValueLine(key: "Remote", value: "github.com/hiroyuki/veqral")
-                KeyValueLine(key: "Working tree", value: "Prototype changes")
+                KeyValueLine(key: "Remote", value: store.workspace.remoteLabel)
+                KeyValueLine(key: "Working tree", value: store.workspace.statusSummary)
                 KeyValueLine(key: "Review mode", value: "Agent + human approval")
             }
         }

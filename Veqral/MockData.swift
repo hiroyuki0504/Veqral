@@ -73,6 +73,75 @@ enum MockData {
         AgentProfile(name: "Signal", role: "Researcher", model: "Web research profile", device: "MacBook Pro", status: .waiting, permissions: ["Web", "Docs", "Memory candidates"])
     ]
 
+    static let modelProfiles: [ModelProfile] = [
+        ModelProfile(
+            role: "PM / Manager",
+            provider: "Anthropic",
+            modelName: "Claude Opus profile",
+            costLevel: "High",
+            speedLevel: "Medium",
+            reasoningLevel: "Very high",
+            toolSupport: ["Requirements", "Memory write", "Delegation"],
+            contextPolicy: "May write canonical memory after user approval.",
+            assignedDevice: "MacBook Pro"
+        ),
+        ModelProfile(
+            role: "Architect",
+            provider: "OpenAI / Anthropic",
+            modelName: "Reasoning architect profile",
+            costLevel: "High",
+            speedLevel: "Medium",
+            reasoningLevel: "High",
+            toolSupport: ["Repo read", "Design review", "Decision log"],
+            contextPolicy: "Reads full context package and writes decision candidates.",
+            assignedDevice: "MacBook Pro"
+        ),
+        ModelProfile(
+            role: "Implementer",
+            provider: "OpenAI Codex",
+            modelName: "Codex implementation profile",
+            costLevel: "Medium",
+            speedLevel: "High",
+            reasoningLevel: "High",
+            toolSupport: ["Terminal", "File edits", "Tests"],
+            contextPolicy: "Reads shared context and returns diffs, logs, and memory candidates.",
+            assignedDevice: "MacBook Pro"
+        ),
+        ModelProfile(
+            role: "Reviewer",
+            provider: "Claude Code",
+            modelName: "Code review profile",
+            costLevel: "Medium",
+            speedLevel: "Medium",
+            reasoningLevel: "High",
+            toolSupport: ["Diff review", "Security policy", "GitHub"],
+            contextPolicy: "Reads repo summary and output contract; cannot write memory directly.",
+            assignedDevice: "Mac mini"
+        ),
+        ModelProfile(
+            role: "Tester",
+            provider: "OpenAI Codex",
+            modelName: "Test runner profile",
+            costLevel: "Low",
+            speedLevel: "High",
+            reasoningLevel: "Medium",
+            toolSupport: ["Terminal", "Simulator", "Artifacts"],
+            contextPolicy: "Reads task, repo, and device capabilities; reports test artifacts.",
+            assignedDevice: "Mac mini"
+        ),
+        ModelProfile(
+            role: "Researcher",
+            provider: "Web-capable model",
+            modelName: "Research profile",
+            costLevel: "Medium",
+            speedLevel: "Medium",
+            reasoningLevel: "Medium",
+            toolSupport: ["Browser", "Docs", "Session search"],
+            contextPolicy: "Writes source-backed notes as memory candidates only.",
+            assignedDevice: "MacBook Pro"
+        )
+    ]
+
     static let runs: [AgentRun] = [
         AgentRun(title: "Shape MVP 0 SwiftUI prototype", phase: .implementation, status: .running, agent: "Forge", device: "MacBook Pro", model: "Codex profile", progress: 0.72, started: "13:48"),
         AgentRun(title: "Extract product requirements from handoff", phase: .requirements, status: .complete, agent: "Northstar", device: "MacBook Pro", model: "Claude Opus profile", progress: 1.0, started: "13:33"),
@@ -160,9 +229,12 @@ enum MockData {
         "Decision Log",
         "Current Task",
         "Repo Summary",
+        "Relevant Files",
+        "Coding Conventions",
         "Security Policy",
         "Approval Policy",
         "Available Tools",
+        "Device Capabilities",
         "Output Contract"
     ]
 }
