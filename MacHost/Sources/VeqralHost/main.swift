@@ -3148,6 +3148,7 @@ private func tailscaleIP() -> String? {
     let process = Process()
     let pipe = Pipe()
     process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    process.currentDirectoryURL = URL(fileURLWithPath: "/")
     process.arguments = ["-lc", "command -v tailscale >/dev/null 2>&1 && tailscale ip -4 | head -n 1"]
     process.standardOutput = pipe
     try? process.run()
