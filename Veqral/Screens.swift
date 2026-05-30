@@ -844,14 +844,60 @@ private struct CommandApprovalQueueRow: View {
 }
 
 struct MemoryView: View {
+    @EnvironmentObject private var store: CommandCenterStore
     @State private var selectedScope: MemoryScope = .project
 
     private var filteredMemory: [MemoryEntry] {
         MockData.memory.filter { $0.scope == selectedScope }
     }
 
+    private var selectedRemoteFile: RemoteMemoryFile? {
+        guard let selectedRemoteMemoryID = store.selectedRemoteMemoryID else { return nil }
+        return store.remoteMemoryFiles.first { $0.id == selectedRemoteMemoryID }
+    }
+
     var body: some View {
         ScreenScaffold(title: "Memory", systemImage: "brain.head.profile") {
+            VQPanel("Hermes Memory Files", systemImage: "externaldrive.connected.to.line.below") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        StatusPill(
+                            title: store.remoteHost.isEnabled && store.remoteHost.isPaired ? "Mac Host Connected" : "Pair Mac Host",
+                            tint: store.remoteHost.isEnabled && store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber
+                        )
+                        StatusPill(title: "USER.md", tint: VQTheme.accent)
+                        StatusPill(title: "MEMORY.md", tint: VQTheme.accent)
+                        StatusPill(title: "Skills", tint: VQTheme.secondaryText)
+                        Spacer()
+                        Button {
+                            store.refreshRemoteMemory()
+                        } label: {
+                            Label(store.isLoadingRemoteMemory ? "Loading" : "Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                        .disabled(store.isLoadingRemoteMemory || !(store.remoteHost.isEnabled && store.remoteHost.isPaired))
+                    }
+                    .font(.footnote.weight(.semibold))
+
+                    if !(store.remoteHost.isEnabled && store.remoteHost.isPaired) {
+                        Text("DevicesでMac HostをQRペアリングすると、Mac上のHermesメモリをここから確認・編集できます。")
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        RemoteMemoryEditor(selectedFile: selectedRemoteFile)
+                    }
+
+                    if !store.remoteMemoryMessage.isEmpty {
+                        Text(store.remoteMemoryMessage)
+                            .font(.caption)
+                            .foregroundStyle(store.remoteMemoryMessage.contains("failed") || store.remoteMemoryMessage.contains("失敗") ? VQTheme.amber : VQTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
             VQPanel("Scope", systemImage: "square.stack.3d.up") {
                 Picker("Scope", selection: $selectedScope) {
                     ForEach(MemoryScope.allCases) { scope in
@@ -874,6 +920,11 @@ struct MemoryView: View {
 
             VQPanel("Context Package", systemImage: "archivebox") {
                 FlowLayout(items: MockData.contextPackage)
+            }
+        }
+        .onAppear {
+            if store.remoteHost.isEnabled, store.remoteHost.isPaired, store.remoteMemoryFiles.isEmpty {
+                store.refreshRemoteMemory()
             }
         }
     }
@@ -1102,6 +1153,127 @@ private struct RemoteConnectionField: View {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(VQTheme.hairline, lineWidth: 1)
                 }
+        }
+    }
+}
+
+private struct RemoteMemoryEditor: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let selectedFile: RemoteMemoryFile?
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 14) {
+                fileList
+                    .frame(width: 230)
+                editor
+            }
+
+            VStack(alignment: .leading, spacing: 14) {
+                fileList
+                editor
+            }
+        }
+    }
+
+    private var fileList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if store.remoteMemoryFiles.isEmpty {
+                Text("No Hermes memory files loaded.")
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+            } else {
+                ForEach(store.remoteMemoryFiles) { file in
+                    Button {
+                        store.selectRemoteMemory(file)
+                    } label: {
+                        HStack(spacing: 9) {
+                            Image(systemName: file.kind == "skill" ? "hammer" : "doc.text")
+                                .foregroundStyle(file.id == store.selectedRemoteMemoryID ? VQTheme.accent : VQTheme.secondaryText)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(file.title)
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(1)
+                                Text(file.relativePath)
+                                    .font(.caption2)
+                                    .foregroundStyle(VQTheme.secondaryText)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(file.id == store.selectedRemoteMemoryID ? VQTheme.accent.opacity(0.12) : VQTheme.control.opacity(0.46))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var editor: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(selectedFile?.relativePath ?? "Select a file")
+                        .font(.caption.weight(.semibold))
+                    if let selectedFile {
+                        Text("\(selectedFile.bytes) bytes")
+                            .font(.caption2)
+                            .foregroundStyle(VQTheme.secondaryText)
+                    }
+                }
+                Spacer()
+                Button {
+                    store.previewRemoteMemoryDiff()
+                } label: {
+                    Label("Diff", systemImage: "doc.text.magnifyingglass")
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .disabled(selectedFile == nil || store.isLoadingRemoteMemory)
+
+                Button {
+                    store.saveRemoteMemory()
+                } label: {
+                    Label("Save", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .disabled(selectedFile == nil || store.isLoadingRemoteMemory)
+            }
+            .font(.footnote.weight(.semibold))
+
+            TextEditor(text: $store.remoteMemoryContent)
+                .font(.system(.caption, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .frame(minHeight: 220)
+                .background(VQTheme.control.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(VQTheme.hairline, lineWidth: 1)
+                }
+
+            if !store.remoteMemoryDiff.isEmpty {
+                ScrollView(.horizontal, showsIndicators: true) {
+                    Text(store.remoteMemoryDiff)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(VQTheme.ink)
+                        .textSelection(.enabled)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 180)
+                .background(VQTheme.panel.opacity(0.65))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(VQTheme.hairline, lineWidth: 1)
+                }
+            }
         }
     }
 }

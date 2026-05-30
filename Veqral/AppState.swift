@@ -239,6 +239,38 @@ struct RemotePairResponse: Codable, Sendable {
     var token: String
 }
 
+struct RemoteMemoryFile: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var title: String
+    var kind: String
+    var path: String
+    var relativePath: String
+    var updatedAt: Date?
+    var bytes: Int
+    var isEditable: Bool
+}
+
+struct RemoteMemoryListResponse: Codable, Sendable {
+    var files: [RemoteMemoryFile]
+}
+
+struct RemoteMemoryContentResponse: Codable, Sendable {
+    var file: RemoteMemoryFile
+    var content: String
+}
+
+struct RemoteMemoryDiffResponse: Codable, Sendable {
+    var id: String
+    var diff: String
+    var hasChanges: Bool
+}
+
+struct RemoteMemoryWriteResponse: Codable, Sendable {
+    var file: RemoteMemoryFile
+    var diff: String
+    var hasChanges: Bool
+}
+
 @MainActor
 final class CommandCenterStore: ObservableObject {
     @Published var runs: [CommandRun]
@@ -261,6 +293,12 @@ final class CommandCenterStore: ObservableObject {
     }
     @Published var pairingToken: String = ""
     @Published var workspace: WorkspaceSnapshot
+    @Published var remoteMemoryFiles: [RemoteMemoryFile] = []
+    @Published var selectedRemoteMemoryID: String?
+    @Published var remoteMemoryContent: String = ""
+    @Published var remoteMemoryDiff: String = ""
+    @Published var remoteMemoryMessage: String = ""
+    @Published var isLoadingRemoteMemory = false
     @Published var workingDirectory: String {
         didSet {
             guard isReadyForAutosave, oldValue != workingDirectory else { return }
@@ -426,6 +464,95 @@ final class CommandCenterStore: ObservableObject {
     func disableRemoteHost() {
         remoteHost.isEnabled = false
         persist()
+    }
+
+    func refreshRemoteMemory() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            remoteMemoryMessage = "Mac HostとペアリングするとHermesメモリを読み込めます。"
+            return
+        }
+        isLoadingRemoteMemory = true
+        remoteMemoryMessage = "Loading Hermes memory files..."
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).memoryList()
+                remoteMemoryFiles = response.files
+                if selectedRemoteMemoryID == nil || !response.files.contains(where: { $0.id == selectedRemoteMemoryID ?? "" }) {
+                    selectedRemoteMemoryID = response.files.first?.id
+                }
+                remoteMemoryMessage = "\(response.files.count) files loaded from Mac Host."
+                isLoadingRemoteMemory = false
+                if let selectedRemoteMemoryID {
+                    loadRemoteMemory(id: selectedRemoteMemoryID)
+                }
+            } catch {
+                isLoadingRemoteMemory = false
+                remoteMemoryMessage = "Memory load failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func selectRemoteMemory(_ file: RemoteMemoryFile) {
+        selectedRemoteMemoryID = file.id
+        remoteMemoryDiff = ""
+        loadRemoteMemory(id: file.id)
+    }
+
+    func loadRemoteMemory(id: String) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else { return }
+        isLoadingRemoteMemory = true
+        remoteMemoryMessage = "Loading \(id)..."
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).readMemory(id: id)
+                selectedRemoteMemoryID = response.file.id
+                remoteMemoryContent = response.content
+                remoteMemoryDiff = ""
+                remoteMemoryMessage = "Loaded \(response.file.relativePath)."
+            } catch {
+                remoteMemoryMessage = "Memory read failed: \(error.localizedDescription)"
+            }
+            isLoadingRemoteMemory = false
+        }
+    }
+
+    func previewRemoteMemoryDiff() {
+        guard let selectedRemoteMemoryID, remoteHost.isEnabled, remoteHost.isPaired else { return }
+        isLoadingRemoteMemory = true
+        remoteMemoryMessage = "Generating diff..."
+        let configuration = remoteHost
+        let content = remoteMemoryContent
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).diffMemory(id: selectedRemoteMemoryID, content: content)
+                remoteMemoryDiff = response.diff.isEmpty ? "No changes." : response.diff
+                remoteMemoryMessage = response.hasChanges ? "Review diff, then save." : "No changes to save."
+            } catch {
+                remoteMemoryMessage = "Diff failed: \(error.localizedDescription)"
+            }
+            isLoadingRemoteMemory = false
+        }
+    }
+
+    func saveRemoteMemory() {
+        guard let selectedRemoteMemoryID, remoteHost.isEnabled, remoteHost.isPaired else { return }
+        isLoadingRemoteMemory = true
+        remoteMemoryMessage = "Saving memory file..."
+        let configuration = remoteHost
+        let content = remoteMemoryContent
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).writeMemory(id: selectedRemoteMemoryID, content: content)
+                remoteMemoryDiff = response.diff.isEmpty ? "No changes." : response.diff
+                remoteMemoryMessage = response.hasChanges ? "Saved \(response.file.relativePath)." : "No changes. File left as-is."
+                refreshRemoteMemory()
+            } catch {
+                remoteMemoryMessage = "Save failed: \(error.localizedDescription)"
+                isLoadingRemoteMemory = false
+            }
+        }
     }
 
     func approve(_ approval: CommandApproval) {
@@ -1433,6 +1560,29 @@ struct RemoteHostClient: Sendable {
 
     func reject(remoteRunID: String) async throws {
         _ = try await request(path: "/v1/runs/\(remoteRunID)/reject", method: "POST", body: Data())
+    }
+
+    func memoryList() async throws -> RemoteMemoryListResponse {
+        let data = try await request(path: "/v1/memory", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteMemoryListResponse.self, from: data)
+    }
+
+    func readMemory(id: String) async throws -> RemoteMemoryContentResponse {
+        let body = try JSONEncoder.commandCenter.encode(["id": id])
+        let data = try await request(path: "/v1/memory/read", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteMemoryContentResponse.self, from: data)
+    }
+
+    func diffMemory(id: String, content: String) async throws -> RemoteMemoryDiffResponse {
+        let body = try JSONEncoder.commandCenter.encode(["id": id, "content": content])
+        let data = try await request(path: "/v1/memory/diff", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteMemoryDiffResponse.self, from: data)
+    }
+
+    func writeMemory(id: String, content: String) async throws -> RemoteMemoryWriteResponse {
+        let body = try JSONEncoder.commandCenter.encode(["id": id, "content": content])
+        let data = try await request(path: "/v1/memory/write", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteMemoryWriteResponse.self, from: data)
     }
 
     func stream(remoteRunID: String) -> AsyncThrowingStream<RemoteHostLogEvent, Error> {
