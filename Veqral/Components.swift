@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import CoreImage.CIFilterBuiltins
 
 struct ScreenScaffold<Content: View>: View {
     let title: String
@@ -16,8 +18,8 @@ struct ScreenScaffold<Content: View>: View {
             VStack(alignment: .leading, spacing: 18) {
                 HStack(spacing: 12) {
                     Image(systemName: systemImage)
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 36, height: 36)
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 34, height: 34)
                         .foregroundStyle(VQTheme.accent)
                         .background(VQTheme.accent.opacity(0.12))
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -27,22 +29,171 @@ struct ScreenScaffold<Content: View>: View {
                             .font(.system(.title2, design: .default, weight: .semibold))
                             .foregroundStyle(VQTheme.ink)
                         Text("Veqral")
-                            .font(.footnote.weight(.medium))
+                            .font(.caption.weight(.medium))
                             .foregroundStyle(VQTheme.secondaryText)
                     }
 
                     Spacer()
                 }
-                .padding(.top, 8)
+                .padding(.top, 6)
 
                 content
             }
-            .padding(.horizontal, 18)
+            .padding(.horizontal, 16)
             .padding(.bottom, 28)
         }
-        .background(VQTheme.canvas.ignoresSafeArea())
+        .background {
+            ZStack {
+                VQTheme.canvas.ignoresSafeArea()
+                LinearGradient(
+                    colors: [Color.white.opacity(0.024), Color.clear, Color.black.opacity(0.16)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+            }
+        }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct SpinningCommandNodeMark: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var spin = false
+
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            VQTheme.elevated.opacity(0.95),
+                            VQTheme.control.opacity(0.74)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay {
+                    Circle()
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                }
+                .shadow(color: VQTheme.accent.opacity(0.18), radius: size * 0.18, x: 0, y: 0)
+                .shadow(color: .black.opacity(0.28), radius: size * 0.16, x: 0, y: size * 0.08)
+
+            RotatingNodeConstellation(size: size)
+                .rotationEffect(.degrees(reduceMotion ? 24 : (spin ? 360 : 0)))
+
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            Color.white.opacity(0.96),
+                            VQTheme.amber,
+                            VQTheme.amber.opacity(0.30)
+                        ],
+                        center: .topLeading,
+                        startRadius: 0,
+                        endRadius: size * 0.18
+                    )
+                )
+                .frame(width: size * 0.26, height: size * 0.26)
+                .overlay {
+                    Circle()
+                        .stroke(VQTheme.amber.opacity(0.86), lineWidth: max(1, size * 0.035))
+                }
+                .shadow(color: VQTheme.amber.opacity(0.46), radius: size * 0.16, x: 0, y: 0)
+        }
+        .frame(width: size, height: size)
+        .onAppear {
+            guard !reduceMotion else { return }
+            startSpinning()
+        }
+        .onChange(of: reduceMotion) { _, isReduced in
+            if isReduced {
+                spin = false
+            } else {
+                startSpinning()
+            }
+        }
+        .accessibilityLabel("Command node mark")
+    }
+
+    private func startSpinning() {
+        spin = false
+        withAnimation(.linear(duration: 5.8).repeatForever(autoreverses: false)) {
+            spin = true
+        }
+    }
+}
+
+private struct RotatingNodeConstellation: View {
+    let size: CGFloat
+
+    private let nodeColors: [Color] = [
+        VQTheme.accent,
+        VQTheme.green,
+        VQTheme.amber,
+        VQTheme.violet,
+        VQTheme.steel
+    ]
+
+    var body: some View {
+        GeometryReader { proxy in
+            let side = min(proxy.size.width, proxy.size.height)
+            let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            let radius = side * 0.34
+            let nodeSize = side * 0.118
+            let lineWidth = max(1, side * 0.045)
+
+            ZStack {
+                Circle()
+                    .trim(from: 0.06, to: 0.31)
+                    .stroke(VQTheme.steel.opacity(0.82), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    .frame(width: radius * 2, height: radius * 2)
+                    .position(center)
+                    .rotationEffect(.degrees(16))
+
+                Circle()
+                    .trim(from: 0.42, to: 0.66)
+                    .stroke(VQTheme.steel.opacity(0.66), style: StrokeStyle(lineWidth: lineWidth * 0.78, lineCap: .round))
+                    .frame(width: radius * 2, height: radius * 2)
+                    .position(center)
+                    .rotationEffect(.degrees(16))
+
+                ForEach(0..<5, id: \.self) { index in
+                    let nodePoint = point(index: index, radius: radius, center: center)
+
+                    Path { path in
+                        path.move(to: center)
+                        path.addLine(to: nodePoint)
+                    }
+                    .stroke(VQTheme.steel.opacity(0.78), style: StrokeStyle(lineWidth: max(1, side * 0.033), lineCap: .round))
+
+                    Circle()
+                        .fill(nodeColors[index])
+                        .frame(width: nodeSize, height: nodeSize)
+                        .overlay {
+                            Circle()
+                                .stroke(Color.white.opacity(0.72), lineWidth: max(1, side * 0.022))
+                        }
+                        .shadow(color: nodeColors[index].opacity(0.44), radius: side * 0.070, x: 0, y: 0)
+                        .position(nodePoint)
+                }
+            }
+        }
+        .frame(width: size, height: size)
+    }
+
+    private func point(index: Int, radius: CGFloat, center: CGPoint) -> CGPoint {
+        let angle = (-CGFloat.pi / 2) + (CGFloat(index) * 2 * .pi / 5)
+        return CGPoint(
+            x: center.x + cos(angle) * radius,
+            y: center.y + sin(angle) * radius
+        )
     }
 }
 
@@ -60,15 +211,15 @@ struct VQPanel<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 if let systemImage {
                     Image(systemName: systemImage)
-                        .font(.callout.weight(.semibold))
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(VQTheme.accent)
                 }
                 Text(title)
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
                 Spacer()
                 if let actionImage {
@@ -83,7 +234,7 @@ struct VQPanel<Content: View>: View {
 
             content
         }
-        .padding(14)
+        .padding(12)
         .panelBackground()
     }
 }
@@ -94,7 +245,7 @@ struct StatusPill: View {
 
     var body: some View {
         Text(title)
-            .font(.caption.weight(.semibold))
+            .font(.caption2.weight(.semibold))
             .foregroundStyle(tint)
             .lineLimit(1)
             .padding(.horizontal, 8)
@@ -138,18 +289,23 @@ struct MetricTile: View {
 }
 
 struct CommandComposer: View {
-    @State private var commandText = "Turn the handoff into the first full-screen prototype."
+    @EnvironmentObject private var store: CommandCenterStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            RuntimeSegmentedControl()
+
             HStack(spacing: 10) {
                 Image(systemName: "sparkle.magnifyingglass")
                     .foregroundStyle(VQTheme.accent)
-                TextField("What should the agents do next?", text: $commandText, axis: .vertical)
+                TextField("What should the agents do next?", text: $store.commandDraft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...3)
                     .font(.body)
-                Button(action: {}) {
+                    .onSubmit {
+                        store.submitDraft()
+                    }
+                Button(action: store.submitDraft) {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.title2)
                 }
@@ -158,7 +314,7 @@ struct CommandComposer: View {
                 .help("Send")
             }
             .padding(12)
-            .background(Color.white.opacity(0.75))
+            .background(VQTheme.control.opacity(0.74))
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -166,23 +322,58 @@ struct CommandComposer: View {
             }
 
             HStack(spacing: 8) {
-                QuickCommandButton(title: "Draft", symbol: "checklist")
-                QuickCommandButton(title: "Build", symbol: "hammer")
-                QuickCommandButton(title: "Test", symbol: "checkmark.seal")
-                QuickCommandButton(title: "PR", symbol: "arrow.triangle.pull")
+                QuickCommandButton(title: "Status", symbol: "checklist", command: "git status --short")
+                QuickCommandButton(title: "Diff", symbol: "plus.forwardslash.minus", command: "git diff --stat")
+                QuickCommandButton(title: "Build", symbol: "hammer", command: "xcodebuild -project Veqral.xcodeproj -scheme Veqral -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' CODE_SIGNING_ALLOWED=NO build")
+                QuickCommandButton(title: "Remote", symbol: "arrow.triangle.pull", command: "git remote -v")
             }
         }
         .padding(14)
-        .panelBackground()
+        .commandComposerBackground()
+    }
+}
+
+struct RuntimeSegmentedControl: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(CommandRuntime.allCases) { runtime in
+                Button {
+                    store.selectedRuntime = runtime
+                } label: {
+                    Label(runtime.shortTitle, systemImage: runtime.symbol)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .foregroundStyle(store.selectedRuntime == runtime ? VQTheme.accent : VQTheme.secondaryText)
+                        .background(store.selectedRuntime == runtime ? VQTheme.control : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(4)
+        .background(VQTheme.control.opacity(0.36))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
+        }
     }
 }
 
 struct QuickCommandButton: View {
+    @EnvironmentObject private var store: CommandCenterStore
     let title: String
     let symbol: String
+    let command: String
 
     var body: some View {
-        Button(action: {}) {
+        Button {
+            store.submitCommand(command, runtime: .localShell)
+        } label: {
             Label(title, systemImage: symbol)
                 .font(.footnote.weight(.semibold))
                 .lineLimit(1)
@@ -191,6 +382,27 @@ struct QuickCommandButton: View {
         .buttonStyle(.bordered)
         .buttonBorderShape(.roundedRectangle(radius: 8))
         .tint(VQTheme.steel)
+    }
+}
+
+private extension View {
+    func commandComposerBackground() -> some View {
+        background {
+            ZStack {
+                VQTheme.elevated
+                LinearGradient(
+                    colors: [Color.white.opacity(0.060), Color.clear],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline.opacity(0.95), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 10)
     }
 }
 
@@ -229,7 +441,67 @@ struct RunRow: View {
     }
 }
 
+struct CommandRunListRow: View {
+    let run: CommandRun
+    var isSelected: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: run.phaseSymbol)
+                    .frame(width: 28, height: 28)
+                    .foregroundStyle(run.status.tint)
+                    .background(run.status.tint.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(run.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("\(run.agent) · \(run.device) · \(run.runtimeOrDefault.shortTitle)")
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+
+                Spacer()
+                StatusPill(title: run.status.title, tint: run.status.tint)
+            }
+
+            HStack(spacing: 8) {
+                ProgressView(value: run.progress)
+                    .tint(run.status.tint)
+                Text(run.elapsedLabel)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .frame(width: 54, alignment: .trailing)
+            }
+        }
+        .padding(10)
+        .background(isSelected ? VQTheme.accent.opacity(0.08) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(isSelected ? VQTheme.accent.opacity(0.35) : Color.clear, lineWidth: 1)
+        }
+    }
+}
+
 extension AgentRun {
+    var phaseSymbol: String {
+        switch phase {
+        case .requirements: "checklist"
+        case .implementation: "hammer"
+        case .testing: "testtube.2"
+        case .github: "point.3.connected.trianglepath.dotted"
+        case .deploy: "paperplane"
+        }
+    }
+}
+
+extension CommandRun {
     var phaseSymbol: String {
         switch phase {
         case .requirements: "checklist"
@@ -275,6 +547,93 @@ struct DeviceRow: View {
             FlowLayout(items: device.capabilities)
         }
         .padding(.vertical, 4)
+    }
+}
+
+struct ContextPackageIndicator: View {
+    let title: String
+    let subtitle: String
+    let items: [String]
+
+    init(
+        title: String = "Shared Context Package",
+        subtitle: String = "Same memory, requirements, policies, repo context, and output contract are passed to every role.",
+        items: [String] = MockData.contextPackage
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.items = items
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "archivebox")
+                    .frame(width: 28, height: 28)
+                    .foregroundStyle(VQTheme.green)
+                    .background(VQTheme.green.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                StatusPill(title: "Unified", tint: VQTheme.green)
+            }
+
+            FlowLayout(items: items)
+        }
+        .padding(12)
+        .background(VQTheme.green.opacity(0.055))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.green.opacity(0.18), lineWidth: 1)
+        }
+    }
+}
+
+struct QRCodeView: View {
+    let payload: String
+
+    var body: some View {
+        Group {
+            if let image = Self.makeImage(from: payload) {
+                Image(uiImage: image)
+                    .resizable()
+                    .interpolation(.none)
+                    .scaledToFit()
+            } else {
+                Image(systemName: "qrcode")
+                    .font(.system(size: 54, weight: .light))
+                    .foregroundStyle(VQTheme.ink)
+            }
+        }
+        .padding(10)
+        .background(Color.white)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
+        }
+        .accessibilityLabel("Pairing QR code")
+    }
+
+    private static let context = CIContext()
+
+    private static func makeImage(from payload: String) -> UIImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(payload.utf8)
+        filter.correctionLevel = "M"
+        guard let output = filter.outputImage else { return nil }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
+        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return UIImage(cgImage: cgImage)
     }
 }
 
