@@ -47,6 +47,7 @@ struct HostConfig: Codable, Sendable {
     var maxActiveRuns: Int = 2
     var logRetentionDays: Int = 30
     var auditRetentionDays: Int = 90
+    var pushNotificationsEnabled: Bool = false
     var apnsKeyID: String?
     var apnsTeamID: String?
     var apnsKeyPath: String?
@@ -73,6 +74,24 @@ struct HostConfig: Codable, Sendable {
             try? data.write(to: configURL, options: .atomic)
         }
         return config
+    }
+
+    var resolvedPushNotificationsEnabled: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return Self.booleanValue(
+            env["VEQRAL_PUSH_ENABLED"]
+                ?? KeychainStore.get(account: "push:enabled")
+                ?? (pushNotificationsEnabled ? "true" : "false")
+        )
+    }
+
+    private static func booleanValue(_ value: String?) -> Bool {
+        switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on", "enabled":
+            true
+        default:
+            false
+        }
     }
 }
 
@@ -259,6 +278,10 @@ actor HostState {
     }
 
     func registerPushToken(deviceID: String, request: PushTokenRequest) {
+        guard config.resolvedPushNotificationsEnabled else {
+            appendAudit("ignored push registration device=\(deviceID) reason=disabled")
+            return
+        }
         guard let index = devices.firstIndex(where: { $0.id == deviceID }) else { return }
         devices[index].pushToken = request.deviceToken
         devices[index].pushEnvironment = request.environment
@@ -493,6 +516,7 @@ actor HostState {
     }
 
     private func notifyDevices(run: HostRun, event: PushEventType, message: String, severity: ApprovalSeverity) {
+        guard config.resolvedPushNotificationsEnabled else { return }
         let recipients = devices.filter { $0.pushToken?.nilIfBlank != nil }
         guard !recipients.isEmpty else { return }
         let config = config
@@ -3555,6 +3579,7 @@ struct APNsConfiguration: Sendable {
     }
 
     static func load(from config: HostConfig) -> APNsConfiguration? {
+        guard config.resolvedPushNotificationsEnabled else { return nil }
         let env = ProcessInfo.processInfo.environment
         func configured(_ envKey: String, _ keychainAccount: String, _ configValue: String?) -> String? {
             env[envKey]?.nilIfBlank

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import AVFoundation
 
 struct DashboardView: View {
     @EnvironmentObject private var store: CommandCenterStore
@@ -224,6 +225,9 @@ struct DevicesView: View {
     @State private var remoteEndpoint = ""
     @State private var remotePairingCode = ""
     @State private var remoteDeviceName = ProcessInfo.processInfo.hostName
+    @State private var pairingURLInput = ""
+    @State private var showPairingScanner = false
+    @State private var scannerStatusMessage = ""
     @State private var remoteStatusMessage = ""
     @State private var isPairing = false
     private let columns = [GridItem(.adaptive(minimum: 320), spacing: 14)]
@@ -286,17 +290,43 @@ struct DevicesView: View {
                             Spacer()
                         }
 
+                        Text(remoteOnline ? L10n.tr("Ready for remote runs.") : L10n.tr("Scan the menu bar QR or paste the pairing link."))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(remoteOnline ? VQTheme.green : VQTheme.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        HStack(spacing: 8) {
+                            Button {
+                                beginPairingScan()
+                            } label: {
+                                Label("Scan QR", systemImage: "qrcode.viewfinder")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                            Button {
+                                applyPairingURLInput()
+                            } label: {
+                                Label("Use Link", systemImage: "link")
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                            .disabled(pairingURLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                        .font(.footnote.weight(.semibold))
+
+                        RemoteConnectionField(title: "Pairing URL", placeholder: "veqral://pair?endpoint=http://100.x.x.x:7878&code=ABCD1234", text: $pairingURLInput)
+                        RemoteConnectionField(title: "Endpoint", placeholder: store.workspace.macHostEndpoint, text: $remoteEndpoint)
+                        RemoteConnectionField(title: "Pairing code", placeholder: "8-character code from menu bar QR", text: $remotePairingCode)
+                        RemoteConnectionField(title: "This device name", placeholder: "iPhone / iPad", text: $remoteDeviceName)
+
                         KeyValueLine(key: "Saved endpoint", value: store.remoteHost.displayEndpoint)
                         KeyValueLine(key: "Device ID", value: store.remoteHost.deviceID.isEmpty ? "Not paired" : "\(store.remoteHost.deviceID.prefix(8))...")
                         KeyValueLine(key: "Tailscale", value: store.remoteHostHealth?.tailscaleIP ?? (store.workspace.tailscaleIP.isEmpty ? "Not verified" : store.workspace.tailscaleIP))
                         KeyValueLine(key: "Host", value: store.remoteHostHealth?.host ?? "Not connected")
                         KeyValueLine(key: "Hermes", value: store.remoteHostHealth?.hermesVersion ?? "Not checked")
-                        KeyValueLine(key: "Push", value: store.pushNotificationMessage.isEmpty ? L10n.tr("Not registered") : store.pushNotificationMessage)
+                        KeyValueLine(key: "Push", value: store.pushNotificationMessage.isEmpty ? VeqralFeatureFlags.pushUnavailableMessage : store.pushNotificationMessage)
                         KeyValueLine(key: "Execution", value: store.remoteHost.isEnabled ? "iPhone/iPad -> Tailscale -> Mac Host -> Hermes" : "Pair a Mac Host before running on iPhone/iPad")
-
-                        RemoteConnectionField(title: "Endpoint", placeholder: store.workspace.macHostEndpoint, text: $remoteEndpoint)
-                        RemoteConnectionField(title: "Pairing code", placeholder: "8-character code from menu bar QR", text: $remotePairingCode)
-                        RemoteConnectionField(title: "This device name", placeholder: "iPhone / iPad", text: $remoteDeviceName)
 
                         HStack(spacing: 8) {
                             Button {
@@ -519,6 +549,19 @@ struct DevicesView: View {
         .onChange(of: store.remoteHost) { _, _ in
             syncRemoteFields()
         }
+        .sheet(isPresented: $showPairingScanner) {
+            PairingQRScannerSheet(
+                statusMessage: scannerStatusMessage,
+                onCode: { payload in
+                    showPairingScanner = false
+                    handleScannedPairingPayload(payload)
+                },
+                onFailure: { message in
+                    scannerStatusMessage = message
+                    remoteStatusMessage = message
+                }
+            )
+        }
     }
 
     private func syncRemoteFields() {
@@ -546,6 +589,67 @@ struct DevicesView: View {
         }
     }
 
+    private func beginPairingScan() {
+        scannerStatusMessage = L10n.tr("Point the camera at the Mac Host QR.")
+        #if targetEnvironment(macCatalyst)
+        remoteStatusMessage = L10n.tr("QR scanning is unavailable on Mac Catalyst. Use the pairing link or code.")
+        return
+        #else
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            remoteStatusMessage = L10n.tr("Camera is not available on this device. Use manual pairing instead.")
+            return
+        }
+
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            showPairingScanner = true
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                DispatchQueue.main.async {
+                    if granted {
+                        showPairingScanner = true
+                    } else {
+                        remoteStatusMessage = L10n.tr("Camera permission denied. Enable it in Settings to scan pairing QR.")
+                    }
+                }
+            }
+        case .denied:
+            remoteStatusMessage = L10n.tr("Camera permission denied. Enable it in Settings to scan pairing QR.")
+        case .restricted:
+            remoteStatusMessage = L10n.tr("Camera access is restricted on this device.")
+        @unknown default:
+            remoteStatusMessage = L10n.tr("Camera authorization state is unavailable.")
+        }
+        #endif
+    }
+
+    private func applyPairingURLInput() {
+        let value = pairingURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        handleScannedPairingPayload(value)
+    }
+
+    private func handleScannedPairingPayload(_ payload: String) {
+        guard let url = URL(string: payload),
+              url.scheme == "veqral",
+              url.host == "pair",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            remoteStatusMessage = L10n.tr("Pairing QR was not recognized.")
+            return
+        }
+        let values = Dictionary(uniqueKeysWithValues: components.queryItems?.compactMap { item in
+            item.value.map { (item.name, $0) }
+        } ?? [])
+        guard let endpoint = values["endpoint"], let code = values["code"] else {
+            remoteStatusMessage = L10n.tr("Pairing URL is missing endpoint or code.")
+            return
+        }
+        remoteEndpoint = endpoint
+        remotePairingCode = code
+        pairingURLInput = payload
+        remoteStatusMessage = L10n.tr("QR recognized. Pairing...")
+        pairRemoteHost()
+    }
+
     private var remoteOnline: Bool {
         store.remoteHost.isEnabled && store.remoteHost.isPaired && store.remoteHostHealth?.status == "ok"
     }
@@ -567,6 +671,45 @@ struct DevicesView: View {
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+private struct PairingQRScannerSheet: View {
+    let statusMessage: String
+    let onCode: (String) -> Void
+    let onFailure: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ZStack(alignment: .bottom) {
+                QRCodeScannerView(onCode: onCode, onFailure: onFailure)
+                    .ignoresSafeArea()
+
+                VStack(spacing: 10) {
+                    Image(systemName: "qrcode.viewfinder")
+                        .font(.system(size: 34, weight: .semibold))
+                        .foregroundStyle(VQTheme.accent)
+                    Text(statusMessage.isEmpty ? L10n.tr("Point the camera at the Mac Host QR.") : statusMessage)
+                        .font(.subheadline.weight(.semibold))
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.white)
+                    Text(L10n.tr("The QR is shown from the Veqral menu bar app."))
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity)
+                .background(.black.opacity(0.58))
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(L10n.tr("Cancel")) {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
 }
 
 private struct ToolDiagnosticRow: View {

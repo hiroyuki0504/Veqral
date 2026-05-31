@@ -966,6 +966,10 @@ final class CommandCenterStore: ObservableObject {
     }
 
     func receiveRemoteNotificationToken(_ token: String, environment: String) {
+        guard VeqralFeatureFlags.pushNotificationsEnabled else {
+            pushNotificationMessage = VeqralFeatureFlags.pushUnavailableMessage
+            return
+        }
         remoteNotificationToken = token
         remoteNotificationEnvironment = environment
         pushNotificationMessage = L10n.tr("Push token ready.")
@@ -973,6 +977,10 @@ final class CommandCenterStore: ObservableObject {
     }
 
     func syncPushTokenWithRemoteHost() {
+        guard VeqralFeatureFlags.pushNotificationsEnabled else {
+            pushNotificationMessage = VeqralFeatureFlags.pushUnavailableMessage
+            return
+        }
         guard remoteHost.isEnabled,
               remoteHost.isPaired,
               let token = remoteNotificationToken?.nilIfBlank else {

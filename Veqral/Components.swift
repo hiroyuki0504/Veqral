@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 import CoreImage.CIFilterBuiltins
-import AVFoundation
+@preconcurrency import AVFoundation
 import PhotosUI
 import UniformTypeIdentifiers
 
@@ -31,14 +31,13 @@ struct ScreenScaffold<Content: View>: View {
                         Text(L10n.tr(title))
                             .font(.system(.title2, design: .default, weight: .semibold))
                             .foregroundStyle(VQTheme.ink)
-                        Text("Veqral")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(VQTheme.secondaryText)
                     }
 
                     Spacer()
                 }
                 .padding(.top, 6)
+
+                HostConnectionStrip()
 
                 content
             }
@@ -58,6 +57,78 @@ struct ScreenScaffold<Content: View>: View {
         }
         .navigationTitle(L10n.tr(title))
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct HostConnectionStrip: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .font(.caption.weight(.semibold))
+                .frame(width: 28, height: 28)
+                .foregroundStyle(tint)
+                .background(tint.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L10n.tr(title))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 8)
+            StatusPill(title: status, tint: tint)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(VQTheme.elevated.opacity(0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(tint.opacity(0.24), lineWidth: 1)
+        }
+    }
+
+    private var isOnline: Bool {
+        store.remoteHost.isEnabled && store.remoteHost.isPaired && store.remoteHostHealth?.status == "ok"
+    }
+
+    private var title: String {
+        if isOnline { return "Mac Host connected" }
+        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "Mac Host offline" }
+        return "Pair Mac Host"
+    }
+
+    private var detail: String {
+        if store.remoteHost.isPaired {
+            return store.remoteHost.displayEndpoint
+        }
+        return L10n.tr("Scan the menu bar QR from Devices.")
+    }
+
+    private var status: String {
+        if isOnline { return "Connected" }
+        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "Offline" }
+        return "Pairing needed"
+    }
+
+    private var symbol: String {
+        if isOnline { return "checkmark.circle" }
+        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "wifi.exclamationmark" }
+        return "qrcode.viewfinder"
+    }
+
+    private var tint: Color {
+        if isOnline { return VQTheme.green }
+        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return VQTheme.amber }
+        return VQTheme.accent
     }
 }
 
@@ -568,6 +639,112 @@ private struct CameraCaptureView: UIViewControllerRepresentable {
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
             onCancel()
         }
+    }
+}
+
+struct QRCodeScannerView: UIViewControllerRepresentable {
+    let onCode: (String) -> Void
+    let onFailure: (String) -> Void
+
+    func makeUIViewController(context: Context) -> QRCodeScannerController {
+        QRCodeScannerController(onCode: onCode, onFailure: onFailure)
+    }
+
+    func updateUIViewController(_ uiViewController: QRCodeScannerController, context: Context) {}
+}
+
+final class QRCodeScannerController: UIViewController, @preconcurrency AVCaptureMetadataOutputObjectsDelegate {
+    private let onCode: (String) -> Void
+    private let onFailure: (String) -> Void
+    private let session = AVCaptureSession()
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var didCapture = false
+
+    init(onCode: @escaping (String) -> Void, onFailure: @escaping (String) -> Void) {
+        self.onCode = onCode
+        self.onFailure = onFailure
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = UIColor.black
+        configureSession()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        previewLayer?.frame = view.bounds
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        guard !session.isRunning else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [session] in
+            session.startRunning()
+        }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        guard session.isRunning else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [session] in
+            session.stopRunning()
+        }
+    }
+
+    private func configureSession() {
+        guard let device = AVCaptureDevice.default(for: .video) else {
+            onFailure(L10n.tr("Camera is not available on this device. Use manual pairing instead."))
+            return
+        }
+
+        do {
+            let input = try AVCaptureDeviceInput(device: device)
+            guard session.canAddInput(input) else {
+                onFailure(L10n.tr("Camera input is unavailable. Use manual pairing instead."))
+                return
+            }
+            session.addInput(input)
+        } catch {
+            onFailure("\(L10n.tr("Camera could not start.")) \(error.localizedDescription)")
+            return
+        }
+
+        let output = AVCaptureMetadataOutput()
+        guard session.canAddOutput(output) else {
+            onFailure(L10n.tr("QR scanning is unavailable. Use manual pairing instead."))
+            return
+        }
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: .main)
+        output.metadataObjectTypes = output.availableMetadataObjectTypes.contains(.qr) ? [.qr] : []
+
+        let preview = AVCaptureVideoPreviewLayer(session: session)
+        preview.videoGravity = .resizeAspectFill
+        preview.frame = view.bounds
+        view.layer.insertSublayer(preview, at: 0)
+        previewLayer = preview
+    }
+
+    func metadataOutput(
+        _ output: AVCaptureMetadataOutput,
+        didOutput metadataObjects: [AVMetadataObject],
+        from connection: AVCaptureConnection
+    ) {
+        guard !didCapture,
+              let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+              object.type == .qr,
+              let value = object.stringValue else {
+            return
+        }
+        didCapture = true
+        session.stopRunning()
+        onCode(value)
     }
 }
 

@@ -181,6 +181,7 @@ struct CommandCenterRunView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    HostConnectionStrip()
                     CommandSubmitPanel()
 
                     if let run = store.selectedRun {
@@ -315,6 +316,8 @@ struct CommandCenterPhoneDashboard: View {
                     .buttonStyle(.plain)
                 }
                 .padding(.top, 8)
+
+                HostConnectionStrip()
 
                 PhoneSectionHeader(title: "Active Runs", count: nil)
                 VStack(spacing: 0) {
