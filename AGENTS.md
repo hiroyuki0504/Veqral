@@ -42,13 +42,13 @@ Device(Mac)
 ## 現状（重要）
 
 - `main` = `18b29b4`（PR #2〜#8 統合済み: P0 パイプライン + 実行時修正）
-- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← `codex/ui-japanese-polish`
+- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き
 - #9: Device→エージェント選択、Codex/Claude 直接、Hermes Project→Chat→model、History「Continue」resume。（更新耐性 adapter を同ブランチに足す指示済み → 入っているかブランチで確認）
 - #10: ワンタップ承認(一覧から)、Chat/セッション名前付け+フィルタ、画像 diff 3 モード+hunk 添付、swipe、日本語/English/System 切替（`Localizable.strings` 体系。`.xcstrings` 移行は未）
 - #11: APNs push（device build は free team では Push capability 非対応で停止 → #12 で外した）
 - #12: Push capability/entitlement を build から除去 + push を feature flag OFF（コードは温存）、Devices に QR スキャナ + 手動 fallback、全画面共通の接続ストリップ、UI を少し製品寄りに。free team で実機 build 成功
 - #13: Codex 用の引継ぎ `AGENTS.md` をリポジトリ直下に追加。
-- `codex/ui-japanese-polish`: UI/UX のみ。日本語一本化、Home の警告カード中立化、UUID/パス前面表示抑制、状態色整理、Projects/Devices/Approvals/More 配下の文言・余白・重複 UI を整理。Run/pairing/WebSocket/Hermes/履歴/承認の挙動変更なし。
+- #14 (`codex/ui-japanese-polish`): UI/UX のみ。日本語一本化、Home の警告カード中立化、UUID/パス前面表示抑制、状態色整理、Projects/Devices/Approvals/More 配下の文言・余白・重複 UI を整理。Run/pairing/WebSocket/Hermes/履歴/承認の挙動変更なし。
 
 ## 未完了・次の手番
 
