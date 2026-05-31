@@ -19,7 +19,7 @@ struct AppearanceToggleButton: View {
                 }
         }
         .buttonStyle(.plain)
-        .help("Refresh workspace")
+        .help(L10n.tr("Refresh workspace"))
     }
 }
 
@@ -91,9 +91,9 @@ struct CommandCenterSidebar: View {
                         }
                     }
 
-                    SidebarSectionTitle("Favorites")
+                    SidebarSectionTitle(L10n.tr("Favorites"))
                     VStack(spacing: 10) {
-                        FavoriteRow(color: VQTheme.amber, title: store.workspace.projectName)
+                        FavoriteRow(color: VQTheme.amber, title: VQDisplay.workspaceName(store.workspace))
                         FavoriteRow(color: VQTheme.accent, title: store.workspace.branchLabel)
                         FavoriteRow(color: VQTheme.violet, title: store.workspace.cleanlinessLabel)
                     }
@@ -138,10 +138,10 @@ struct CommandCenterSidebar: View {
                             .foregroundStyle(VQTheme.ink)
                     }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Local Operator")
+                    Text(L10n.tr("Local Operator"))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(VQTheme.ink)
-                    Text(store.workspace.deviceName)
+                    Text(VQDisplay.hostName(store))
                         .font(.caption2)
                         .foregroundStyle(VQTheme.secondaryText)
                         .lineLimit(1)
@@ -233,24 +233,22 @@ struct CommandCenterInspectorView: View {
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Run Inspector")
+                Text(L10n.tr("Run Inspector"))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
                     .padding(.top, 18)
 
-                InspectorPanel(title: "Approvals", count: store.pendingApprovals().count) {
+                InspectorPanel(title: L10n.tr("Approvals"), count: store.pendingApprovals().count) {
                     VStack(spacing: 8) {
                         let pending = store.pendingApprovals(limit: 3)
                         if pending.isEmpty {
-                            ForEach(approvalGuardrails) { guardrail in
-                                InspectorGuardrailRow(guardrail: guardrail)
-                            }
+                            InspectorGuardrailSummary()
                         } else {
                             ForEach(pending) { approval in
                                 InspectorApprovalRow(approval: approval)
                             }
                         }
-                        Button("View all approvals ->") {
+                        Button(L10n.tr("View all approvals ->")) {
                             selection = .approvals
                         }
                             .font(.caption.weight(.semibold))
@@ -260,32 +258,32 @@ struct CommandCenterInspectorView: View {
                     }
                 }
 
-                InspectorPanel(title: "Context Pack", trailing: "Unified") {
+                InspectorPanel(title: L10n.tr("Context Pack"), trailing: L10n.tr("Unified")) {
                     InspectorLinkedRow(
                         symbol: "doc.badge.gearshape",
-                        title: "\(store.workspace.projectName) Pack",
-                        detail: "\(ContextPackage.items.count) items - \(store.workspace.branchLabel)"
+                        title: "\(VQDisplay.workspaceName(store.workspace)) \(L10n.tr("Pack"))",
+                        detail: "\(ContextPackage.items.count) \(L10n.tr("items")) - \(store.workspace.branchLabel)"
                     )
                 }
 
-                InspectorPanel(title: "Assigned Agent") {
+                InspectorPanel(title: L10n.tr("Assigned Agent")) {
                     VStack(spacing: 8) {
-                        InspectorAgentRow(color: VQTheme.accent, title: "Hermes", detail: store.remoteHost.isPaired ? "Mac Host runtime" : "Pairing required", status: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber)
-                        InspectorAgentRow(color: VQTheme.ink, title: "Codex CLI", detail: "Configured through Hermes", status: store.remoteHost.isPaired ? VQTheme.accent : VQTheme.secondaryText)
-                        InspectorAgentRow(color: VQTheme.green, title: "Context", detail: "\(ContextPackage.items.count) package items", status: VQTheme.green)
+                        InspectorAgentRow(color: VQTheme.accent, title: "Hermes", detail: store.remoteHost.isPaired ? L10n.tr("Mac Host runtime") : L10n.tr("Pairing required"), status: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber)
+                        InspectorAgentRow(color: VQTheme.ink, title: "Codex CLI", detail: L10n.tr("Direct history is isolated"), status: store.remoteHost.isPaired ? VQTheme.secondaryText : VQTheme.unavailable)
+                        InspectorAgentRow(color: VQTheme.green, title: L10n.tr("Context"), detail: "\(ContextPackage.items.count) \(L10n.tr("package items"))", status: VQTheme.green)
                     }
                 }
 
-                InspectorPanel(title: "Mac Device") {
-                    InspectorLinkedRow(symbol: "laptopcomputer", title: store.workspace.deviceName, detail: store.workspace.hostName, trailing: store.workspace.canRunLocalCommands ? "Online" : "Waiting")
+                InspectorPanel(title: L10n.tr("Mac Device")) {
+                    InspectorLinkedRow(symbol: "laptopcomputer", title: VQDisplay.hostName(store), detail: store.workspace.hostName, trailing: store.workspace.canRunLocalCommands ? L10n.tr("Online") : L10n.tr("Waiting"))
                 }
 
-                InspectorPanel(title: "Model") {
+                InspectorPanel(title: L10n.tr("Model")) {
                     InspectorLinkedRow(
                         symbol: store.selectedRuntime.symbol,
                         title: store.selectedRuntime.title,
                         detail: store.selectedRuntime == .hermesAgent ? store.workspace.hermesLabel : store.workspace.remoteLabel,
-                        trailing: store.selectedRuntime == .hermesAgent && store.workspace.canRunHermes ? "Ready" : nil
+                        trailing: store.selectedRuntime == .hermesAgent && store.workspace.canRunHermes ? L10n.tr("Ready") : nil
                     )
                 }
             }
@@ -302,7 +300,7 @@ struct CommandCenterPhoneDashboard: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
-                    Text("Command")
+                    Text(L10n.tr("Command"))
                         .font(.system(size: 30, weight: .semibold))
                         .foregroundStyle(VQTheme.ink)
                     Spacer()
@@ -319,31 +317,33 @@ struct CommandCenterPhoneDashboard: View {
 
                 HostConnectionStrip()
 
-                PhoneSectionHeader(title: "Active Runs", count: nil)
+                let visibleRuns = Array(store.visibleRuns().prefix(5))
+                PhoneSectionHeader(title: L10n.tr("Active Runs"), count: nil, showAction: !visibleRuns.isEmpty)
                 VStack(spacing: 0) {
-                    ForEach(Array(store.visibleRuns().prefix(5))) { run in
+                    if visibleRuns.isEmpty {
+                        PhoneEmptyState(symbol: "play.rectangle", text: L10n.tr("No active runs. Send an instruction to start one."))
+                    }
+                    ForEach(visibleRuns) { run in
                         PhoneRunRow(run: run)
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 store.selectRun(run.id)
                             }
-                        if run.id != store.visibleRuns().prefix(5).last?.id {
+                        if run.id != visibleRuns.last?.id {
                             Divider().overlay(VQTheme.hairline)
                         }
                     }
                 }
                 .commandPanel()
 
-                PhoneSectionHeader(title: store.selectedRuntime.title, count: nil, showAction: false)
+                PhoneSectionHeader(title: store.selectedRuntime.dashboardSectionTitle, count: nil, showAction: false)
                 PhoneComposer()
 
-                PhoneSectionHeader(title: "Approvals", count: store.pendingApprovals().count)
+                PhoneSectionHeader(title: L10n.tr("Approvals"), count: store.pendingApprovals().count)
                 VStack(spacing: 8) {
                     let pending = store.pendingApprovals(limit: 3)
                     if pending.isEmpty {
-                        ForEach(approvalGuardrails) { guardrail in
-                            CompactGuardrailStrip(guardrail: guardrail)
-                        }
+                        ProtectionSummaryCard()
                     } else {
                         ForEach(pending) { approval in
                             CompactApprovalStrip(approval: approval)
@@ -351,10 +351,10 @@ struct CommandCenterPhoneDashboard: View {
                     }
                 }
 
-                PhoneSectionHeader(title: "Devices", count: nil, trailing: store.remoteHost.isPaired ? "Connected" : "Pair Host")
+                PhoneSectionHeader(title: L10n.tr("Devices"), count: nil, trailing: store.remoteHost.isPaired ? L10n.tr("Connected") : L10n.tr("Pair Mac Host"))
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                    PhoneDeviceCard(name: store.remoteHost.name.isEmpty ? store.workspace.deviceName : store.remoteHost.name, detail: store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : "Not paired", isOnline: store.remoteHost.isPaired)
-                    PhoneDeviceCard(name: store.workspace.projectName, detail: store.workspace.statusSummary, isOnline: store.workspace.errorMessage == nil)
+                    PhoneDeviceCard(name: VQDisplay.hostName(store), detail: store.remoteHost.isPaired ? VQDisplay.endpoint(store.remoteHost) : L10n.tr("Not Paired"), status: store.remoteHost.isPaired ? .online : .offline)
+                    PhoneDeviceCard(name: VQDisplay.workspaceName(store.workspace), detail: VQDisplay.workspaceStatus(store.workspace), status: store.workspace.errorMessage == nil ? .online : .offline)
                 }
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
@@ -408,10 +408,59 @@ private struct ApprovalGuardrail: Identifiable {
 }
 
 private let approvalGuardrails = [
-    ApprovalGuardrail(id: "delete", title: "File deletion guarded", detail: "rm, git clean, reset --hard", risk: "Risk: High", tint: VQTheme.red),
-    ApprovalGuardrail(id: "secrets", title: "Secrets require review", detail: ".env, token, keychain, private key", risk: "Risk: Medium", tint: VQTheme.amber),
-    ApprovalGuardrail(id: "screen", title: "Screen control paused", detail: "open, osascript, screenshot", risk: "Risk: Medium", tint: VQTheme.red)
+    ApprovalGuardrail(id: "delete", title: L10n.tr("File deletion"), detail: "rm, git clean, reset --hard", risk: L10n.tr("High risk only"), tint: VQTheme.red),
+    ApprovalGuardrail(id: "secrets", title: L10n.tr("Secrets"), detail: ".env, token, keychain, private key", risk: L10n.tr("Review required"), tint: VQTheme.amber),
+    ApprovalGuardrail(id: "screen", title: L10n.tr("Screen control"), detail: "open, osascript, screenshot", risk: L10n.tr("Review required"), tint: VQTheme.amber)
 ]
+
+private struct ProtectionSummaryCard: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield")
+                    .foregroundStyle(VQTheme.secondaryText)
+                Text(L10n.tr("Protection active"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                StatusPill(title: L10n.tr("No pending approvals."), tint: VQTheme.unavailable)
+            }
+            Text(L10n.tr("File deletion, secrets, screen control, billing, and production changes pause for review."))
+                .font(.caption2)
+                .foregroundStyle(VQTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .background(VQTheme.control.opacity(0.42))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
+        }
+    }
+}
+
+private struct PhoneEmptyState: View {
+    let symbol: String
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: symbol)
+                .font(.caption)
+                .frame(width: 24, height: 24)
+                .foregroundStyle(VQTheme.secondaryText)
+                .background(VQTheme.control.opacity(0.58))
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(VQTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+        }
+        .padding(10)
+    }
+}
 
 private struct SidebarActionRow: View {
     let title: String
@@ -428,12 +477,12 @@ private struct SidebarActionRow: View {
                     .font(.system(size: 15, weight: .medium))
                     .frame(width: 22)
                     .foregroundStyle(isSelected ? VQTheme.accent : VQTheme.ink)
-                Text(title)
+                Text(L10n.tr(title))
                     .font(.subheadline.weight(isSelected ? .semibold : .medium))
                     .foregroundStyle(isSelected ? VQTheme.ink : VQTheme.secondaryText)
                     .lineLimit(1)
                 Spacer()
-                if let count {
+                if let count, count > 0 {
                     Text("\(count)")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.white)
@@ -510,25 +559,25 @@ private struct RunHeader: View {
                         store.selectRun(newest)
                     }
                 } label: {
-                    Label("Back to Active Runs", systemImage: "chevron.left")
+                    Label(L10n.tr("Back to Active Runs"), systemImage: "chevron.left")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(VQTheme.accent)
                 }
                 .buttonStyle(.plain)
                 Spacer()
                 Button(action: store.pauseOrResumeSelectedRun) {
-                    Label(run.status == .waiting ? "Resume" : "Pause", systemImage: run.status == .waiting ? "play" : "pause")
+                    Label(L10n.tr(run.status == .waiting ? "Resume" : "Pause"), systemImage: run.status == .waiting ? "play" : "pause")
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(CommandButtonStyle())
                 Menu {
-                    Button("Refresh workspace") {
+                    Button(L10n.tr("Refresh workspace")) {
                         store.refreshWorkspace()
                     }
-                    Button(run.status == .waiting ? "Resume run" : "Pause run") {
+                    Button(L10n.tr(run.status == .waiting ? "Resume run" : "Pause run")) {
                         store.pauseOrResumeSelectedRun()
                     }
-                    Button("Show latest run") {
+                    Button(L10n.tr("Show latest run")) {
                         if let newest = store.runs.first?.id {
                             store.selectRun(newest)
                         }
@@ -551,12 +600,12 @@ private struct RunHeader: View {
             }
 
             HStack(spacing: 10) {
-                Label(store.workspace.projectName, systemImage: "doc.text")
+                Label(VQDisplay.workspaceName(store.workspace), systemImage: "doc.text")
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(run.runtimeOrDefault.title)
-                Text("Started \(run.elapsedLabel)")
-                Text("Run ID \(run.shortID)")
+                Text("\(L10n.tr("Started")) \(run.elapsedLabel)")
+                Text("\(L10n.tr("Run ID")) \(run.shortID)")
                 Image(systemName: "doc.on.doc")
             }
             .font(.caption)
@@ -570,11 +619,11 @@ private struct RunPhaseTracker: View {
 
     private var steps: [(String, String, Color, Bool)] {
         [
-            ("Plan", run.progress > 0.0 ? "Ready" : "Pending", VQTheme.green, true),
-            ("Implement", run.status == .failed ? "Failed" : "In Progress", run.status == .failed ? VQTheme.red : VQTheme.green, run.progress > 0.1),
-            ("Test", run.status == .complete ? "Complete" : "In Progress", run.status == .complete ? VQTheme.green : VQTheme.accent, run.progress > 0.55),
-            ("Review", run.status == .approval ? "Approval" : "Pending", run.status == .approval ? VQTheme.amber : VQTheme.mutedText, run.status == .approval),
-            ("Complete", run.status == .complete ? "Done" : "Pending", run.status == .complete ? VQTheme.green : VQTheme.mutedText, run.status == .complete)
+            (L10n.tr("Plan"), run.progress > 0.0 ? L10n.tr("Ready") : L10n.tr("Pending"), VQTheme.green, true),
+            (L10n.tr("Implementation"), run.status == .failed ? L10n.tr("Failed") : L10n.tr("In Progress"), run.status == .failed ? VQTheme.red : VQTheme.green, run.progress > 0.1),
+            (L10n.tr("Testing"), run.status == .complete ? L10n.tr("Complete") : L10n.tr("In Progress"), run.status == .complete ? VQTheme.green : VQTheme.accent, run.progress > 0.55),
+            (L10n.tr("Review"), run.status == .approval ? L10n.tr("Approval") : L10n.tr("Pending"), run.status == .approval ? VQTheme.amber : VQTheme.mutedText, run.status == .approval),
+            (L10n.tr("Complete"), run.status == .complete ? L10n.tr("Done") : L10n.tr("Pending"), run.status == .complete ? VQTheme.green : VQTheme.mutedText, run.status == .complete)
         ]
     }
 
@@ -633,7 +682,7 @@ private struct CommandSubmitPanel: View {
             RuntimeSegmentedControl()
 
             HStack(spacing: 10) {
-                TextField(store.selectedRuntime == .hermesAgent ? "Ask Hermes to build, test, review, or explain..." : "Run a shell command on this Mac", text: $store.commandDraft, axis: .vertical)
+                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.subheadline)
                     .lineLimit(1...3)
@@ -649,16 +698,16 @@ private struct CommandSubmitPanel: View {
                         .font(.system(size: 15, weight: .bold))
                 }
                 .buttonStyle(CommandButtonStyle(tint: VQTheme.accent))
-                .help("Run")
+                .help(L10n.tr("Run"))
             }
 
             #if targetEnvironment(macCatalyst)
             HStack(spacing: 8) {
                 Image(systemName: store.selectedRuntime.symbol)
                 Text(store.selectedRuntime.title)
-                Text("in")
+                Text(L10n.tr("in"))
                 Image(systemName: "folder")
-                TextField("Working directory", text: $store.workingDirectory)
+                TextField(L10n.tr("Working directory"), text: $store.workingDirectory)
                     .textFieldStyle(.plain)
                     .font(.caption.monospaced())
                     .onSubmit {
@@ -668,7 +717,7 @@ private struct CommandSubmitPanel: View {
             .foregroundStyle(VQTheme.secondaryText)
             .padding(.horizontal, 4)
             #else
-            Text("On iPhone and iPad this creates a run. Execution starts after a Mac Host is connected.")
+            Text(L10n.tr("On iPhone and iPad this creates a run. Execution starts after a Mac Host is connected."))
                 .font(.caption)
                 .foregroundStyle(VQTheme.secondaryText)
             #endif
@@ -756,7 +805,7 @@ private struct TerminalTranscript: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             if logs.isEmpty {
-                Text("まだログはありません。Commandを送るとここに表示されます。")
+                Text(L10n.tr("まだログはありません。Commandを送るとここに表示されます。"))
                     .foregroundStyle(VQTheme.secondaryText)
             }
             ForEach(logs) { line in
@@ -798,10 +847,10 @@ private struct DiffListPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Diff")
+                    Text(L10n.tr("Diff"))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(VQTheme.ink)
-                    Text("\(diffs.count) files changed")
+                    Text("\(diffs.count) \(L10n.tr("files changed"))")
                         .font(.caption)
                         .foregroundStyle(VQTheme.secondaryText)
                 }
@@ -812,7 +861,7 @@ private struct DiffListPanel: View {
             }
 
             if diffs.isEmpty {
-                Text("No git diff yet. Point the Mac build at a git workspace to collect changed files.")
+                Text(L10n.tr("No git diff yet. Point the Mac build at a git workspace to collect changed files."))
                     .font(.caption)
                     .foregroundStyle(VQTheme.secondaryText)
             }
@@ -854,10 +903,10 @@ private struct PreviewEmptyState: View {
             Image(systemName: "safari")
                 .font(.system(size: 48, weight: .light))
                 .foregroundStyle(VQTheme.accent)
-            Text("Preview is waiting for a local web target")
+            Text(L10n.tr("Preview is waiting for a local web target"))
                 .font(.headline)
                 .foregroundStyle(VQTheme.ink)
-            Text("After a Mac Host connects, screenshots and web previews appear here.")
+            Text(L10n.tr("After a Mac Host connects, screenshots and web previews appear here."))
                 .font(.caption)
                 .foregroundStyle(VQTheme.secondaryText)
                 .multilineTextAlignment(.center)
@@ -874,17 +923,17 @@ private struct RunStatusBar: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 16) {
-                Label(run?.model ?? "Local Shell", systemImage: "asterisk.circle.fill")
+                Label(run?.model ?? L10n.tr("Local Shell"), systemImage: "asterisk.circle.fill")
                     .foregroundStyle(VQTheme.amber)
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
-                Label(run?.agent ?? "Local Mac", systemImage: "person.crop.circle")
+                Label(run?.agent ?? L10n.tr("Local Mac"), systemImage: "person.crop.circle")
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
-                Label(run?.elapsedLabel ?? "Waiting", systemImage: "timer")
+                Label(run?.elapsedLabel ?? L10n.tr("Waiting"), systemImage: "timer")
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
                 Label("\(Int((run?.progress ?? 0) * 100))%", systemImage: "gearshape")
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
                 Circle().fill((run?.status ?? .waiting).tint).frame(width: 7, height: 7)
-                Text(run?.status.title ?? "Waiting")
+                Text(run?.status.title ?? L10n.tr("Waiting"))
             }
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
@@ -920,7 +969,7 @@ private struct InspectorPanel<Content: View>: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(VQTheme.secondaryText)
                 Spacer()
-                if let count {
+                if let count, count > 0 {
                     Text("\(count)")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.white)
@@ -963,14 +1012,14 @@ private struct InspectorApprovalRow: View {
             }
             HStack {
                 Spacer()
-                Button("Reject") {
+                Button(L10n.tr("Reject")) {
                     store.reject(approval)
                 }
                     .buttonStyle(CommandButtonStyle())
                 Button {
                     store.approve(approval)
                 } label: {
-                    Label("Approve", systemImage: "checkmark")
+                    Label(L10n.tr("Approve"), systemImage: "checkmark")
                 }
                 .buttonStyle(CommandButtonStyle(tint: VQTheme.accent))
             }
@@ -1006,7 +1055,7 @@ private struct InspectorGuardrailRow: View {
             }
             HStack(spacing: 6) {
                 Image(systemName: "lock.shield")
-                Text("Approval gate ready")
+                Text(L10n.tr("Approval gate ready"))
             }
             .font(.caption2.weight(.semibold))
             .foregroundStyle(VQTheme.secondaryText)
@@ -1018,6 +1067,30 @@ private struct InspectorGuardrailRow: View {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .stroke(guardrail.tint.opacity(0.58), lineWidth: 1)
         }
+    }
+}
+
+private struct InspectorGuardrailSummary: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "lock.shield")
+                .frame(width: 28, height: 28)
+                .foregroundStyle(VQTheme.secondaryText)
+                .background(VQTheme.control.opacity(0.58))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(L10n.tr("Protection active"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Text(L10n.tr("High-risk actions pause here only when a real request appears."))
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+            }
+            Spacer()
+        }
+        .padding(9)
+        .background(VQTheme.control.opacity(0.42))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
@@ -1101,7 +1174,7 @@ private struct PhoneSectionHeader: View {
             Text(title.uppercased())
                 .font(.caption.weight(.bold))
                 .foregroundStyle(VQTheme.secondaryText)
-            if let count {
+            if let count, count > 0 {
                 Text("\(count)")
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.white)
@@ -1164,7 +1237,7 @@ private struct PhoneComposer: View {
             RuntimeSegmentedControl()
 
             HStack(spacing: 8) {
-                TextField(store.selectedRuntime == .hermesAgent ? "Ask Hermes to build..." : "Run a shell command...", text: $store.commandDraft)
+                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft)
                     .font(.caption)
                     .textFieldStyle(.plain)
                     .onSubmit {
@@ -1186,8 +1259,8 @@ private struct PhoneComposer: View {
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             HStack {
-                CommandChip(title: "Implement", symbol: "chevron.left.forwardslash.chevron.right", command: "Implement the current approved requirements.")
-                CommandChip(title: "Test", symbol: "flask", command: "Run the relevant tests and fix failures if they are in scope.")
+                CommandChip(title: L10n.tr("Implementation"), symbol: "chevron.left.forwardslash.chevron.right", command: "Implement the current approved requirements.")
+                CommandChip(title: L10n.tr("Testing"), symbol: "flask", command: "Run the relevant tests and fix failures if they are in scope.")
                 CommandChip(title: "", symbol: "ellipsis", command: "Show available next actions for this project.")
                 Spacer()
             }
@@ -1299,7 +1372,7 @@ private struct CompactGuardrailStrip: View {
 private struct PhoneDeviceCard: View {
     let name: String
     let detail: String
-    let isOnline: Bool
+    let status: DeviceStatus
 
     var body: some View {
         HStack(spacing: 9) {
@@ -1313,9 +1386,9 @@ private struct PhoneDeviceCard: View {
                 Text(detail)
                     .font(.caption2)
                     .foregroundStyle(VQTheme.secondaryText)
-                Label(isOnline ? "Online" : "Offline", systemImage: "circle.fill")
+                Label(status.title, systemImage: "circle.fill")
                     .font(.caption2)
-                    .foregroundStyle(isOnline ? VQTheme.green : VQTheme.amber)
+                    .foregroundStyle(status.tint)
             }
             Spacer()
         }
@@ -1330,16 +1403,18 @@ private struct PhoneArtifactsPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Recent Artifacts")
+                Text(L10n.tr("Recent Artifacts"))
                     .font(.caption.weight(.bold))
                     .foregroundStyle(VQTheme.secondaryText)
                 Spacer()
-                Text("View All")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(VQTheme.accent)
+                if !store.remoteArtifacts.isEmpty {
+                    Text(L10n.tr("View All"))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(VQTheme.accent)
+                }
             }
             if store.remoteArtifacts.isEmpty {
-                Text("No artifacts yet")
+                Text(L10n.tr("No artifacts yet"))
                     .font(.caption2)
                     .foregroundStyle(VQTheme.secondaryText)
             }
@@ -1369,22 +1444,22 @@ private struct PhoneProjectStatusPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Project Status")
+            Text(L10n.tr("Project Status"))
                 .font(.caption.weight(.bold))
                 .foregroundStyle(VQTheme.secondaryText)
             HStack {
-                Text(store.workspace.projectName)
+                Text(VQDisplay.workspaceName(store.workspace))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
                     .lineLimit(1)
                 Spacer()
-                Text(store.workspace.statusSummary)
+                Text(VQDisplay.workspaceStatus(store.workspace))
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(store.workspace.changedFiles == 0 ? VQTheme.green : VQTheme.amber)
+                    .foregroundStyle(VQDisplay.workspaceStatusTint(store.workspace))
                     .lineLimit(1)
             }
             HStack {
-                Text("Branch")
+                Text(L10n.tr("Branch"))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
                 Spacer()
@@ -1394,7 +1469,7 @@ private struct PhoneProjectStatusPanel: View {
                     .lineLimit(1)
             }
             NavigationLink(value: AppSection.projects) {
-                Text("View All Projects ->")
+                Text(L10n.tr("View All Projects ->"))
                     .frame(maxWidth: .infinity)
             }
                 .font(.caption2.weight(.semibold))
@@ -1429,7 +1504,7 @@ private extension View {
             ZStack {
                 VQTheme.elevated
                 LinearGradient(
-                    colors: [Color.white.opacity(0.052), Color.clear, Color.black.opacity(0.055)],
+                    colors: [Color.white.opacity(0.030), Color.clear, Color.black.opacity(0.040)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
@@ -1480,11 +1555,37 @@ extension Date {
 private extension RunPhase {
     var commandTitle: String {
         switch self {
-        case .requirements: "Requirements"
-        case .implementation: "Implement"
-        case .testing: "Test"
+        case .requirements: L10n.tr("Requirements")
+        case .implementation: L10n.tr("Implementation")
+        case .testing: L10n.tr("Testing")
         case .github: "GitHub"
-        case .deploy: "Deploy"
+        case .deploy: L10n.tr("Deploy")
+        }
+    }
+}
+
+private extension CommandRuntime {
+    var commandPlaceholder: String {
+        switch self {
+        case .hermesAgent:
+            L10n.tr("Send instructions to Hermes...")
+        case .codexDirect:
+            L10n.tr("Send instructions to Codex...")
+        case .claudeDirect:
+            L10n.tr("Send instructions to Claude...")
+        case .localShell:
+            L10n.tr("Enter a shell command...")
+        }
+    }
+
+    var dashboardSectionTitle: String {
+        switch self {
+        case .hermesAgent:
+            L10n.tr("Hermes command")
+        case .codexDirect, .claudeDirect:
+            L10n.tr("Direct run")
+        case .localShell:
+            L10n.tr("Shell command")
         }
     }
 }

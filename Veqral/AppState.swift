@@ -15,10 +15,10 @@ enum CommandRuntime: String, Codable, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .hermesAgent: "Hermes Agent"
-        case .codexDirect: "Codex Direct"
-        case .claudeDirect: "Claude Direct"
-        case .localShell: "Local Shell"
+        case .hermesAgent: L10n.tr("Hermes Agent")
+        case .codexDirect: L10n.tr("Codex Direct")
+        case .claudeDirect: L10n.tr("Claude Direct")
+        case .localShell: L10n.tr("Local Shell")
         }
     }
 
@@ -255,7 +255,7 @@ struct RemoteHostConfiguration: Codable, Equatable, Sendable {
     }
 
     var displayEndpoint: String {
-        endpoint.isEmpty ? "Not paired" : endpoint
+        endpoint.isEmpty ? L10n.tr("Not Paired") : endpoint
     }
 
     static let empty = RemoteHostConfiguration(
@@ -699,7 +699,7 @@ final class CommandCenterStore: ObservableObject {
     var selectedHermesChoiceTitle: String {
         HermesModelChoice.defaults.first {
             $0.provider == selectedHermesProvider && $0.model == selectedHermesModel
-        }?.title ?? [selectedHermesProvider, selectedHermesModel].filter { !$0.isEmpty }.joined(separator: " / ")
+        }?.title ?? [selectedHermesProvider, selectedHermesModel].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     var pairingPayload: String {

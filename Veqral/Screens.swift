@@ -12,9 +12,9 @@ struct DashboardView: View {
         let runningCount = store.visibleRuns().filter { $0.status == .running }.count
         return [
             CommandMetric(title: L10n.tr("Active runs"), value: "\(activeCount)", detail: "\(runningCount) \(L10n.tr("Running"))", symbol: "play.circle", tint: VQTheme.accent),
-            CommandMetric(title: L10n.tr("Approvals"), value: "\(store.pendingApprovals().count)", detail: "Deletion / deploy / secrets", symbol: "hand.raised", tint: VQTheme.amber),
-            CommandMetric(title: "Mac Host", value: store.remoteHost.isPaired ? "1" : "0", detail: store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : "Tailscale pending", symbol: "macbook.and.iphone", tint: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber),
-            CommandMetric(title: "Context", value: "\(ContextPackage.items.count)", detail: "Shared package items", symbol: "archivebox", tint: VQTheme.green)
+            CommandMetric(title: L10n.tr("Approvals"), value: "\(store.pendingApprovals().count)", detail: L10n.tr("High risk only"), symbol: "hand.raised", tint: VQTheme.amber),
+            CommandMetric(title: "Mac Host", value: store.remoteHost.isPaired ? "1" : "0", detail: store.remoteHost.isPaired ? VQDisplay.endpoint(store.remoteHost) : L10n.tr("Pairing needed"), symbol: "macbook.and.iphone", tint: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber),
+            CommandMetric(title: "Context", value: "\(ContextPackage.items.count)", detail: "\(ContextPackage.items.count) \(L10n.tr("package items"))", symbol: "archivebox", tint: VQTheme.green)
         ]
     }
 
@@ -51,7 +51,7 @@ struct DashboardView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         let pending = store.pendingApprovals(limit: 2)
                         if pending.isEmpty {
-                            Text("Risky commands and Hermes prompts pause here before execution.")
+                            Text(L10n.tr("Risky commands and Hermes prompts pause here before execution."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
@@ -67,7 +67,7 @@ struct DashboardView: View {
                 VQPanel("Device Fleet", systemImage: "macbook.and.iphone", actionImage: "qrcode.viewfinder") {
                     VStack(alignment: .leading, spacing: 12) {
                         if store.remoteDevices.isEmpty {
-                            Text(store.remoteHost.isPaired ? "No paired devices loaded yet. Refresh the Mac Host." : "Pair a Mac Host to see trusted iPhone and iPad clients.")
+                            Text(store.remoteHost.isPaired ? L10n.tr("No paired devices reported yet. Refresh the Host once it is reachable.") : L10n.tr("Pair a Mac Host to list trusted iPhone/iPad clients."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
@@ -84,7 +84,7 @@ struct DashboardView: View {
                 VQPanel("Recent Artifacts", systemImage: "shippingbox", actionImage: "square.grid.2x2") {
                     VStack(alignment: .leading, spacing: 10) {
                         if store.remoteArtifacts.isEmpty {
-                            Text("Artifacts appear after a Mac Host run produces files, screenshots, reports, or attachments.")
+                            Text(L10n.tr("Artifacts appear after a Mac Host run produces files, screenshots, reports, or attachments."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
@@ -148,7 +148,7 @@ struct IntentCaptureView: View {
                 VQPanel("Run Intake", systemImage: "bubble.left.and.bubble.right") {
                     VStack(alignment: .leading, spacing: 12) {
                         if store.runs.isEmpty {
-                            Text("No command history yet. Send a natural-language instruction above to create the first Hermes run.")
+                            Text(L10n.tr("No command history yet. Send a natural-language instruction above to create the first Hermes run."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -164,8 +164,8 @@ struct IntentCaptureView: View {
                         KeyValueLine(key: "Project", value: store.workspace.projectName)
                         KeyValueLine(key: "Workspace", value: store.workingDirectory)
                         KeyValueLine(key: "Runtime", value: store.selectedRuntime.title)
-                        KeyValueLine(key: "Mac Host", value: store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : "Not paired")
-                        Text("Requirements are produced by the active Hermes run and saved as logs, diffs, artifacts, and memory edits.")
+                        KeyValueLine(key: "Mac Host", value: store.remoteHost.isPaired ? VQDisplay.endpoint(store.remoteHost) : L10n.tr("Not Paired"))
+                        Text(L10n.tr("Requirements are produced by the active Hermes run and saved as logs, diffs, artifacts, and memory edits."))
                             .font(.caption)
                             .foregroundStyle(VQTheme.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -175,7 +175,7 @@ struct IntentCaptureView: View {
                 VQPanel("Memory Candidates", systemImage: "brain.head.profile") {
                     VStack(alignment: .leading, spacing: 10) {
                         if store.remoteMemoryFiles.isEmpty {
-                            Text(store.remoteHost.isPaired ? "Refresh Memory to load Hermes USER.md, MEMORY.md, and skills." : "Pair Mac Host to inspect Hermes memory.")
+                            Text(store.remoteHost.isPaired ? L10n.tr("Refresh Memory to load Hermes USER.md, MEMORY.md, and skills.") : L10n.tr("Pair Mac Host to inspect Hermes memory."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
@@ -209,7 +209,7 @@ struct RequirementsView: View {
                             .foregroundStyle(VQTheme.ink)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
-                        Text("No requirements have been captured yet. Start from Intent or Command to let Hermes create the first requirements run.")
+                        Text(L10n.tr("No requirements have been captured yet. Start from Intent or Command to let Hermes create the first requirements run."))
                             .font(.subheadline)
                             .foregroundStyle(VQTheme.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -244,14 +244,14 @@ struct DevicesView: View {
                             .background((store.workspace.canRunLocalCommands ? VQTheme.green : VQTheme.amber).opacity(0.12))
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         VStack(alignment: .leading, spacing: 12) {
-                            KeyValueLine(key: "Device", value: store.workspace.deviceName)
+                            KeyValueLine(key: "Device", value: VQDisplay.hostName(store))
                             KeyValueLine(key: "Host", value: store.workspace.hostName)
-                            KeyValueLine(key: "Local shell", value: store.workspace.canRunLocalCommands ? "Available" : "Mac Host required")
+                            KeyValueLine(key: "Local shell", value: store.workspace.canRunLocalCommands ? L10n.tr("Available") : L10n.tr("Mac Host required"))
                             KeyValueLine(key: "Hermes", value: store.workspace.hermesLabel)
-                            KeyValueLine(key: "Workspace", value: store.workspace.workingDirectory)
+                            CompactKeyValueLine(key: "Workspace", value: store.workspace.workingDirectory, monospaced: true)
                             HStack {
                                 Button(action: store.refreshWorkspace) {
-                                    Label("Refresh", systemImage: "arrow.clockwise")
+                                    Label(L10n.tr("Refresh"), systemImage: "arrow.clockwise")
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -263,12 +263,12 @@ struct DevicesView: View {
 
                 VQPanel("Workspace", systemImage: "folder") {
                     VStack(alignment: .leading, spacing: 12) {
-                        KeyValueLine(key: "Project", value: store.workspace.projectName)
-                        KeyValueLine(key: "Git root", value: store.workspace.rootPath.isEmpty ? "Not detected" : store.workspace.rootPath)
+                        KeyValueLine(key: "Project", value: VQDisplay.workspaceName(store.workspace))
+                        CompactKeyValueLine(key: "Git root", value: store.workspace.rootPath.isEmpty ? L10n.tr("Not detected") : store.workspace.rootPath, monospaced: true)
                         KeyValueLine(key: "Branch", value: store.workspace.branchLabel)
-                        KeyValueLine(key: "State", value: store.workspace.statusSummary)
-                        KeyValueLine(key: "Hermes path", value: store.workspace.hermesPath.isEmpty ? "Not detected" : store.workspace.hermesPath)
-                        KeyValueLine(key: "Tailscale", value: store.workspace.tailscaleIP.isEmpty ? "Not detected" : store.workspace.tailscaleIP)
+                        KeyValueLine(key: "State", value: VQDisplay.workspaceStatus(store.workspace))
+                        CompactKeyValueLine(key: "Hermes path", value: store.workspace.hermesPath.isEmpty ? L10n.tr("Not detected") : store.workspace.hermesPath, monospaced: true)
+                        KeyValueLine(key: "Tailscale", value: store.workspace.tailscaleIP.isEmpty ? L10n.tr("Not detected") : store.workspace.tailscaleIP)
                         if let error = store.workspace.errorMessage {
                             Text(error)
                                 .font(.caption)
@@ -283,9 +283,9 @@ struct DevicesView: View {
                         HStack(spacing: 8) {
                             StatusPill(
                                 title: remoteStatusTitle,
-                                tint: remoteOnline ? VQTheme.green : VQTheme.amber
+                                tint: remoteStatusTint
                             )
-                            StatusPill(title: "HMAC", tint: VQTheme.accent)
+                            StatusPill(title: "HMAC", tint: VQTheme.steel)
                             StatusPill(title: "Keychain", tint: VQTheme.green)
                             Spacer()
                         }
@@ -299,7 +299,7 @@ struct DevicesView: View {
                             Button {
                                 beginPairingScan()
                             } label: {
-                                Label("Scan QR", systemImage: "qrcode.viewfinder")
+                                Label(L10n.tr("Scan QR"), systemImage: "qrcode.viewfinder")
                             }
                             .buttonStyle(.borderedProminent)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -307,7 +307,7 @@ struct DevicesView: View {
                             Button {
                                 applyPairingURLInput()
                             } label: {
-                                Label("Use Link", systemImage: "link")
+                                Label(L10n.tr("Use Link"), systemImage: "link")
                             }
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -315,24 +315,24 @@ struct DevicesView: View {
                         }
                         .font(.footnote.weight(.semibold))
 
-                        RemoteConnectionField(title: "Pairing URL", placeholder: "veqral://pair?endpoint=http://100.x.x.x:7878&code=ABCD1234", text: $pairingURLInput)
-                        RemoteConnectionField(title: "Endpoint", placeholder: store.workspace.macHostEndpoint, text: $remoteEndpoint)
-                        RemoteConnectionField(title: "Pairing code", placeholder: "8-character code from menu bar QR", text: $remotePairingCode)
-                        RemoteConnectionField(title: "This device name", placeholder: "iPhone / iPad", text: $remoteDeviceName)
+                        RemoteConnectionField(title: L10n.tr("Pairing URL"), placeholder: "veqral://pair?endpoint=http://100.x.x.x:7878&code=ABCD1234", text: $pairingURLInput)
+                        RemoteConnectionField(title: L10n.tr("Saved endpoint"), placeholder: store.workspace.macHostEndpoint, text: $remoteEndpoint)
+                        RemoteConnectionField(title: L10n.tr("Pairing code"), placeholder: L10n.tr("8-character code from menu bar QR"), text: $remotePairingCode)
+                        RemoteConnectionField(title: L10n.tr("This device name"), placeholder: "iPhone・iPad", text: $remoteDeviceName)
 
-                        KeyValueLine(key: "Saved endpoint", value: store.remoteHost.displayEndpoint)
-                        KeyValueLine(key: "Device ID", value: store.remoteHost.deviceID.isEmpty ? "Not paired" : "\(store.remoteHost.deviceID.prefix(8))...")
-                        KeyValueLine(key: "Tailscale", value: store.remoteHostHealth?.tailscaleIP ?? (store.workspace.tailscaleIP.isEmpty ? "Not verified" : store.workspace.tailscaleIP))
-                        KeyValueLine(key: "Host", value: store.remoteHostHealth?.host ?? "Not connected")
-                        KeyValueLine(key: "Hermes", value: store.remoteHostHealth?.hermesVersion ?? "Not checked")
+                        KeyValueLine(key: "Saved endpoint", value: VQDisplay.endpoint(store.remoteHost))
+                        KeyValueLine(key: "Device ID", value: store.remoteHost.deviceID.isEmpty ? L10n.tr("Not Paired") : "\(store.remoteHost.deviceID.prefix(8))...")
+                        KeyValueLine(key: "Tailscale", value: store.remoteHostHealth?.tailscaleIP ?? (store.workspace.tailscaleIP.isEmpty ? L10n.tr("Not verified") : store.workspace.tailscaleIP))
+                        KeyValueLine(key: "Host", value: store.remoteHostHealth?.host ?? L10n.tr("Not connected"))
+                        KeyValueLine(key: "Hermes", value: store.remoteHostHealth?.hermesVersion ?? L10n.tr("Not checked"))
                         KeyValueLine(key: "Push", value: store.pushNotificationMessage.isEmpty ? VeqralFeatureFlags.pushUnavailableMessage : store.pushNotificationMessage)
-                        KeyValueLine(key: "Execution", value: store.remoteHost.isEnabled ? "iPhone/iPad -> Tailscale -> Mac Host -> Hermes" : "Pair a Mac Host before running on iPhone/iPad")
+                        KeyValueLine(key: "Execution", value: store.remoteHost.isEnabled ? L10n.tr("iPhone/iPad -> Tailscale -> Mac Host -> Hermes") : L10n.tr("Pair a Mac Host before running on iPhone/iPad"))
 
                         HStack(spacing: 8) {
                             Button {
                                 pairRemoteHost()
                             } label: {
-                                Label(isPairing ? "Pairing" : "Pair", systemImage: "link.badge.plus")
+                                Label(L10n.tr(isPairing ? "Pairing" : "Pair"), systemImage: "link.badge.plus")
                             }
                             .buttonStyle(.borderedProminent)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -340,9 +340,9 @@ struct DevicesView: View {
 
                             Button {
                                 store.disableRemoteHost()
-                                remoteStatusMessage = "Remote Host disabled. Pairing data remains in Keychain."
+                                remoteStatusMessage = L10n.tr("Remote Host disabled. Pairing data remains in Keychain.")
                             } label: {
-                                Label("Disable", systemImage: "wifi.slash")
+                                Label(L10n.tr("Disable"), systemImage: "wifi.slash")
                             }
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -350,7 +350,7 @@ struct DevicesView: View {
                             Button {
                                 store.refreshRemoteHostStatus()
                             } label: {
-                                Label(store.isRefreshingRemoteHost ? "Refreshing" : "Refresh Host", systemImage: "arrow.clockwise")
+                                Label(L10n.tr(store.isRefreshingRemoteHost ? "Refreshing" : "Refresh Host"), systemImage: "arrow.clockwise")
                             }
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -384,7 +384,7 @@ struct DevicesView: View {
                                 }
                             }
                         } else {
-                            Text(store.remoteHost.isPaired ? "Refresh the Mac Host to inspect Codex, Claude, and Hermes adapters." : "Pair a Mac Host to inspect CLI versions.")
+                            Text(store.remoteHost.isPaired ? L10n.tr("Refresh the Mac Host to inspect Codex, Claude, and Hermes adapters.") : L10n.tr("Pair a Mac Host to inspect CLI versions."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -394,7 +394,7 @@ struct DevicesView: View {
 
                 VQPanel("Run Agent on This Mac", systemImage: "switch.2") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Choose which native agent the paired Mac Host should spawn for the next command.")
+                        Text(L10n.tr("Choose which native agent the paired Mac Host should spawn for the next command."))
                             .font(.caption)
                             .foregroundStyle(VQTheme.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -430,15 +430,15 @@ struct DevicesView: View {
                             .buttonStyle(.plain)
                         }
 
-                        KeyValueLine(key: "Direct mode", value: "Codex and Claude keep their own native history.")
-                        KeyValueLine(key: "Hermes mode", value: "Project chats share Hermes memory across model changes.")
+                        KeyValueLine(key: "Direct mode", value: L10n.tr("Codex and Claude keep their own native history."))
+                        KeyValueLine(key: "Hermes mode", value: L10n.tr("Project chats share Hermes memory across model changes."))
                     }
                 }
 
                 VQPanel("Paired Devices", systemImage: "iphone.gen3.radiowaves.left.and.right") {
                     VStack(alignment: .leading, spacing: 12) {
                         if store.remoteDevices.isEmpty {
-                            Text(store.remoteHost.isPaired ? "No paired devices reported yet. Refresh the Host once it is reachable." : "Pair a Mac Host to list trusted iPhone/iPad clients.")
+                            Text(store.remoteHost.isPaired ? L10n.tr("No paired devices reported yet. Refresh the Host once it is reachable.") : L10n.tr("Pair a Mac Host to list trusted iPhone/iPad clients."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
@@ -446,15 +446,15 @@ struct DevicesView: View {
                         ForEach(store.remoteDevices) { device in
                             HStack(alignment: .center, spacing: 10) {
                                 Image(systemName: device.id == store.remoteHost.deviceID ? "iphone.gen3" : "rectangle.connected.to.line.below")
-                                    .foregroundStyle(device.lastSeenAt == nil ? VQTheme.secondaryText : VQTheme.accent)
+                                    .foregroundStyle(device.lastSeenAt == nil ? VQTheme.unavailable : VQTheme.green)
                                     .frame(width: 28)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(device.name)
                                         .font(.subheadline.weight(.semibold))
-                                    Text("Last seen \(dateLabel(device.lastSeenAt))")
+                                    Text("\(L10n.tr("Last seen")) \(dateLabel(device.lastSeenAt))")
                                         .font(.caption)
                                         .foregroundStyle(VQTheme.secondaryText)
-                                    Text(device.pushUpdatedAt == nil ? L10n.tr("Push not registered") : "Push \(device.pushEnvironment ?? L10n.tr("unknown")) / \(dateLabel(device.pushUpdatedAt))")
+                                    Text(device.pushUpdatedAt == nil ? L10n.tr("Push not registered") : "Push \(device.pushEnvironment ?? L10n.tr("unknown")) - \(dateLabel(device.pushUpdatedAt))")
                                         .font(.caption)
                                         .foregroundStyle(device.pushUpdatedAt == nil ? VQTheme.secondaryText : VQTheme.green)
                                     Text(device.id)
@@ -467,7 +467,7 @@ struct DevicesView: View {
                                 Button(role: .destructive) {
                                     store.revokeRemoteDevice(device)
                                 } label: {
-                                    Label(device.id == store.remoteHost.deviceID ? "Unpair" : "Revoke", systemImage: "xmark.circle")
+                                    Label(device.id == store.remoteHost.deviceID ? L10n.tr("Unpair") : L10n.tr("Revoke"), systemImage: "xmark.circle")
                                 }
                                 .buttonStyle(.bordered)
                                 .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -482,10 +482,14 @@ struct DevicesView: View {
                 VQPanel("Host Audit", systemImage: "list.bullet.rectangle") {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            StatusPill(title: "\(store.remoteAuditLines.count) events", tint: VQTheme.steel)
+                            if store.remoteAuditLines.isEmpty {
+                                StatusPill(title: L10n.tr("No audit events"), tint: VQTheme.unavailable)
+                            } else {
+                                StatusPill(title: "\(store.remoteAuditLines.count) \(L10n.tr("events"))", tint: VQTheme.steel)
+                            }
                             Spacer()
                             Button(action: store.refreshRemoteHostStatus) {
-                                Label("Refresh", systemImage: "arrow.clockwise")
+                                Label(L10n.tr("Refresh"), systemImage: "arrow.clockwise")
                             }
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -494,7 +498,7 @@ struct DevicesView: View {
                         }
 
                         if store.remoteAuditLines.isEmpty {
-                            Text("No audit events loaded yet.")
+                            Text(L10n.tr("No audit events loaded yet."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
@@ -523,17 +527,17 @@ struct DevicesView: View {
                             }
 
                         VStack(alignment: .leading, spacing: 12) {
-                            KeyValueLine(key: "Saved endpoint", value: store.remoteHost.displayEndpoint)
-                            KeyValueLine(key: "Current state", value: remoteStatusTitle)
+                            KeyValueLine(key: "Saved endpoint", value: VQDisplay.endpoint(store.remoteHost))
+                            KeyValueLine(key: "Current state", value: L10n.tr(remoteStatusTitle))
                             KeyValueLine(key: "Transport", value: "Tailscale WebSocket")
-                            KeyValueLine(key: "Host app", value: "Use the Mac Host pairing QR or deep link")
-                            Text("Pairing codes are generated by the running Mac Host and rotate after successful pairing. Paste the Host endpoint and current code above if the QR deep link is unavailable.")
+                            KeyValueLine(key: "Host app", value: L10n.tr("Use the Mac Host pairing QR or deep link"))
+                            Text(L10n.tr("Pairing codes are generated by the running Mac Host and rotate after successful pairing. Paste the Host endpoint and current code above if the QR deep link is unavailable."))
                                 .font(.caption)
                                 .foregroundStyle(VQTheme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                             HStack {
                                 Button(action: store.refreshRemoteHostStatus) {
-                                    Label("Refresh Host", systemImage: "arrow.clockwise")
+                                    Label(L10n.tr("Refresh Host"), systemImage: "arrow.clockwise")
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -573,7 +577,7 @@ struct DevicesView: View {
 
     private func pairRemoteHost() {
         isPairing = true
-        remoteStatusMessage = "Pairing with Mac Host..."
+        remoteStatusMessage = L10n.tr("Pairing with Mac Host...")
         let endpoint = remoteEndpoint
         let code = remotePairingCode
         let deviceName = remoteDeviceName.isEmpty ? ProcessInfo.processInfo.hostName : remoteDeviceName
@@ -581,9 +585,9 @@ struct DevicesView: View {
             do {
                 try await store.pairRemoteHost(endpoint: endpoint, pairingCode: code, deviceName: deviceName)
                 remotePairingCode = ""
-                remoteStatusMessage = "Paired. Future runs will launch through Mac Host."
+                remoteStatusMessage = L10n.tr("Paired. Future runs will launch through Mac Host.")
             } catch {
-                remoteStatusMessage = "Pairing failed: \(error.localizedDescription)"
+                remoteStatusMessage = "\(L10n.tr("Pairing failed")): \(error.localizedDescription)"
             }
             isPairing = false
         }
@@ -655,13 +659,19 @@ struct DevicesView: View {
     }
 
     private var remoteStatusTitle: String {
-        if remoteOnline { return "Online" }
-        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "Offline" }
-        return "Not Paired"
+	        if remoteOnline { return "Online" }
+	        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "Offline" }
+	        return "Not Paired"
+    }
+
+    private var remoteStatusTint: Color {
+        if remoteOnline { return VQTheme.green }
+        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return VQTheme.unavailable }
+        return VQTheme.amber
     }
 
     private func dateLabel(_ date: Date?) -> String {
-        guard let date else { return "Never" }
+        guard let date else { return L10n.tr("Never") }
         return Self.deviceDateFormatter.string(from: date)
     }
 
@@ -775,20 +785,20 @@ struct ProjectsView: View {
 
     var body: some View {
         ScreenScaffold(title: "Projects", systemImage: "folder") {
-            VQPanel(store.workspace.projectName, systemImage: "folder.badge.gearshape") {
+            VQPanel(VQDisplay.workspaceName(store.workspace), systemImage: "folder.badge.gearshape") {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        StatusPill(title: store.workspace.statusSummary, tint: store.workspace.changedFiles == 0 ? VQTheme.green : VQTheme.amber)
+                        StatusPill(title: VQDisplay.workspaceStatus(store.workspace), tint: VQDisplay.workspaceStatusTint(store.workspace))
                         Spacer()
                         Label("\(store.runs.count)", systemImage: "play.circle")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(VQTheme.secondaryText)
                     }
                     KeyValueLine(key: "Repository", value: store.workspace.remoteLabel)
-                    KeyValueLine(key: "Local path", value: store.workspace.workingDirectory)
-                    KeyValueLine(key: "Git root", value: store.workspace.rootPath.isEmpty ? "Not detected" : store.workspace.rootPath)
+                    CompactKeyValueLine(key: "Local path", value: store.workspace.workingDirectory, monospaced: true)
+                    CompactKeyValueLine(key: "Git root", value: store.workspace.rootPath.isEmpty ? L10n.tr("Not detected") : store.workspace.rootPath, monospaced: true)
                     KeyValueLine(key: "Branch", value: store.workspace.branchLabel)
-                    FlowLayout(items: ["Hermes Project", "Codex Direct", "Claude Direct", "Approvals", "Git Diff"])
+                    FlowLayout(items: ["Hermes Project", "Codex Direct", "Claude Direct", L10n.tr("Approvals"), "Git Diff"])
                 }
             }
 
@@ -801,7 +811,7 @@ struct ProjectsView: View {
                         Button {
                             store.useCurrentWorkspaceForHermes()
                         } label: {
-                            Label("Use Current Folder", systemImage: "folder.badge.plus")
+                            Label(L10n.tr("Use Current Folder"), systemImage: "folder.badge.plus")
                         }
                         .buttonStyle(.bordered)
                         .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -809,7 +819,7 @@ struct ProjectsView: View {
                     .font(.footnote.weight(.semibold))
 
                     if store.agentProjects.isEmpty {
-                        Text("Select a folder on Mac or use the current workspace to create the first Hermes project.")
+                        Text(L10n.tr("Select a folder on Mac or use the current workspace to create the first Hermes project."))
                             .font(.subheadline)
                             .foregroundStyle(VQTheme.secondaryText)
                     }
@@ -817,15 +827,16 @@ struct ProjectsView: View {
                     ForEach(store.agentProjects) { project in
                         Button {
                             store.selectAgentProject(project)
+                            renameChatTitle = store.selectedAgentChat?.title ?? ""
                         } label: {
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack {
-                                    Text(project.name)
+                                    Text(VQDisplay.projectName(project))
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(VQTheme.ink)
                                     Spacer()
                                     StatusPill(
-                                        title: store.selectedAgentProject?.id == project.id ? "Selected" : "\(project.chats.count) chats",
+                                        title: store.selectedAgentProject?.id == project.id ? "Selected" : "\(project.chats.count) \(L10n.tr("chats"))",
                                         tint: store.selectedAgentProject?.id == project.id ? VQTheme.green : VQTheme.steel
                                     )
                                 }
@@ -847,68 +858,67 @@ struct ProjectsView: View {
             VQPanel("Hermes Chats", systemImage: "bubble.left.and.text.bubble.right") {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 8) {
-                        TextField("New chat title", text: $newChatTitle)
+                        TextField(L10n.tr("New chat title"), text: $newChatTitle)
                             .textFieldStyle(.roundedBorder)
                         Button {
                             store.createHermesChat(title: newChatTitle)
                             newChatTitle = ""
                         } label: {
-                            Label("New Chat", systemImage: "plus")
+                            Label(L10n.tr("New Chat"), systemImage: "plus")
                         }
                         .buttonStyle(.borderedProminent)
                         .buttonBorderShape(.roundedRectangle(radius: 8))
                     }
 
                     if store.selectedAgentProject?.chats.isEmpty != false {
-                        Text("Create a chat to run Hermes inside the selected project. Separate chats can use different models while Hermes keeps project memory.")
+                        Text(L10n.tr("Create a chat to run Hermes inside the selected project. Separate chats can use different models while Hermes keeps project memory."))
                             .font(.subheadline)
                             .foregroundStyle(VQTheme.secondaryText)
                     }
 
                     ForEach(store.selectedAgentProject?.chats ?? []) { chat in
-                        Button {
-                            store.selectAgentChat(chat)
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: "message.badge.waveform")
-                                    .foregroundStyle(store.selectedAgentChat?.id == chat.id ? VQTheme.accent : VQTheme.secondaryText)
-                                    .frame(width: 30)
-                                VStack(alignment: .leading, spacing: 3) {
+                        let isSelected = store.selectedAgentChat?.id == chat.id
+                        HStack(spacing: 10) {
+                            Image(systemName: "message.badge.waveform")
+                                .foregroundStyle(isSelected ? VQTheme.accent : VQTheme.secondaryText)
+                                .frame(width: 30)
+                            VStack(alignment: .leading, spacing: 3) {
+                                if isSelected {
+                                    TextField(L10n.tr("Session name"), text: $renameChatTitle)
+                                        .textFieldStyle(.roundedBorder)
+                                        .onAppear {
+                                            renameChatTitle = chat.title
+                                        }
+                                } else {
                                     Text(chat.title)
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(VQTheme.ink)
-                                    Text(chat.sessionID ?? "New Hermes session")
-                                        .font(.caption2.monospaced())
-                                        .foregroundStyle(VQTheme.secondaryText)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
                                 }
-                                Spacer()
-                                StatusPill(title: chat.model.isEmpty ? chat.provider : chat.model, tint: VQTheme.accent)
+                                Text(chat.sessionID ?? L10n.tr("New Hermes session"))
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(VQTheme.secondaryText)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
                             }
-                            .padding(10)
-                            .background(store.selectedAgentChat?.id == chat.id ? VQTheme.accent.opacity(0.08) : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    if let selectedChat = store.selectedAgentChat {
-                        HStack(spacing: 8) {
-                            TextField(L10n.tr("Session name"), text: $renameChatTitle)
-                                .textFieldStyle(.roundedBorder)
-                                .onAppear {
-                                    renameChatTitle = selectedChat.title
+                            Spacer()
+                            if isSelected {
+                                Button(L10n.tr("Save Name")) {
+                                    store.renameSelectedHermesChat(renameChatTitle)
                                 }
-                            Button(L10n.tr("Save Name")) {
-                                store.renameSelectedHermesChat(renameChatTitle)
+                                .buttonStyle(.bordered)
+                                .buttonBorderShape(.roundedRectangle(radius: 8))
                             }
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                            StatusPill(title: chat.model.isEmpty ? chat.provider : chat.model, tint: VQTheme.accent)
                         }
-                        .font(.footnote.weight(.semibold))
-                        .onChange(of: selectedChat.id) { _, _ in
-                            renameChatTitle = store.selectedAgentChat?.title ?? ""
+                        .padding(10)
+                        .background(isSelected ? VQTheme.accent.opacity(0.08) : Color.clear)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if !isSelected {
+                                store.selectAgentChat(chat)
+                                renameChatTitle = chat.title
+                            }
                         }
                     }
 
@@ -916,13 +926,13 @@ struct ProjectsView: View {
                         Button {
                             store.submitHermesProjectCommand()
                         } label: {
-                            Label("Send to Selected Chat", systemImage: "paperplane")
+                            Label(L10n.tr("Send to Selected Chat"), systemImage: "paperplane")
                         }
                         .buttonStyle(.borderedProminent)
                         .buttonBorderShape(.roundedRectangle(radius: 8))
                         .disabled(store.commandDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         Spacer()
-                        Text("Uses Command draft")
+                        Text(L10n.tr("Uses Command draft"))
                             .font(.caption)
                             .foregroundStyle(VQTheme.secondaryText)
                     }
@@ -954,12 +964,12 @@ struct AgentsView: View {
                 VQPanel("Hermes Runtime", systemImage: "sparkles") {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("Default implementer")
+                            Text(L10n.tr("Default implementer"))
                                 .font(.subheadline.weight(.semibold))
                             Spacer()
                             StatusPill(title: store.remoteHost.isPaired ? "Remote Ready" : "Needs Host", tint: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber)
                         }
-                        KeyValueLine(key: "Model path", value: "Hermes -> configured CLI tools")
+                        KeyValueLine(key: "Model path", value: L10n.tr("Hermes -> configured CLI tools"))
                         KeyValueLine(key: "Device", value: store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : store.workspace.deviceName)
                         FlowLayout(items: ["Terminal", "Files", "Memory", "Browser", "Approval gate"])
                     }
@@ -968,13 +978,13 @@ struct AgentsView: View {
                 VQPanel("Direct CLI Agents", systemImage: "rectangle.3.group.bubble.left") {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("Native sessions")
+                            Text(L10n.tr("Native sessions"))
                                 .font(.subheadline.weight(.semibold))
                             Spacer()
                             StatusPill(title: store.remoteHost.isPaired ? "Host Ready" : "Needs Host", tint: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber)
                         }
-                        KeyValueLine(key: "Codex", value: "~/.codex sessions, resumable from History")
-                        KeyValueLine(key: "Claude", value: "~/.claude sessions, resumable from History")
+                        KeyValueLine(key: "Codex", value: L10n.tr("~/.codex sessions, resumable from History"))
+                        KeyValueLine(key: "Claude", value: L10n.tr("~/.claude sessions, resumable from History"))
                         FlowLayout(items: ["Siloed memory", "Read-only history", "PTY stream", "Cancel/resume"])
                     }
                 }
@@ -982,7 +992,7 @@ struct AgentsView: View {
                 VQPanel("Local Shell", systemImage: "terminal") {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("Read-only and approved commands")
+                            Text(L10n.tr("Read-only and approved commands"))
                                 .font(.subheadline.weight(.semibold))
                             Spacer()
                             StatusPill(title: store.workspace.canRunLocalCommands ? "Mac Ready" : "iOS Remote Only", tint: store.workspace.canRunLocalCommands ? VQTheme.green : VQTheme.amber)
@@ -995,7 +1005,7 @@ struct AgentsView: View {
 
                 if store.remoteDevices.isEmpty {
                     VQPanel("Paired Devices", systemImage: "iphone.gen3.radiowaves.left.and.right") {
-                        Text(store.remoteHost.isPaired ? "Refresh the Host to load paired devices." : "Pair iPhone or iPad with Mac Host to show trusted devices.")
+                        Text(store.remoteHost.isPaired ? L10n.tr("Refresh the Host to load paired devices.") : L10n.tr("Pair iPhone or iPad with Mac Host to show trusted devices."))
                             .font(.subheadline)
                             .foregroundStyle(VQTheme.secondaryText)
                     }
@@ -1004,13 +1014,13 @@ struct AgentsView: View {
                         VQPanel(device.name, systemImage: "iphone.gen3") {
                             VStack(alignment: .leading, spacing: 10) {
                                 HStack {
-                                    Text(device.id == store.remoteHost.deviceID ? "Current device" : "Trusted client")
+                                    Text(L10n.tr(device.id == store.remoteHost.deviceID ? "Current device" : "Trusted client"))
                                         .font(.subheadline.weight(.semibold))
                                     Spacer()
                                     StatusPill(title: device.lastSeenAt == nil ? "Paired" : "Seen", tint: device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green)
                                 }
                                 KeyValueLine(key: "Device ID", value: device.id)
-                                KeyValueLine(key: "Last seen", value: device.lastSeenAt.map(Self.deviceDateFormatter.string(from:)) ?? "Never")
+                                KeyValueLine(key: "Last seen", value: device.lastSeenAt.map(Self.deviceDateFormatter.string(from:)) ?? L10n.tr("Never"))
                             }
                         }
                     }
@@ -1044,10 +1054,10 @@ struct ModelAssignmentView: View {
                         VStack(alignment: .leading, spacing: 12) {
                             HStack(alignment: .top) {
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(runtime.contextModeDescription)
+                                    Text(L10n.tr(runtime.contextModeDescription))
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(VQTheme.ink)
-                                    Text(runtime == store.selectedRuntime ? "Selected runtime" : "Available runtime")
+                                    Text(L10n.tr(runtime == store.selectedRuntime ? "Selected runtime" : "Available runtime"))
                                         .font(.caption)
                                         .foregroundStyle(VQTheme.secondaryText)
                                 }
@@ -1061,7 +1071,7 @@ struct ModelAssignmentView: View {
                                 ModelTrait(label: "Context", value: runtime == .hermesAgent ? "Unified" : "Siloed", tint: runtime == .hermesAgent ? VQTheme.green : VQTheme.steel)
                             }
 
-                            Text(runtimeDescription(runtime))
+                            Text(L10n.tr(runtimeDescription(runtime)))
                                 .font(.caption)
                                 .foregroundStyle(VQTheme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1091,8 +1101,8 @@ struct ModelAssignmentView: View {
                     .pickerStyle(.segmented)
 
                     KeyValueLine(key: "Provider", value: store.selectedHermesProvider)
-                    KeyValueLine(key: "Model", value: store.selectedHermesModel.isEmpty ? "Hermes default" : store.selectedHermesModel)
-                    Text("Only Hermes mode uses provider routing here. Codex and Claude direct modes keep their own CLI model/profile settings.")
+                    KeyValueLine(key: "Model", value: store.selectedHermesModel.isEmpty ? L10n.tr("Hermes default") : store.selectedHermesModel)
+                    Text(L10n.tr("Only Hermes mode uses provider routing here. Codex and Claude direct modes keep their own CLI model/profile settings."))
                         .font(.caption)
                         .foregroundStyle(VQTheme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1103,8 +1113,8 @@ struct ModelAssignmentView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     KeyValueLine(key: "Selected runtime", value: store.selectedRuntime.title)
                     KeyValueLine(key: "Hermes", value: store.workspace.hermesLabel)
-                    KeyValueLine(key: "Local shell", value: store.workspace.canRunLocalCommands ? "Available on Mac" : "Requires Mac Host")
-                    KeyValueLine(key: "Output contract", value: "logs / diffs / artifacts / approvals")
+                    KeyValueLine(key: "Local shell", value: store.workspace.canRunLocalCommands ? L10n.tr("Available on Mac") : L10n.tr("Requires Mac Host"))
+                    KeyValueLine(key: "Output contract", value: L10n.tr("Logs, diffs, artifacts, approvals"))
                 }
             }
         }
@@ -1157,7 +1167,7 @@ private struct ModelTrait: View {
             Text(L10n.tr(label))
                 .font(.caption2)
                 .foregroundStyle(VQTheme.secondaryText)
-            Text(value)
+            Text(L10n.tr(value))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(tint)
                 .lineLimit(1)
@@ -1185,7 +1195,7 @@ struct RunsView: View {
             VQPanel("Pipeline", systemImage: "timeline.selection") {
                 PhaseRail(current: selectedPhase ?? store.selectedRun?.phase ?? .implementation)
                 Picker("Phase", selection: $selectedPhase) {
-                    Text("All").tag(nil as RunPhase?)
+                    Text(L10n.tr("All")).tag(nil as RunPhase?)
                     ForEach(RunPhase.allCases) { phase in
                         Text(phase.title).tag(phase as RunPhase?)
                     }
@@ -1196,7 +1206,7 @@ struct RunsView: View {
             VQPanel("Queue", systemImage: "list.bullet.rectangle") {
                 VStack(alignment: .leading, spacing: 12) {
                     if filteredRuns.isEmpty {
-                        Text("No runs in this phase yet.")
+                        Text(L10n.tr("No runs in this phase yet."))
                             .font(.subheadline)
                             .foregroundStyle(VQTheme.secondaryText)
                     }
@@ -1297,7 +1307,7 @@ struct TerminalView: View {
                     }
 
                     HStack(spacing: 10) {
-                        TextField("Command to run on Mac", text: $store.commandDraft, axis: .vertical)
+                        TextField(L10n.tr("Command to run on Mac"), text: $store.commandDraft, axis: .vertical)
                             .textFieldStyle(.plain)
                             .lineLimit(1...3)
                             .font(.body.monospaced())
@@ -1305,7 +1315,7 @@ struct TerminalView: View {
                                 store.submitDraft()
                             }
                         Button(action: store.submitDraft) {
-                            Label("Run", systemImage: "arrow.up")
+                            Label(L10n.tr("Run"), systemImage: "arrow.up")
                         }
                         .buttonStyle(.borderedProminent)
                         .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -1316,7 +1326,7 @@ struct TerminalView: View {
                     #if targetEnvironment(macCatalyst)
                     HStack(spacing: 8) {
                         Image(systemName: "folder")
-                        TextField("Working directory", text: $store.workingDirectory)
+                        TextField(L10n.tr("Working directory"), text: $store.workingDirectory)
                             .textFieldStyle(.plain)
                             .font(.caption.monospaced())
                             .onSubmit {
@@ -1332,7 +1342,7 @@ struct TerminalView: View {
                             .lineLimit(1)
                     }
                     #else
-                    Text("On iPhone and iPad this saves the run. Local execution happens from the Mac build.")
+                    Text(L10n.tr("On iPhone and iPad this saves the run. Local execution happens from the Mac build."))
                         .font(.caption)
                         .foregroundStyle(VQTheme.secondaryText)
                     #endif
@@ -1344,7 +1354,7 @@ struct TerminalView: View {
                     HStack {
                         StatusPill(title: store.selectedRun?.status.title ?? "Waiting", tint: store.selectedRun?.status.tint ?? VQTheme.secondaryText)
                         Spacer()
-                        Text(store.selectedRun?.title ?? "No run selected")
+                        Text(store.selectedRun?.title ?? L10n.tr("No run selected."))
                             .font(.caption.monospaced())
                             .foregroundStyle(VQTheme.secondaryText)
                             .lineLimit(1)
@@ -1354,7 +1364,7 @@ struct TerminalView: View {
                     VStack(alignment: .leading, spacing: 7) {
                         let logs = store.logEntries(for: store.selectedRun?.id)
                         if logs.isEmpty {
-                            Text("まだログはありません。")
+                            Text(L10n.tr("まだログはありません。"))
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
                         ForEach(logs) { line in
@@ -1392,7 +1402,7 @@ struct TerminalView: View {
                         }
                         .buttonStyle(.bordered)
                         .buttonBorderShape(.roundedRectangle(radius: 8))
-                        .help("Send command")
+                        .help(L10n.tr("Send command"))
                     }
                 }
             }
@@ -1410,7 +1420,7 @@ struct DiffView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     let diffs = store.diffEntries(for: store.selectedRun?.id)
                     if diffs.isEmpty {
-                        Text("Git diffはまだありません。Mac版でgit管理下のフォルダを指定すると取得します。")
+                        Text(L10n.tr("Git diffはまだありません。Mac版でgit管理下のフォルダを指定すると取得します。"))
                             .font(.subheadline)
                             .foregroundStyle(VQTheme.secondaryText)
                     }
@@ -1604,7 +1614,7 @@ private struct ArtifactImagePreview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label)
+            Text(L10n.tr(label))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(VQTheme.secondaryText)
             ArtifactUIImage(artifact: artifact, data: data)
@@ -1657,13 +1667,13 @@ struct ArtifactsView: View {
                 if store.remoteArtifacts.isEmpty {
                     VQPanel("No Artifacts", systemImage: "shippingbox") {
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Artifacts appear here after a real Mac Host run produces files or receives image attachments from iOS.")
+                            Text(L10n.tr("Artifacts appear here after a real Mac Host run produces files or receives image attachments from iOS."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                             if store.remoteHost.isPaired {
                                 Button(action: store.refreshRemoteHostStatus) {
-                                    Label("Refresh Host", systemImage: "arrow.clockwise")
+                                    Label(L10n.tr("Refresh Host"), systemImage: "arrow.clockwise")
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -1750,14 +1760,14 @@ struct HistoryView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 10) {
                         Picker("Tool", selection: $toolFilter) {
-                            Text("All").tag("all")
+                            Text(L10n.tr("All")).tag("all")
                             Text("Claude").tag(RemoteHistoryTool.claude.rawValue)
                             Text("Codex").tag(RemoteHistoryTool.codex.rawValue)
                         }
                         .pickerStyle(.segmented)
 
                         Button(action: refresh) {
-                            Label("Refresh", systemImage: "arrow.clockwise")
+                            Label(L10n.tr("Refresh"), systemImage: "arrow.clockwise")
                         }
                         .buttonStyle(.bordered)
                         .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -1781,14 +1791,14 @@ struct HistoryView: View {
 
                     HStack(spacing: 10) {
                         Picker("Project", selection: $projectFilter) {
-                            Text("All Projects").tag("all")
+                            Text(L10n.tr("All Projects")).tag("all")
                             ForEach(store.remoteHistoryProjects, id: \.self) { project in
                                 Text(project).tag(project)
                             }
                         }
                         .frame(maxWidth: 260)
 
-                        TextField("Search prompts, tools, output", text: $searchText)
+                        TextField(L10n.tr("Search prompts, tools, output"), text: $searchText)
                             .textFieldStyle(.roundedBorder)
                             .onSubmit(refresh)
 
@@ -1819,7 +1829,7 @@ struct HistoryView: View {
                         ProgressView()
                             .padding(.vertical, 18)
                     } else if displayedSessions.isEmpty {
-                        Text(store.remoteHost.isPaired ? "No Claude or Codex sessions matched this filter." : "Pair with Mac Host to read Claude/Codex history.")
+                        Text(store.remoteHost.isPaired ? L10n.tr("No Claude or Codex sessions matched this filter.") : L10n.tr("Pair with Mac Host to read Claude/Codex history."))
                             .font(.subheadline)
                             .foregroundStyle(VQTheme.secondaryText)
                             .padding(.vertical, 16)
@@ -1865,11 +1875,11 @@ struct HistoryView: View {
                             Button {
                                 store.continueHistorySession(session)
                             } label: {
-                                Label("Continue", systemImage: "arrowshape.turn.up.right")
+                                Label(L10n.tr("Continue"), systemImage: "arrowshape.turn.up.right")
                             }
                             .buttonStyle(.borderedProminent)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
-                            StatusPill(title: "\(store.remoteHistoryTurns.count) turns", tint: VQTheme.accent)
+                            StatusPill(title: "\(store.remoteHistoryTurns.count) \(L10n.tr("turns"))", tint: VQTheme.accent)
                         }
 
                         HStack(spacing: 8) {
@@ -1887,7 +1897,7 @@ struct HistoryView: View {
                             ProgressView()
                                 .padding(.vertical, 18)
                         } else if store.remoteHistoryTurns.isEmpty {
-                            Text("Select a session to load turns.")
+                            Text(L10n.tr("Select a session to load turns."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                         } else {
@@ -1899,7 +1909,7 @@ struct HistoryView: View {
                         }
                     }
                 } else {
-                    Text("Select a Claude or Codex session from the table.")
+                    Text(L10n.tr("Select a Claude or Codex session from the table."))
                         .font(.subheadline)
                         .foregroundStyle(VQTheme.secondaryText)
                 }
@@ -1932,11 +1942,11 @@ struct HistoryView: View {
 private struct HistoryHeaderRow: View {
     var body: some View {
         HStack(spacing: 12) {
-            Text("Tool").frame(width: 72, alignment: .leading)
-            Text("Project").frame(width: 140, alignment: .leading)
-            Text("Started").frame(width: 150, alignment: .leading)
-            Text("Turns").frame(width: 56, alignment: .trailing)
-            Text("Prompt / Summary").frame(maxWidth: .infinity, alignment: .leading)
+            Text(L10n.tr("Tool")).frame(width: 72, alignment: .leading)
+            Text(L10n.tr("Project")).frame(width: 140, alignment: .leading)
+            Text(L10n.tr("Started")).frame(width: 150, alignment: .leading)
+            Text(L10n.tr("Turns")).frame(width: 56, alignment: .trailing)
+            Text(L10n.tr("Prompt Summary")).frame(maxWidth: .infinity, alignment: .leading)
         }
         .font(.caption.weight(.semibold))
         .foregroundStyle(VQTheme.secondaryText)
@@ -1956,7 +1966,7 @@ private struct HistorySessionRow: View {
             Text(session.project)
                 .frame(width: 140, alignment: .leading)
                 .lineLimit(1)
-            Text(session.startedAt.map(Self.dateFormatter.string(from:)) ?? "Unknown")
+            Text(session.startedAt.map(Self.dateFormatter.string(from:)) ?? L10n.tr("Unknown"))
                 .font(.caption.monospaced())
                 .foregroundStyle(VQTheme.secondaryText)
                 .frame(width: 150, alignment: .leading)
@@ -2006,7 +2016,7 @@ private struct HistoryTurnView: View {
                     .foregroundStyle(VQTheme.secondaryText)
                 Spacer()
                 if isTool {
-                    Button(expanded ? "Collapse" : "Expand") {
+                    Button(L10n.tr(expanded ? "Collapse" : "Expand")) {
                         expanded.toggle()
                     }
                     .buttonStyle(.plain)
@@ -2031,7 +2041,7 @@ private struct HistoryTurnView: View {
     }
 
     private var displayText: String {
-        turn.text.isEmpty ? "(empty)" : turn.text
+        turn.text.isEmpty ? L10n.tr("(empty)") : turn.text
     }
 
     private var tint: Color {
@@ -2059,13 +2069,13 @@ struct ApprovalsView: View {
     var body: some View {
         ScreenScaffold(title: "Approvals", systemImage: "hand.raised") {
             VQPanel("Policy", systemImage: "lock.shield") {
-                FlowLayout(items: ["File deletion", "Billing", "Production", "Secrets", "Screen control"])
+                FlowLayout(items: [L10n.tr("File deletion"), L10n.tr("Billing"), L10n.tr("Production"), L10n.tr("Secrets"), L10n.tr("Screen control")])
             }
 
             let pending = store.pendingApprovals()
             if pending.isEmpty {
                 VQPanel("Queue", systemImage: "checkmark.shield") {
-                    Text("No pending approvals. Risky commands stop here and run from the Mac build after approval.")
+                    Text(L10n.tr("No pending approvals. Risky commands stop here and run from the Mac build after approval."))
                         .font(.subheadline)
                         .foregroundStyle(VQTheme.secondaryText)
                 }
@@ -2111,12 +2121,12 @@ private struct CommandApprovalQueueRow: View {
             HStack {
                 StatusPill(title: approval.riskLabel, tint: approval.tint)
                 Spacer()
-                Button("Reject") {
+                    Button(L10n.tr("Reject")) {
                     store.reject(approval)
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle(radius: 8))
-                Button("Approve") {
+                    Button(L10n.tr("Approve")) {
                     store.approve(approval)
                 }
                 .buttonStyle(.borderedProminent)
@@ -2153,7 +2163,7 @@ struct MemoryView: View {
                         Button {
                             store.refreshRemoteMemory()
                         } label: {
-                            Label(store.isLoadingRemoteMemory ? "Loading" : "Refresh", systemImage: "arrow.clockwise")
+                            Label(L10n.tr(store.isLoadingRemoteMemory ? "Loading" : "Refresh"), systemImage: "arrow.clockwise")
                         }
                         .buttonStyle(.bordered)
                         .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -2162,7 +2172,7 @@ struct MemoryView: View {
                     .font(.footnote.weight(.semibold))
 
                     if !(store.remoteHost.isEnabled && store.remoteHost.isPaired) {
-                        Text("DevicesでMac HostをQRペアリングすると、Mac上のHermesメモリをここから確認・編集できます。")
+                        Text(L10n.tr("DevicesでMac HostをQRペアリングすると、Mac上のHermesメモリをここから確認・編集できます。"))
                             .font(.caption)
                             .foregroundStyle(VQTheme.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -2190,7 +2200,7 @@ struct MemoryView: View {
 
             VQPanel("\(selectedScope.title) Memory", systemImage: "pin") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Use Hermes Memory Files above to load live USER.md, MEMORY.md, and skills from the paired Mac Host.")
+                    Text(L10n.tr("Use Hermes Memory Files above to load live USER.md, MEMORY.md, and skills from the paired Mac Host."))
                         .font(.subheadline)
                         .foregroundStyle(VQTheme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -2224,20 +2234,20 @@ struct GitHubOpsView: View {
 
                     GitHubStep(title: "Branch", value: branchLabel, status: branchLabel == "No branch" ? "Missing" : "Ready", tint: branchLabel == "No branch" ? VQTheme.amber : VQTheme.green)
                     GitHubStep(title: "Working Tree", value: workingTreeLabel, status: changedFiles == 0 ? "Clean" : "Dirty", tint: changedFiles == 0 ? VQTheme.green : VQTheme.amber)
-                    GitHubStep(title: "Pull Request", value: github.pullRequestURL.isEmpty ? "Not opened" : github.pullRequestURL, status: github.pullRequestState, tint: github.pullRequestURL.isEmpty ? VQTheme.secondaryText : VQTheme.accent)
+                    GitHubStep(title: "Pull Request", value: github.pullRequestURL.isEmpty ? L10n.tr("Not opened") : github.pullRequestURL, status: github.pullRequestState, tint: github.pullRequestURL.isEmpty ? VQTheme.secondaryText : VQTheme.accent)
                     GitHubStep(title: "CI", value: github.checksSummary, status: github.checksSummary.localizedCaseInsensitiveContains("failing") ? "Failing" : "Status", tint: github.checksSummary.localizedCaseInsensitiveContains("failing") ? VQTheme.red : VQTheme.secondaryText)
-                    GitHubStep(title: "Deploy", value: "Approval required", status: "Locked", tint: VQTheme.red)
+                    GitHubStep(title: "Deploy", value: L10n.tr("Approval required"), status: "Locked", tint: VQTheme.red)
 
                     HStack(spacing: 8) {
                         Button(action: store.refreshGitHubStatus) {
-                            Label("Refresh", systemImage: "arrow.clockwise")
+                            Label(L10n.tr("Refresh"), systemImage: "arrow.clockwise")
                         }
                         .buttonStyle(.borderedProminent)
                         .buttonBorderShape(.roundedRectangle(radius: 8))
                         .disabled(!store.remoteHost.isPaired)
 
                         Button(action: store.createDraftPRFromHost) {
-                            Label("Create Draft PR", systemImage: "plus.square.on.square")
+                            Label(L10n.tr("Create Draft PR"), systemImage: "plus.square.on.square")
                         }
                         .buttonStyle(.bordered)
                         .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -2251,8 +2261,8 @@ struct GitHubOpsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     KeyValueLine(key: "Remote", value: github.remote.isEmpty ? store.workspace.remoteLabel : github.remote)
                     KeyValueLine(key: "Git root", value: github.gitRoot.isEmpty ? store.workspace.rootPath : github.gitRoot)
-                    KeyValueLine(key: "Ahead/behind", value: github.aheadBehind.isEmpty ? "No upstream data" : github.aheadBehind)
-                    KeyValueLine(key: "Review mode", value: "Branch + commit + draft PR automatic, merge/deploy approval")
+                    KeyValueLine(key: "Ahead/behind", value: github.aheadBehind.isEmpty ? L10n.tr("No upstream data") : github.aheadBehind)
+                    KeyValueLine(key: "Review mode", value: L10n.tr("Branch + commit + draft PR automatic, merge/deploy approval"))
                     if let error = github.error, !error.isEmpty {
                         Text(error)
                             .font(.caption)
@@ -2289,7 +2299,7 @@ struct GitHubOpsView: View {
     }
 
     private var workingTreeLabel: String {
-        changedFiles == 0 ? "Clean" : "\(changedFiles) changed files"
+            changedFiles == 0 ? L10n.tr("Clean") : "\(changedFiles) \(L10n.tr("changed files"))"
     }
 }
 
@@ -2302,7 +2312,7 @@ struct InspectorView: View {
                 HStack {
                     Image(systemName: "sidebar.right")
                         .foregroundStyle(VQTheme.accent)
-                    Text("Inspector")
+                    Text(L10n.tr("Inspector"))
                         .font(.headline)
                     Spacer()
                 }
@@ -2311,7 +2321,7 @@ struct InspectorView: View {
                     if let run = store.selectedRun {
                         CommandRunListRow(run: run, isSelected: true)
                     } else {
-                        Text("No run selected.")
+                        Text(L10n.tr("No run selected."))
                             .font(.caption)
                             .foregroundStyle(VQTheme.secondaryText)
                     }
@@ -2323,11 +2333,11 @@ struct InspectorView: View {
 
                 VQPanel("Approval Rules", systemImage: "lock.shield") {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(["Deletion", "Billing", "Production", "Secrets", "Screen control"], id: \.self) { rule in
+                        ForEach(["File deletion", "Billing", "Production", "Secrets", "Screen control"], id: \.self) { rule in
                             HStack {
                                 Image(systemName: "checkmark.shield")
                                     .foregroundStyle(VQTheme.amber)
-                                Text(rule)
+                                Text(L10n.tr(rule))
                                     .font(.caption.weight(.semibold))
                                 Spacer()
                             }
@@ -2338,7 +2348,7 @@ struct InspectorView: View {
                 VQPanel("Mac Fleet", systemImage: "desktopcomputer") {
                     VStack(alignment: .leading, spacing: 10) {
                         if store.remoteDevices.isEmpty {
-                            Text("No paired devices loaded.")
+                            Text(L10n.tr("No paired devices loaded."))
                                 .font(.caption)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
@@ -2391,7 +2401,7 @@ private struct PhaseRail: View {
 private struct OrganizationGraph: View {
     var body: some View {
         VStack(spacing: 14) {
-            AgentNode(name: "Command", role: "iPhone/iPad", tint: VQTheme.accent)
+                AgentNode(name: "Command", role: "iPhone/iPad", tint: VQTheme.accent)
             Rectangle()
                 .fill(VQTheme.hairline)
                 .frame(width: 1, height: 18)
@@ -2443,7 +2453,7 @@ private struct ReviewNote: View {
             Image(systemName: symbol)
                 .foregroundStyle(symbol.contains("exclamationmark") ? VQTheme.amber : VQTheme.green)
                 .padding(.top, 1)
-            Text(text)
+            Text(L10n.tr(text))
                 .font(.subheadline)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
@@ -2500,7 +2510,7 @@ private struct RemoteMemoryEditor: View {
     private var fileList: some View {
         VStack(alignment: .leading, spacing: 8) {
             if store.remoteMemoryFiles.isEmpty {
-                Text("No Hermes memory files loaded.")
+                    Text(L10n.tr("No Hermes memory files loaded."))
                     .font(.caption)
                     .foregroundStyle(VQTheme.secondaryText)
             } else {
@@ -2537,10 +2547,10 @@ private struct RemoteMemoryEditor: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(selectedFile?.relativePath ?? "Select a file")
+                    Text(selectedFile?.relativePath ?? L10n.tr("Select a file"))
                         .font(.caption.weight(.semibold))
                     if let selectedFile {
-                        Text("\(selectedFile.bytes) bytes")
+                        Text("\(selectedFile.bytes) \(L10n.tr("bytes"))")
                             .font(.caption2)
                             .foregroundStyle(VQTheme.secondaryText)
                     }
@@ -2549,7 +2559,7 @@ private struct RemoteMemoryEditor: View {
                 Button {
                     store.previewRemoteMemoryDiff()
                 } label: {
-                    Label("Diff", systemImage: "doc.text.magnifyingglass")
+                    Label(L10n.tr("Diff"), systemImage: "doc.text.magnifyingglass")
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -2558,7 +2568,7 @@ private struct RemoteMemoryEditor: View {
                 Button {
                     store.saveRemoteMemory()
                 } label: {
-                    Label("Save", systemImage: "square.and.arrow.down")
+                    Label(L10n.tr("Save"), systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -2637,7 +2647,7 @@ private struct GitHubStep: View {
                 .fill(tint)
                 .frame(width: 10, height: 10)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                Text(L10n.tr(title))
                     .font(.subheadline.weight(.semibold))
                 Text(value)
                     .font(.caption)
