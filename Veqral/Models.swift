@@ -21,20 +21,20 @@ enum AppSection: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .home: "Command"
-        case .chat: "Intent"
-        case .requirements: "Requirements"
-        case .projects: "Projects"
-        case .devices: "Devices"
-        case .agents: "Agents"
-        case .models: "Models"
-        case .runs: "Runs"
-        case .terminal: "Terminal"
-        case .diff: "Diff"
-        case .artifacts: "Artifacts"
-        case .history: "History"
-        case .approvals: "Approvals"
-        case .memory: "Memory"
+        case .home: L10n.tr("Command")
+        case .chat: L10n.tr("Intent")
+        case .requirements: L10n.tr("Requirements")
+        case .projects: L10n.tr("Projects")
+        case .devices: L10n.tr("Devices")
+        case .agents: L10n.tr("Agents")
+        case .models: L10n.tr("Models")
+        case .runs: L10n.tr("Runs")
+        case .terminal: L10n.tr("Terminal")
+        case .diff: L10n.tr("Diff")
+        case .artifacts: L10n.tr("Artifacts")
+        case .history: L10n.tr("History")
+        case .approvals: L10n.tr("Approvals")
+        case .memory: L10n.tr("Memory")
         case .github: "GitHub"
         }
     }
@@ -77,11 +77,11 @@ enum RunPhase: String, CaseIterable, Identifiable, Codable {
 
     var title: String {
         switch self {
-        case .requirements: "Requirements"
-        case .implementation: "Implementation"
-        case .testing: "Testing"
+        case .requirements: L10n.tr("Requirements")
+        case .implementation: L10n.tr("Implementation")
+        case .testing: L10n.tr("Testing")
         case .github: "GitHub"
-        case .deploy: "Deploy"
+        case .deploy: L10n.tr("Deploy")
         }
     }
 }
@@ -95,11 +95,11 @@ enum RunStatus: String, Codable {
 
     var title: String {
         switch self {
-        case .running: "Running"
-        case .waiting: "Waiting"
-        case .complete: "Complete"
-        case .failed: "Failed"
-        case .approval: "Approval"
+        case .running: L10n.tr("Running")
+        case .waiting: L10n.tr("Waiting")
+        case .complete: L10n.tr("Complete")
+        case .failed: L10n.tr("Failed")
+        case .approval: L10n.tr("Approval")
         }
     }
 
@@ -121,9 +121,9 @@ enum DeviceStatus: String {
 
     var title: String {
         switch self {
-        case .online: "Online"
-        case .idle: "Idle"
-        case .offline: "Offline"
+        case .online: L10n.tr("Online")
+        case .idle: L10n.tr("Idle")
+        case .offline: L10n.tr("Offline")
         }
     }
 
@@ -143,9 +143,9 @@ enum RequirementState: String {
 
     var title: String {
         switch self {
-        case .decided: "Decided"
-        case .open: "Open"
-        case .review: "Review"
+        case .decided: L10n.tr("Decided")
+        case .open: L10n.tr("Open")
+        case .review: L10n.tr("Review")
         }
     }
 
@@ -167,11 +167,11 @@ enum RiskType: String {
 
     var title: String {
         switch self {
-        case .deletion: "File deletion"
-        case .billing: "Billing"
-        case .production: "Production"
-        case .secret: "Secrets"
-        case .screen: "Screen control"
+        case .deletion: L10n.tr("File deletion")
+        case .billing: L10n.tr("Billing")
+        case .production: L10n.tr("Production")
+        case .secret: L10n.tr("Secrets")
+        case .screen: L10n.tr("Screen control")
         }
     }
 
@@ -196,10 +196,10 @@ enum MemoryScope: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .user: "User"
-        case .project: "Project"
-        case .decision: "Decision"
-        case .agent: "Agent"
+        case .user: L10n.tr("User")
+        case .project: L10n.tr("Project")
+        case .decision: L10n.tr("Decision")
+        case .agent: L10n.tr("Agent")
         }
     }
 }

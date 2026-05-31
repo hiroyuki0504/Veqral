@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct DashboardView: View {
     @EnvironmentObject private var store: CommandCenterStore
@@ -6,12 +7,12 @@ struct DashboardView: View {
     private let panelColumns = [GridItem(.adaptive(minimum: 300), spacing: 14)]
 
     private var metrics: [CommandMetric] {
-        let activeCount = store.runs.filter { [.running, .waiting, .approval].contains($0.status) }.count
-        let runningCount = store.runs.filter { $0.status == .running }.count
+        let activeCount = store.visibleRuns().filter { [.running, .waiting, .approval].contains($0.status) }.count
+        let runningCount = store.visibleRuns().filter { $0.status == .running }.count
         return [
-            CommandMetric(title: "Active runs", value: "\(activeCount)", detail: "\(runningCount) running", symbol: "play.circle", tint: VQTheme.accent),
-            CommandMetric(title: "Approvals", value: "\(store.pendingApprovals().count)", detail: "Deletion, deploy, secrets", symbol: "hand.raised", tint: VQTheme.amber),
-            CommandMetric(title: "Mac Host", value: store.workspace.canRunLocalCommands ? "1" : "0", detail: store.workspace.tailscaleIP.isEmpty ? "Tailscale pending" : store.workspace.tailscaleIP, symbol: "macbook.and.iphone", tint: store.workspace.canRunLocalCommands ? VQTheme.green : VQTheme.amber),
+            CommandMetric(title: L10n.tr("Active runs"), value: "\(activeCount)", detail: "\(runningCount) \(L10n.tr("Running"))", symbol: "play.circle", tint: VQTheme.accent),
+            CommandMetric(title: L10n.tr("Approvals"), value: "\(store.pendingApprovals().count)", detail: "Deletion / deploy / secrets", symbol: "hand.raised", tint: VQTheme.amber),
+            CommandMetric(title: "Mac Host", value: store.remoteHost.isPaired ? "1" : "0", detail: store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : "Tailscale pending", symbol: "macbook.and.iphone", tint: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber),
             CommandMetric(title: "Context", value: "\(ContextPackage.items.count)", detail: "Shared package items", symbol: "archivebox", tint: VQTheme.green)
         ]
     }
@@ -19,6 +20,7 @@ struct DashboardView: View {
     var body: some View {
         ScreenScaffold(title: "Command", systemImage: "command") {
             CommandComposer()
+            ApprovalFastLane()
 
             LazyVGrid(columns: columns, spacing: 12) {
                 ForEach(metrics) { metric in
@@ -29,7 +31,7 @@ struct DashboardView: View {
             LazyVGrid(columns: panelColumns, spacing: 14) {
                 VQPanel("Active Runs", systemImage: "play.rectangle.on.rectangle", actionImage: "arrow.right") {
                     VStack(alignment: .leading, spacing: 12) {
-                        let visibleRuns = Array(store.runs.prefix(3))
+                        let visibleRuns = Array(store.visibleRuns().prefix(3))
                         ForEach(visibleRuns) { run in
                             Button {
                                 store.selectRun(run.id)
@@ -622,6 +624,7 @@ private struct ToolDiagnosticRow: View {
 struct ProjectsView: View {
     @EnvironmentObject private var store: CommandCenterStore
     @State private var newChatTitle = ""
+    @State private var renameChatTitle = ""
 
     var body: some View {
         ScreenScaffold(title: "Projects", systemImage: "folder") {
@@ -743,6 +746,25 @@ struct ProjectsView: View {
                         .buttonStyle(.plain)
                     }
 
+                    if let selectedChat = store.selectedAgentChat {
+                        HStack(spacing: 8) {
+                            TextField(L10n.tr("Session name"), text: $renameChatTitle)
+                                .textFieldStyle(.roundedBorder)
+                                .onAppear {
+                                    renameChatTitle = selectedChat.title
+                                }
+                            Button(L10n.tr("Save Name")) {
+                                store.renameSelectedHermesChat(renameChatTitle)
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                        }
+                        .font(.footnote.weight(.semibold))
+                        .onChange(of: selectedChat.id) { _, _ in
+                            renameChatTitle = store.selectedAgentChat?.title ?? ""
+                        }
+                    }
+
                     HStack {
                         Button {
                             store.submitHermesProjectCommand()
@@ -761,6 +783,9 @@ struct ProjectsView: View {
             }
         }
         .onAppear(perform: store.ensureAgentProjectForCurrentWorkspace)
+        .onChange(of: store.selectedAgentChat?.id) { _, _ in
+            renameChatTitle = store.selectedAgentChat?.title ?? ""
+        }
     }
 }
 
@@ -982,7 +1007,7 @@ private struct ModelTrait: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(label)
+            Text(L10n.tr(label))
                 .font(.caption2)
                 .foregroundStyle(VQTheme.secondaryText)
             Text(value)
@@ -1003,12 +1028,13 @@ struct RunsView: View {
     @State private var selectedPhase: RunPhase? = nil
 
     private var filteredRuns: [CommandRun] {
-        guard let selectedPhase else { return store.runs }
-        return store.runs.filter { $0.phase == selectedPhase }
+        store.visibleRuns(phase: selectedPhase)
     }
 
     var body: some View {
         ScreenScaffold(title: "Runs", systemImage: "play.rectangle.on.rectangle") {
+            ApprovalFastLane()
+
             VQPanel("Pipeline", systemImage: "timeline.selection") {
                 PhaseRail(current: selectedPhase ?? store.selectedRun?.phase ?? .implementation)
                 Picker("Phase", selection: $selectedPhase) {
@@ -1034,6 +1060,14 @@ struct RunsView: View {
                             CommandRunListRow(run: run, isSelected: store.selectedRunID == run.id)
                         }
                         .buttonStyle(.plain)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button {
+                                store.archiveRun(run)
+                            } label: {
+                                Label(L10n.tr("Archive"), systemImage: "archivebox")
+                            }
+                            .tint(.gray)
+                        }
                         if run.id != filteredRuns.last?.id {
                             EmptyDivider()
                         }
@@ -1041,6 +1075,66 @@ struct RunsView: View {
                 }
             }
         }
+    }
+}
+
+private struct ApprovalFastLane: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
+    var body: some View {
+        let pending = store.pendingApprovals(limit: 4)
+        if !pending.isEmpty {
+            VQPanel(L10n.tr("One-tap approvals"), systemImage: "hand.raised.fill") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(L10n.tr("Approve or reject without opening a run."))
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                    ForEach(pending) { approval in
+                        CompactApprovalDecisionRow(approval: approval)
+                        if approval.id != pending.last?.id {
+                            EmptyDivider()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct CompactApprovalDecisionRow: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let approval: CommandApproval
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: approval.symbolName)
+                .frame(width: 30, height: 30)
+                .foregroundStyle(approval.tint)
+                .background(approval.tint.opacity(0.13))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(approval.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                    .lineLimit(1)
+                Text(approval.detail)
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            Button(L10n.tr("Reject")) {
+                store.reject(approval)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+            Button(L10n.tr("Approve")) {
+                store.approve(approval)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+        }
+        .font(.footnote.weight(.semibold))
     }
 }
 
@@ -1161,6 +1255,7 @@ struct TerminalView: View {
 
 struct DiffView: View {
     @EnvironmentObject private var store: CommandCenterStore
+    @State private var imageMode: ImageDiffMode = .sideBySide
 
     var body: some View {
         ScreenScaffold(title: "Diff", systemImage: "plus.forwardslash.minus") {
@@ -1184,12 +1279,54 @@ struct DiffView: View {
                                     .font(.caption.monospaced().weight(.semibold))
                                     .foregroundStyle(file.deletions > 0 ? VQTheme.amber : VQTheme.green)
                             }
+                            HStack {
+                                Button {
+                                    store.attachDiffInstruction(file)
+                                } label: {
+                                    Label(L10n.tr("Attach to Command"), systemImage: "paperclip")
+                                }
+                                .buttonStyle(.bordered)
+                                .buttonBorderShape(.roundedRectangle(radius: 8))
+                                Spacer()
+                            }
+                            .font(.caption.weight(.semibold))
+
+                            if let patch = file.patch?.trimmingCharacters(in: .whitespacesAndNewlines), !patch.isEmpty {
+                                ForEach(Self.hunks(from: patch).prefix(3), id: \.self) { hunk in
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack {
+                                            StatusPill(title: L10n.tr("Diff Hunk"), tint: VQTheme.accent)
+                                            Spacer()
+                                            Button {
+                                                store.attachDiffInstruction(file, hunk: hunk)
+                                            } label: {
+                                                Label(L10n.tr("Attach to Command"), systemImage: "paperclip")
+                                            }
+                                            .buttonStyle(.plain)
+                                            .foregroundStyle(VQTheme.accent)
+                                        }
+                                        Text(hunk)
+                                            .font(.caption2.monospaced())
+                                            .foregroundStyle(VQTheme.secondaryText)
+                                            .lineLimit(12)
+                                            .textSelection(.enabled)
+                                            .padding(8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .background(VQTheme.control.opacity(0.36))
+                                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    }
+                                }
+                            }
                         }
                         if file.id != diffs.last?.id {
                             EmptyDivider()
                         }
                     }
                 }
+            }
+
+            VQPanel(L10n.tr("Image Diff"), systemImage: "photo.stack") {
+                ImageDiffComparisonPanel(artifacts: store.remoteArtifacts, imageData: store.artifactImageData, mode: $imageMode)
             }
 
             VQPanel("Review Notes", systemImage: "text.badge.checkmark") {
@@ -1200,6 +1337,166 @@ struct DiffView: View {
                 }
             }
         }
+    }
+
+    private static func hunks(from patch: String) -> [String] {
+        let lines = patch.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var hunks: [String] = []
+        var current: [String] = []
+        for line in lines {
+            if line.hasPrefix("@@") {
+                if !current.isEmpty {
+                    hunks.append(current.joined(separator: "\n"))
+                    current.removeAll()
+                }
+            }
+            if line.hasPrefix("@@") || !current.isEmpty {
+                current.append(line)
+            }
+        }
+        if !current.isEmpty {
+            hunks.append(current.joined(separator: "\n"))
+        }
+        return hunks.isEmpty ? [patch] : hunks
+    }
+}
+
+private enum ImageDiffMode: String, CaseIterable, Identifiable {
+    case sideBySide
+    case slider
+    case overlay
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .sideBySide: L10n.tr("Side by side")
+        case .slider: L10n.tr("Slider")
+        case .overlay: L10n.tr("Overlay")
+        }
+    }
+}
+
+private struct ImageDiffComparisonPanel: View {
+    let artifacts: [RemoteArtifactRecord]
+    let imageData: [String: Data]
+    @Binding var mode: ImageDiffMode
+    @State private var sliderValue = 0.5
+
+    private var images: [RemoteArtifactRecord] {
+        artifacts.filter { artifact in
+            let type = artifact.type.lowercased()
+            let path = artifact.path.lowercased()
+            return ["png", "jpg", "jpeg", "gif", "image/png", "image/jpeg"].contains(type)
+                || path.hasSuffix(".png")
+                || path.hasSuffix(".jpg")
+                || path.hasSuffix(".jpeg")
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker(L10n.tr("Image Diff"), selection: $mode) {
+                ForEach(ImageDiffMode.allCases) { item in
+                    Text(item.title).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if images.count < 2 {
+                Text(L10n.tr("No image artifacts yet."))
+                    .font(.subheadline)
+                    .foregroundStyle(VQTheme.secondaryText)
+            } else {
+                let before = images[0]
+                let after = images[1]
+                switch mode {
+                case .sideBySide:
+                    HStack(spacing: 10) {
+                        ArtifactImagePreview(artifact: before, data: imageData[before.id], label: "Before")
+                        ArtifactImagePreview(artifact: after, data: imageData[after.id], label: "After")
+                    }
+                case .slider:
+                    VStack(spacing: 10) {
+                        GeometryReader { proxy in
+                            ZStack(alignment: .leading) {
+                                ArtifactUIImage(artifact: after, data: imageData[after.id])
+                                ArtifactUIImage(artifact: before, data: imageData[before.id])
+                                    .mask(alignment: .leading) {
+                                        Rectangle().frame(width: proxy.size.width * CGFloat(sliderValue))
+                                    }
+                                Rectangle()
+                                    .fill(VQTheme.accent)
+                                    .frame(width: 2)
+                                    .offset(x: proxy.size.width * CGFloat(sliderValue))
+                            }
+                        }
+                        .frame(height: 220)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        Slider(value: $sliderValue)
+                    }
+                case .overlay:
+                    ZStack {
+                        ArtifactUIImage(artifact: before, data: imageData[before.id])
+                        ArtifactUIImage(artifact: after, data: imageData[after.id])
+                            .opacity(0.52)
+                            .blendMode(.screen)
+                    }
+                    .frame(height: 220)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+        }
+    }
+}
+
+private struct ArtifactImagePreview: View {
+    let artifact: RemoteArtifactRecord
+    let data: Data?
+    let label: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VQTheme.secondaryText)
+            ArtifactUIImage(artifact: artifact, data: data)
+                .frame(height: 220)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+    }
+}
+
+private struct ArtifactUIImage: View {
+    let artifact: RemoteArtifactRecord
+    let data: Data?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black.opacity(0.25))
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "photo")
+                        .font(.title2)
+                        .foregroundStyle(VQTheme.accent)
+                    Text(artifact.title)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(VQTheme.control.opacity(0.32))
+            }
+        }
+    }
+
+    private var image: UIImage? {
+        data.flatMap(UIImage.init(data:)) ?? UIImage(contentsOfFile: artifact.path)
     }
 }
 
@@ -1293,6 +1590,12 @@ struct HistoryView: View {
     @State private var projectFilter = "all"
     @State private var searchText = ""
     @State private var dateFilter = ""
+    @State private var namedOnly = false
+    @State private var sessionNameDraft = ""
+
+    private var displayedSessions: [RemoteHistorySession] {
+        namedOnly ? store.remoteHistorySessions.filter { store.hasCustomHistoryTitle($0) } : store.remoteHistorySessions
+    }
 
     var body: some View {
         ScreenScaffold(title: "History", systemImage: "clock.arrow.circlepath") {
@@ -1308,6 +1611,22 @@ struct HistoryView: View {
 
                         Button(action: refresh) {
                             Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                        Button {
+                            store.startNewDirectSession(.codex)
+                        } label: {
+                            Label(L10n.tr("New Codex"), systemImage: "curlybraces.square")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                        Button {
+                            store.startNewDirectSession(.claude)
+                        } label: {
+                            Label(L10n.tr("New Claude"), systemImage: "text.bubble")
                         }
                         .buttonStyle(.bordered)
                         .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -1330,6 +1649,10 @@ struct HistoryView: View {
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 132)
                             .onSubmit(refresh)
+
+                        Toggle(L10n.tr("Named only"), isOn: $namedOnly)
+                            .toggleStyle(.switch)
+                            .font(.caption.weight(.semibold))
                     }
 
                     if !store.remoteHistoryMessage.isEmpty {
@@ -1348,19 +1671,28 @@ struct HistoryView: View {
                     if store.isLoadingRemoteHistory, store.remoteHistorySessions.isEmpty {
                         ProgressView()
                             .padding(.vertical, 18)
-                    } else if store.remoteHistorySessions.isEmpty {
+                    } else if displayedSessions.isEmpty {
                         Text(store.remoteHost.isPaired ? "No Claude or Codex sessions matched this filter." : "Pair with Mac Host to read Claude/Codex history.")
                             .font(.subheadline)
                             .foregroundStyle(VQTheme.secondaryText)
                             .padding(.vertical, 16)
                     } else {
-                        ForEach(store.remoteHistorySessions) { session in
+                        ForEach(displayedSessions) { session in
                             Button {
                                 store.loadRemoteHistoryDetail(session)
+                                sessionNameDraft = store.historyTitle(for: session)
                             } label: {
-                                HistorySessionRow(session: session, isSelected: store.selectedHistorySession?.id == session.id)
+                                HistorySessionRow(session: session, displayTitle: store.historyTitle(for: session), isSelected: store.selectedHistorySession?.id == session.id)
                             }
                             .buttonStyle(.plain)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button {
+                                    store.continueHistorySession(session)
+                                } label: {
+                                    Label(L10n.tr("Continue"), systemImage: "arrowshape.turn.up.right")
+                                }
+                                .tint(.accentColor)
+                            }
                             EmptyDivider()
                         }
                     }
@@ -1372,7 +1704,7 @@ struct HistoryView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(session.summary)
+                                Text(store.historyTitle(for: session))
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(VQTheme.ink)
                                     .lineLimit(2)
@@ -1392,6 +1724,17 @@ struct HistoryView: View {
                             .buttonBorderShape(.roundedRectangle(radius: 8))
                             StatusPill(title: "\(store.remoteHistoryTurns.count) turns", tint: VQTheme.accent)
                         }
+
+                        HStack(spacing: 8) {
+                            TextField(L10n.tr("Session name"), text: $sessionNameDraft)
+                                .textFieldStyle(.roundedBorder)
+                            Button(L10n.tr("Save Name")) {
+                                store.renameHistorySession(session, title: sessionNameDraft)
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                        }
+                        .font(.footnote.weight(.semibold))
 
                         if store.remoteHistoryTurns.isEmpty, store.isLoadingRemoteHistory {
                             ProgressView()
@@ -1419,6 +1762,12 @@ struct HistoryView: View {
             if store.remoteHistorySessions.isEmpty {
                 refresh()
             }
+            if let session = store.selectedHistorySession {
+                sessionNameDraft = store.historyTitle(for: session)
+            }
+        }
+        .onChange(of: store.selectedHistorySession) { _, session in
+            sessionNameDraft = session.map(store.historyTitle(for:)) ?? ""
         }
     }
 
@@ -1450,6 +1799,7 @@ private struct HistoryHeaderRow: View {
 
 private struct HistorySessionRow: View {
     let session: RemoteHistorySession
+    let displayTitle: String
     let isSelected: Bool
 
     var body: some View {
@@ -1468,7 +1818,7 @@ private struct HistorySessionRow: View {
                 .foregroundStyle(VQTheme.ink)
                 .frame(width: 56, alignment: .trailing)
             VStack(alignment: .leading, spacing: 3) {
-                Text(session.summary)
+                Text(displayTitle)
                     .font(.subheadline)
                     .foregroundStyle(VQTheme.ink)
                     .lineLimit(1)

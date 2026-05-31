@@ -28,7 +28,7 @@ struct ScreenScaffold<Content: View>: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
+                        Text(L10n.tr(title))
                             .font(.system(.title2, design: .default, weight: .semibold))
                             .foregroundStyle(VQTheme.ink)
                         Text("Veqral")
@@ -56,7 +56,7 @@ struct ScreenScaffold<Content: View>: View {
                 .ignoresSafeArea()
             }
         }
-        .navigationTitle(title)
+        .navigationTitle(L10n.tr(title))
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -223,7 +223,7 @@ struct VQPanel<Content: View>: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(VQTheme.accent)
                 }
-                Text(title)
+                Text(L10n.tr(title))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
                 Spacer()
@@ -255,7 +255,7 @@ struct StatusPill: View {
     let tint: Color
 
     var body: some View {
-        Text(title)
+        Text(L10n.tr(title))
             .font(.caption2.weight(.semibold))
             .foregroundStyle(tint)
             .lineLimit(1)
@@ -283,7 +283,7 @@ struct MetricTile: View {
                     .font(.system(size: 34, weight: .semibold, design: .default))
                     .foregroundStyle(VQTheme.ink)
                     .minimumScaleFactor(0.75)
-                Text(metric.title)
+                Text(L10n.tr(metric.title))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
                 Text(metric.detail)
@@ -309,7 +309,7 @@ struct CommandComposer: View {
             HStack(spacing: 10) {
                 Image(systemName: "sparkle.magnifyingglass")
                     .foregroundStyle(VQTheme.accent)
-                TextField("What should the agents do next?", text: $store.commandDraft, axis: .vertical)
+                TextField(L10n.tr("What should the agents do next?"), text: $store.commandDraft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...3)
                     .font(.body)
@@ -322,7 +322,7 @@ struct CommandComposer: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(VQTheme.accent)
-                .help("Send")
+                .help(L10n.tr("Send"))
             }
             .padding(12)
             .background(VQTheme.control.opacity(0.74))
@@ -333,9 +333,9 @@ struct CommandComposer: View {
             }
 
             HStack(spacing: 8) {
-                QuickCommandButton(title: "Status", symbol: "checklist", command: "git status --short")
-                QuickCommandButton(title: "Diff", symbol: "plus.forwardslash.minus", command: "git diff --stat")
-                QuickCommandButton(title: "Build", symbol: "hammer", command: "xcodebuild -project Veqral.xcodeproj -scheme Veqral -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' CODE_SIGNING_ALLOWED=NO build")
+                QuickCommandButton(title: L10n.tr("Status"), symbol: "checklist", command: "git status --short")
+                QuickCommandButton(title: L10n.tr("Diff"), symbol: "plus.forwardslash.minus", command: "git diff --stat")
+                QuickCommandButton(title: L10n.tr("Build"), symbol: "hammer", command: "xcodebuild -project Veqral.xcodeproj -scheme Veqral -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' CODE_SIGNING_ALLOWED=NO build")
                 QuickCommandButton(title: "Remote", symbol: "arrow.triangle.pull", command: "git remote -v")
             }
 
@@ -357,13 +357,13 @@ struct CommandAttachmentControls: View {
                 Button {
                     requestCamera()
                 } label: {
-                    Label("Camera", systemImage: "camera")
+                    Label(L10n.tr("Camera"), systemImage: "camera")
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle(radius: 8))
 
                 PhotosPicker(selection: $selectedPhoto, matching: .images, photoLibrary: .shared()) {
-                    Label("Photos", systemImage: "photo.on.rectangle")
+                    Label(L10n.tr("Photos"), systemImage: "photo.on.rectangle")
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -372,7 +372,7 @@ struct CommandAttachmentControls: View {
                     Button(role: .destructive) {
                         store.clearAttachments()
                     } label: {
-                        Label("Clear", systemImage: "xmark.circle")
+                        Label(L10n.tr("Clear"), systemImage: "xmark.circle")
                     }
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -446,7 +446,7 @@ struct CommandAttachmentControls: View {
 
     private func requestCamera() {
         guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
-            store.attachmentMessage = "Camera is not available on this device. Use Photos instead."
+                    store.attachmentMessage = L10n.tr("Camera is not available on this device. Use Photos instead.")
             return
         }
 
@@ -459,16 +459,16 @@ struct CommandAttachmentControls: View {
                     if granted {
                         showCamera = true
                     } else {
-                        store.attachmentMessage = "Camera permission denied. Enable it in Settings to attach captures."
+                        store.attachmentMessage = L10n.tr("Camera permission denied. Enable it in Settings to attach captures.")
                     }
                 }
             }
         case .denied:
-            store.attachmentMessage = "Camera permission denied. Enable it in Settings to attach captures."
+            store.attachmentMessage = L10n.tr("Camera permission denied. Enable it in Settings to attach captures.")
         case .restricted:
-            store.attachmentMessage = "Camera access is restricted on this device."
+            store.attachmentMessage = L10n.tr("Camera access is restricted on this device.")
         @unknown default:
-            store.attachmentMessage = "Camera authorization state is unavailable."
+            store.attachmentMessage = L10n.tr("Camera authorization state is unavailable.")
         }
     }
 }
@@ -989,7 +989,7 @@ struct KeyValueLine: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(key)
+            Text(L10n.tr(key))
                 .font(.caption)
                 .foregroundStyle(VQTheme.secondaryText)
             Spacer(minLength: 16)

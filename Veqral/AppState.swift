@@ -60,11 +60,11 @@ enum CommandRuntime: String, Codable, CaseIterable, Identifiable {
     var contextModeDescription: String {
         switch self {
         case .hermesAgent:
-            "Unified Hermes project memory"
+            L10n.tr("Unified Hermes project memory")
         case .codexDirect, .claudeDirect:
-            "Siloed native tool history"
+            L10n.tr("Siloed native tool history")
         case .localShell:
-            "No agent memory"
+            L10n.tr("No agent memory")
         }
     }
 }
@@ -138,7 +138,7 @@ extension CommandApproval {
     }
 
     var riskLabel: String {
-        risk == "高" ? "Risk: High" : "Risk: Medium"
+        risk == "高" ? L10n.tr("Risk: High") : L10n.tr("Risk: Medium")
     }
 
     var symbolName: String {
@@ -152,6 +152,7 @@ struct CommandDiffEntry: Identifiable, Codable, Equatable {
     var path: String
     var additions: Int
     var deletions: Int
+    var patch: String?
 }
 
 struct CommandAttachment: Identifiable, Codable, Equatable, Sendable {
@@ -358,6 +359,7 @@ struct RemoteGitDiffEntry: Codable, Equatable, Sendable {
     var path: String
     var additions: Int
     var deletions: Int
+    var patch: String?
 }
 
 struct RemoteGitDiffResponse: Codable, Sendable {
@@ -375,6 +377,12 @@ struct RemoteArtifactRecord: Codable, Identifiable, Equatable, Sendable {
 
 struct RemoteArtifactListResponse: Codable, Sendable {
     var artifacts: [RemoteArtifactRecord]
+}
+
+struct RemoteArtifactContentResponse: Codable, Sendable {
+    var artifactID: String
+    var mimeType: String
+    var data: Data
 }
 
 struct RemoteDeviceRecord: Codable, Identifiable, Equatable, Sendable {
@@ -579,6 +587,7 @@ final class CommandCenterStore: ObservableObject {
     @Published var remoteAuditLines: [String] = []
     @Published var remoteGitHubStatus: RemoteGitHubStatus = .empty
     @Published var remoteArtifacts: [RemoteArtifactRecord] = []
+    @Published var artifactImageData: [String: Data] = [:]
     @Published var remoteHistorySessions: [RemoteHistorySession] = []
     @Published var remoteHistoryProjects: [String] = []
     @Published var selectedHistorySession: RemoteHistorySession?
@@ -619,6 +628,25 @@ final class CommandCenterStore: ObservableObject {
     @Published var isRefreshingRemoteHost = false
     @Published var pendingAttachments: [CommandAttachment] = []
     @Published var attachmentMessage: String = ""
+    @Published var appLanguage: AppLanguage {
+        didSet {
+            UserDefaults.standard.set(appLanguage.rawValue, forKey: "appLanguage")
+            guard isReadyForAutosave, oldValue != appLanguage else { return }
+            persist()
+        }
+    }
+    @Published var sessionTitles: [String: String] {
+        didSet {
+            guard isReadyForAutosave, oldValue != sessionTitles else { return }
+            persist()
+        }
+    }
+    @Published var archivedRunIDs: Set<UUID> {
+        didSet {
+            guard isReadyForAutosave, oldValue != archivedRunIDs else { return }
+            persist()
+        }
+    }
     @Published var workingDirectory: String {
         didSet {
             guard isReadyForAutosave, oldValue != workingDirectory else { return }
@@ -682,6 +710,10 @@ final class CommandCenterStore: ObservableObject {
         remoteHost = .empty
         remoteRunIDs = [:]
         workspace = WorkspaceSnapshot.empty(workingDirectory: defaultWorkingDirectory)
+        let savedLanguage = UserDefaults.standard.string(forKey: "appLanguage").flatMap(AppLanguage.init(rawValue:)) ?? .system
+        appLanguage = savedLanguage
+        sessionTitles = [:]
+        archivedRunIDs = []
 
         if let snapshot = Self.loadSnapshot(from: persistenceURL) {
             let cleaned = Self.productionCleanedSnapshot(snapshot)
@@ -699,6 +731,9 @@ final class CommandCenterStore: ObservableObject {
             selectedAgentChatID = cleaned.selectedAgentChatID
             selectedHermesProvider = cleaned.selectedHermesProvider ?? "auto"
             selectedHermesModel = cleaned.selectedHermesModel ?? ""
+            appLanguage = cleaned.appLanguage ?? savedLanguage
+            sessionTitles = cleaned.sessionTitles ?? [:]
+            archivedRunIDs = cleaned.archivedRunIDs ?? []
             if cleaned.runs.count != snapshot.runs.count || cleaned.approvals.count != snapshot.approvals.count || cleaned.logs.count != snapshot.logs.count || cleaned.diffs.count != snapshot.diffs.count {
                 persist()
             }
@@ -717,6 +752,9 @@ final class CommandCenterStore: ObservableObject {
             selectedAgentChatID = empty.selectedAgentChatID
             selectedHermesProvider = empty.selectedHermesProvider ?? "auto"
             selectedHermesModel = empty.selectedHermesModel ?? ""
+            appLanguage = empty.appLanguage ?? savedLanguage
+            sessionTitles = empty.sessionTitles ?? [:]
+            archivedRunIDs = empty.archivedRunIDs ?? []
             persist()
         }
         isReadyForAutosave = true
@@ -1436,6 +1474,68 @@ final class CommandCenterStore: ObservableObject {
         return Array(pending.prefix(limit))
     }
 
+    func visibleRuns(phase: RunPhase? = nil) -> [CommandRun] {
+        runs.filter { run in
+            !archivedRunIDs.contains(run.id) && (phase == nil || run.phase == phase)
+        }
+    }
+
+    func archiveRun(_ run: CommandRun) {
+        archivedRunIDs.insert(run.id)
+        if selectedRunID == run.id {
+            selectedRunID = visibleRuns().first?.id
+        }
+        persist()
+    }
+
+    func hasCustomHistoryTitle(_ session: RemoteHistorySession) -> Bool {
+        sessionTitles[session.id]?.nilIfBlank != nil
+    }
+
+    func historyTitle(for session: RemoteHistorySession) -> String {
+        sessionTitles[session.id]?.nilIfBlank ?? session.summary
+    }
+
+    func renameHistorySession(_ session: RemoteHistorySession, title: String) {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.isEmpty {
+            sessionTitles.removeValue(forKey: session.id)
+        } else {
+            sessionTitles[session.id] = clean
+        }
+        persist()
+    }
+
+    func renameSelectedHermesChat(_ title: String) {
+        guard var chat = selectedAgentChat else { return }
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        chat.title = clean
+        updateAgentChat(chat)
+    }
+
+    func startNewDirectSession(_ tool: RemoteHistoryTool) {
+        let runtime: CommandRuntime = tool == .codex ? .codexDirect : .claudeDirect
+        selectedRuntime = runtime
+        submitCommand(
+            "Start a new \(tool.title) session from Veqral. Briefly confirm the current workspace and wait for my next instruction.",
+            runtime: runtime
+        )
+    }
+
+    func attachDiffInstruction(_ diff: CommandDiffEntry, hunk: String? = nil) {
+        let snippet = (hunk ?? diff.patch ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .prefix(3_500)
+        let attachmentText: String
+        if snippet.isEmpty {
+            attachmentText = "\n\n[Diff: \(diff.path)] +\(diff.additions) -\(diff.deletions)\nここを確認して、必要な修正案を出して。"
+        } else {
+            attachmentText = "\n\n[Diff hunk: \(diff.path)]\n```diff\n\(snippet)\n```\nここをこうして。"
+        }
+        commandDraft += attachmentText
+    }
+
     private func reconnectRemoteRuns() {
         guard remoteHost.isEnabled, remoteHost.isPaired else { return }
         for run in runs where [.running, .waiting, .approval].contains(run.status) {
@@ -1522,7 +1622,8 @@ final class CommandCenterStore: ObservableObject {
                     runID: localRunID,
                     path: file.path,
                     additions: file.additions,
-                    deletions: file.deletions
+                    deletions: file.deletions,
+                    patch: file.patch
                 )
             })
         } catch {
@@ -1536,9 +1637,27 @@ final class CommandCenterStore: ObservableObject {
             remoteArtifacts.append(contentsOf: response.artifacts)
             remoteArtifacts.sort { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
             remoteArtifacts = Array(remoteArtifacts.prefix(80))
+            for artifact in response.artifacts.filter(Self.isImageArtifact).prefix(8) where artifactImageData[artifact.id] == nil {
+                do {
+                    let content = try await client.artifactContent(remoteRunID: remoteRunID, artifactID: artifact.id)
+                    artifactImageData[artifact.id] = content.data
+                } catch {
+                    appendLog(runID: localRunID, stream: "warn", message: "Remote image artifact preview failed: \(error.localizedDescription)")
+                }
+            }
         } catch {
             appendLog(runID: localRunID, stream: "warn", message: "Remote artifact sync failed: \(error.localizedDescription)")
         }
+    }
+
+    private static func isImageArtifact(_ artifact: RemoteArtifactRecord) -> Bool {
+        let type = artifact.type.lowercased()
+        let path = artifact.path.lowercased()
+        return ["png", "jpg", "jpeg", "gif", "image/png", "image/jpeg", "image/gif"].contains(type)
+            || path.hasSuffix(".png")
+            || path.hasSuffix(".jpg")
+            || path.hasSuffix(".jpeg")
+            || path.hasSuffix(".gif")
     }
 
     private func insertRemoteApproval(for run: CommandRun, reason: String) {
@@ -1556,7 +1675,7 @@ final class CommandCenterStore: ObservableObject {
             ),
             at: 0
         )
-        notify(title: "Veqral approval required", body: reason)
+        notify(title: L10n.tr("Veqral approval required"), body: reason)
     }
 
     private func executeIfAvailable(_ run: CommandRun, attachments: [CommandAttachment] = []) {
@@ -1651,7 +1770,7 @@ final class CommandCenterStore: ObservableObject {
                         at: 0
                     )
                     appendLog(runID: run.id, stream: "approval", message: "Remote approval required: \(message)")
-                    notify(title: "Veqral approval required", body: message)
+                    notify(title: L10n.tr("Veqral approval required"), body: message)
                     persist()
                 }
             } catch RemoteHostError.approvalRequired(let message) {
@@ -1674,7 +1793,7 @@ final class CommandCenterStore: ObservableObject {
                     at: 0
                 )
                 appendLog(runID: run.id, stream: "approval", message: "Remote approval required: \(message)")
-                notify(title: "Veqral approval required", body: message)
+                notify(title: L10n.tr("Veqral approval required"), body: message)
                 persist()
             } catch {
                 let message = Self.remoteFailureMessage(error, context: "Remote run")
@@ -1711,13 +1830,13 @@ final class CommandCenterStore: ObservableObject {
                             runs[index].completedAt = Date()
                         }
                         notify(
-                            title: event.exitCode == 0 ? "Veqral run complete" : "Veqral run failed",
+                            title: event.exitCode == 0 ? L10n.tr("Veqral run complete") : L10n.tr("Veqral run failed"),
                             body: run.title
                         )
                         persist()
                         scheduleWorkspaceRefresh(delayNanoseconds: 0)
                     } else if event.kind == "approval" {
-                        notify(title: "Veqral approval required", body: event.message)
+                        notify(title: L10n.tr("Veqral approval required"), body: event.message)
                     }
                 }
             } catch {
@@ -1784,7 +1903,7 @@ final class CommandCenterStore: ObservableObject {
         if !result.diffEntries.isEmpty {
             diffs.removeAll { $0.runID == runID }
             diffs.append(contentsOf: result.diffEntries.map {
-                CommandDiffEntry(id: UUID(), runID: runID, path: $0.path, additions: $0.additions, deletions: $0.deletions)
+                CommandDiffEntry(id: UUID(), runID: runID, path: $0.path, additions: $0.additions, deletions: $0.deletions, patch: $0.patch)
             })
         }
         appendLog(runID: runID, stream: result.exitCode == 0 ? "ok" : "warn", message: "Exit code: \(result.exitCode)")
@@ -2021,7 +2140,7 @@ final class CommandCenterStore: ObservableObject {
         var persistedRemoteHost = remoteHost
         persistedRemoteHost.token = ""
         let snapshot = CommandCenterSnapshot(
-            schemaVersion: 3,
+            schemaVersion: 4,
             runs: runs,
             approvals: approvals,
             logs: logs,
@@ -2035,7 +2154,10 @@ final class CommandCenterStore: ObservableObject {
             selectedAgentProjectID: selectedAgentProjectID,
             selectedAgentChatID: selectedAgentChatID,
             selectedHermesProvider: selectedHermesProvider,
-            selectedHermesModel: selectedHermesModel
+            selectedHermesModel: selectedHermesModel,
+            appLanguage: appLanguage,
+            sessionTitles: sessionTitles,
+            archivedRunIDs: archivedRunIDs
         )
         do {
             let data = try JSONEncoder.commandCenter.encode(snapshot)
@@ -2052,7 +2174,7 @@ final class CommandCenterStore: ObservableObject {
 
     private static func emptySnapshot(defaultWorkingDirectory: String) -> CommandCenterSnapshot {
         return CommandCenterSnapshot(
-            schemaVersion: 2,
+            schemaVersion: 4,
             runs: [],
             approvals: [],
             logs: [],
@@ -2066,14 +2188,17 @@ final class CommandCenterStore: ObservableObject {
             selectedAgentProjectID: nil,
             selectedAgentChatID: nil,
             selectedHermesProvider: "auto",
-            selectedHermesModel: ""
+            selectedHermesModel: "",
+            appLanguage: UserDefaults.standard.string(forKey: "appLanguage").flatMap(AppLanguage.init(rawValue:)) ?? .system,
+            sessionTitles: [:],
+            archivedRunIDs: []
         )
     }
 
     private static func productionCleanedSnapshot(_ snapshot: CommandCenterSnapshot) -> CommandCenterSnapshot {
         let removedRunIDs = Set(snapshot.runs.filter(isLegacySeedOrDiagnosticRun).map(\.id))
         var cleaned = snapshot
-        cleaned.schemaVersion = 3
+        cleaned.schemaVersion = 4
         cleaned.runs = snapshot.runs.filter { !removedRunIDs.contains($0.id) }
         cleaned.approvals = snapshot.approvals.filter { approval in
             if let runID = approval.runID, removedRunIDs.contains(runID) { return false }
@@ -2088,6 +2213,7 @@ final class CommandCenterStore: ObservableObject {
         if let selected = cleaned.selectedRunID, removedRunIDs.contains(selected) {
             cleaned.selectedRunID = cleaned.runs.first?.id
         }
+        cleaned.archivedRunIDs = cleaned.archivedRunIDs?.subtracting(removedRunIDs)
         return cleaned
     }
 
@@ -2188,6 +2314,9 @@ private struct CommandCenterSnapshot: Codable {
     var selectedAgentChatID: String?
     var selectedHermesProvider: String?
     var selectedHermesModel: String?
+    var appLanguage: AppLanguage?
+    var sessionTitles: [String: String]?
+    var archivedRunIDs: Set<UUID>?
 }
 
 struct LocalCommandResult: Sendable {
@@ -2195,6 +2324,7 @@ struct LocalCommandResult: Sendable {
         var path: String
         var additions: Int
         var deletions: Int
+        var patch: String?
     }
 
     var exitCode: Int32
@@ -2539,8 +2669,18 @@ enum LocalCommandExecutor {
                       let deletions = Int(parts[1]) else {
                     return nil
                 }
-                return LocalCommandResult.Diff(path: String(parts[2]), additions: additions, deletions: deletions)
+                let path = String(parts[2])
+                let patch = gitPatch(path: path, workingDirectory: workingDirectory)
+                return LocalCommandResult.Diff(path: path, additions: additions, deletions: deletions, patch: patch)
             }
+    }
+
+    private static func gitPatch(path: String, workingDirectory: String) -> String? {
+        let result = runShell("git diff -- \(shellQuoted(path))", workingDirectory: workingDirectory)
+        guard result.exitCode == 0 else { return nil }
+        let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(40_000))
     }
 
     private static func shellQuoted(_ value: String) -> String {
@@ -2720,6 +2860,15 @@ struct RemoteHostClient: Sendable {
     func runArtifacts(remoteRunID: String) async throws -> RemoteArtifactListResponse {
         let data = try await request(path: "/v1/runs/\(remoteRunID)/artifacts", method: "GET", body: Data())
         return try JSONDecoder.commandCenter.decode(RemoteArtifactListResponse.self, from: data)
+    }
+
+    func artifactContent(remoteRunID: String, artifactID: String) async throws -> RemoteArtifactContentResponse {
+        struct Body: Encodable {
+            var artifactID: String
+        }
+        let body = try JSONEncoder.commandCenter.encode(Body(artifactID: artifactID))
+        let data = try await request(path: "/v1/runs/\(remoteRunID)/artifact-content", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteArtifactContentResponse.self, from: data)
     }
 
     func cancel(remoteRunID: String) async throws {

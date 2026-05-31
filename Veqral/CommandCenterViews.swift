@@ -29,9 +29,9 @@ struct CommandCenterSidebar: View {
 
     private var sidebarGroups: [(String, [AppSection])] {
         [
-            ("Command", AppSection.commandGroup),
-            ("Operations", AppSection.operationGroup),
-            ("System", AppSection.systemGroup)
+            (L10n.tr("Command"), AppSection.commandGroup),
+            (L10n.tr("Operations"), AppSection.operationGroup),
+            (L10n.tr("System"), AppSection.systemGroup)
         ]
     }
 
@@ -102,6 +102,31 @@ struct CommandCenterSidebar: View {
             }
 
             Spacer(minLength: 12)
+
+            Menu {
+                Picker(L10n.tr("App Language"), selection: $store.appLanguage) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.title).tag(language)
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "globe")
+                    Text(store.appLanguage.title)
+                        .lineLimit(1)
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2.weight(.semibold))
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VQTheme.secondaryText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(VQTheme.control.opacity(0.42))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
 
             HStack(spacing: 10) {
                 Circle()
@@ -293,13 +318,13 @@ struct CommandCenterPhoneDashboard: View {
 
                 PhoneSectionHeader(title: "Active Runs", count: nil)
                 VStack(spacing: 0) {
-                    ForEach(Array(store.runs.prefix(5))) { run in
+                    ForEach(Array(store.visibleRuns().prefix(5))) { run in
                         PhoneRunRow(run: run)
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 store.selectRun(run.id)
                             }
-                        if run.id != store.runs.prefix(5).last?.id {
+                        if run.id != store.visibleRuns().prefix(5).last?.id {
                             Divider().overlay(VQTheme.hairline)
                         }
                     }
@@ -364,6 +389,10 @@ private enum WorkSurface: String, CaseIterable, Identifiable {
         case .diff: "arrow.triangle.branch"
         case .preview: "eye"
         }
+    }
+
+    var title: String {
+        L10n.tr(rawValue)
     }
 }
 
@@ -662,7 +691,7 @@ private struct WorkSurfacePicker: View {
                             .frame(width: 30, height: 30)
                             .background(selectedSurface == surface ? VQTheme.control : Color.clear)
                             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        Text(surface.rawValue)
+                        Text(surface.title)
                     }
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(selectedSurface == surface ? VQTheme.accent : VQTheme.secondaryText)
@@ -1214,8 +1243,13 @@ private struct CompactApprovalStrip: View {
             VStack(spacing: 6) {
                 Text(approval.risk)
                     .font(.caption2.weight(.semibold))
-                Button("Approve") {
-                    store.approve(approval)
+                HStack(spacing: 6) {
+                    Button(L10n.tr("Reject")) {
+                        store.reject(approval)
+                    }
+                    Button(L10n.tr("Approve")) {
+                        store.approve(approval)
+                    }
                 }
                 .font(.caption2.weight(.semibold))
             }
