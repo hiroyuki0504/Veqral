@@ -306,6 +306,25 @@ struct RemoteHealthResponse: Codable, Sendable {
     var tailscaleIP: String?
     var port: UInt16
     var hermesVersion: String
+    var toolStatuses: [RemoteCLIToolStatus]?
+}
+
+struct RemoteCLIToolStatus: Codable, Identifiable, Equatable, Sendable {
+    var engine: String
+    var title: String
+    var executablePath: String?
+    var version: String
+    var adapter: String
+    var commandShape: String?
+    var isInstalled: Bool
+    var isKnownCompatible: Bool
+    var compatibilityNote: String
+
+    var id: String { engine }
+
+    var versionSummary: String {
+        version.split(whereSeparator: \.isNewline).first.map(String.init) ?? version
+    }
 }
 
 struct RemoteRunRecord: Codable, Identifiable, Equatable, Sendable {
@@ -476,6 +495,7 @@ struct RemoteHistoryListResponse: Codable, Sendable {
     var limit: Int
     var projects: [String]
     var tools: [RemoteHistoryTool]
+    var warnings: [String]?
 }
 
 struct RemoteHistoryTurn: Codable, Identifiable, Equatable, Sendable {
@@ -1102,7 +1122,9 @@ final class CommandCenterStore: ObservableObject {
                           previousSelection?.id == selectedHistorySession.id {
                     sessionToLoad = selectedHistorySession
                 }
-                remoteHistoryMessage = response.sessions.isEmpty ? "No Claude/Codex history found on Mac Host." : "\(response.total) sessions loaded."
+                let warningText = (response.warnings ?? []).joined(separator: "\n")
+                let loadMessage = response.sessions.isEmpty ? "No Claude/Codex history found on Mac Host." : "\(response.total) sessions loaded."
+                remoteHistoryMessage = warningText.isEmpty ? loadMessage : "\(loadMessage)\n\(warningText)"
                 isLoadingRemoteHistory = false
                 if let sessionToLoad {
                     loadRemoteHistoryDetail(sessionToLoad)

@@ -599,12 +599,14 @@ final class HostServer: @unchecked Sendable {
     private func route(_ request: HTTPRequest, connection: NWConnection) async {
         do {
             if request.path == "/v1/health" {
+                let toolStatuses = CLIAdapterRegistry.allStatuses()
                 let response = HealthResponse(
                     status: "ok",
                     host: localHostName(),
                     tailscaleIP: tailscaleIP(),
                     port: config.port,
-                    hermesVersion: AgentRunner.hermesVersion()
+                    hermesVersion: toolStatuses.first { $0.engine == AgentEngine.hermes.rawValue }?.version ?? AgentRunner.hermesVersion(),
+                    toolStatuses: toolStatuses
                 )
                 sendJSON(response, connection: connection)
                 return
@@ -905,104 +907,98 @@ final class HostServer: @unchecked Sendable {
     }
 }
 
-final class AgentRunner {
-    private let state: HostState
+struct CLIToolStatus: Codable, Sendable, Equatable {
+    var engine: String
+    var title: String
+    var executablePath: String?
+    var version: String
+    var adapter: String
+    var commandShape: String
+    var isInstalled: Bool
+    var isKnownCompatible: Bool
+    var compatibilityNote: String
 
-    init(state: HostState) {
-        self.state = state
+    var versionSummary: String {
+        version.split(whereSeparator: \.isNewline).first.map(String.init) ?? version
+    }
+}
+
+struct CLIExecutionPlan: Sendable {
+    var executable: String
+    var arguments: [String]
+    var toolStatus: CLIToolStatus
+}
+
+enum CLIAdapterRegistry {
+    static func allStatuses() -> [CLIToolStatus] {
+        AgentEngine.allCases.map { status(for: $0) }
     }
 
-    static func hermesPath() -> String? {
-        let home = NSHomeDirectory()
-        let candidates = [
-            "\(home)/.local/bin/hermes",
-            "\(home)/.hermes/hermes-agent/venv/bin/hermes",
-            "/opt/homebrew/bin/hermes",
-            "/usr/local/bin/hermes"
+    static func status(for engine: AgentEngine) -> CLIToolStatus {
+        let path = executablePath(for: engine)
+        let version = path.map { detectVersion(executable: $0) } ?? "Not installed"
+        let compatibility = compatibility(for: engine, version: version, installed: path != nil)
+        return CLIToolStatus(
+            engine: engine.rawValue,
+            title: engine.title,
+            executablePath: path,
+            version: version,
+            adapter: adapterName(for: engine),
+            commandShape: commandShape(for: engine),
+            isInstalled: path != nil,
+            isKnownCompatible: compatibility.known,
+            compatibilityNote: compatibility.note
+        )
+    }
+
+    static func plan(for run: HostRun) -> CLIExecutionPlan? {
+        let toolStatus = status(for: run.engineOrDefault)
+        guard let executable = toolStatus.executablePath else {
+            return nil
+        }
+        return CLIExecutionPlan(
+            executable: executable,
+            arguments: arguments(for: run),
+            toolStatus: toolStatus
+        )
+    }
+
+    static func adapterDiagnostic(for tool: CLIToolStatus, output: String, exitCode: Int32) -> String? {
+        guard exitCode != 0 else { return nil }
+        let lower = output.lowercased()
+        let flagFailureMarkers = [
+            "unexpected argument",
+            "unknown option",
+            "unrecognized option",
+            "unknown command",
+            "invalid option",
+            "no such option",
+            "unrecognized arguments",
+            "unrecognized subcommand",
+            "unknown subcommand"
         ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+        guard flagFailureMarkers.contains(where: { lower.contains($0) }) else {
+            return nil
+        }
+        return "\(tool.title) \(tool.versionSummary): CLI flags or subcommands were rejected for \(tool.commandShape). Update \(tool.adapter) in MacHost/Sources/VeqralHost/main.swift if the CLI changed."
     }
 
     static func hermesVersion() -> String {
-        guard let path = hermesPath() else { return "Not installed" }
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = ["--version"]
-        process.standardOutput = pipe
-        try? process.run()
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Installed"
+        status(for: .hermes).version
     }
 
-    static func codexPath() -> String? {
-        executablePath(
-            named: "codex",
-            candidates: [
-                "\(NSHomeDirectory())/.local/bin/codex",
-                "/opt/homebrew/bin/codex",
-                "/usr/local/bin/codex"
-            ]
-        )
-    }
-
-    static func claudePath() -> String? {
-        executablePath(
-            named: "claude",
-            candidates: [
-                "\(NSHomeDirectory())/.local/bin/claude",
-                "/opt/homebrew/bin/claude",
-                "/usr/local/bin/claude"
-            ]
-        )
-    }
-
-    private static func executablePath(named name: String, candidates: [String]) -> String? {
-        if let candidate = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-            return candidate
-        }
-        let output = ProcessRunner.run(
-            "/bin/zsh",
-            ["-lc", "PATH=\(shellQuoted("\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")) command -v \(shellQuoted(name))"],
-            timeout: 5
-        )
-        let discovered = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        return FileManager.default.isExecutableFile(atPath: discovered) ? discovered : nil
-    }
-
-    func start(runID: String) async {
-        guard let run = await state.run(runID: runID) else { return }
-        guard let plan = executionPlan(for: run) else {
-            await state.appendLog(runID: runID, stream: "error", message: "\(run.engineOrDefault.title) CLI is not installed")
-            await state.finish(runID: runID, exitCode: 127)
-            return
-        }
-        await state.appendLog(runID: runID, stream: "host", message: "Starting \(run.engineOrDefault.title) engine")
-        await PTYProcess.run(
-            executable: plan.executable,
-            arguments: plan.arguments,
-            workingDirectory: run.workingDirectory,
-            runID: runID,
-            state: state
-        )
-    }
-
-    private func executionPlan(for run: HostRun) -> (executable: String, arguments: [String])? {
+    private static func arguments(for run: HostRun) -> [String] {
         switch run.engineOrDefault {
         case .hermes:
-            guard let hermes = Self.hermesPath() else { return nil }
-            return (hermes, hermesArguments(for: run))
+            hermesArguments(for: run)
         case .codex:
-            guard let codex = Self.codexPath() else { return nil }
-            return (codex, codexArguments(for: run))
+            codexArguments(for: run)
         case .claude:
-            guard let claude = Self.claudePath() else { return nil }
-            return (claude, claudeArguments(for: run))
+            claudeArguments(for: run)
         }
     }
 
-    private func hermesArguments(for run: HostRun) -> [String] {
+    private static func hermesArguments(for run: HostRun) -> [String] {
         let source = "veqral-\(safeTag(run.projectID ?? projectName(for: run.workingDirectory)))"
         let modelLine = [run.provider, run.model].compactMap { $0?.nilIfBlank }.joined(separator: " / ")
         let prompt = """
@@ -1040,13 +1036,11 @@ final class AgentRunner {
         if let sessionID = run.resumeSessionID?.nilIfBlank ?? run.sessionID?.nilIfBlank {
             args.append(contentsOf: ["--resume", sessionID])
         }
-        args.append(contentsOf: [
-            "-q", prompt
-        ])
+        args.append(contentsOf: ["-q", prompt])
         return args
     }
 
-    private func codexArguments(for run: HostRun) -> [String] {
+    private static func codexArguments(for run: HostRun) -> [String] {
         let prompt = directPrompt(for: run, engineName: "Codex")
         var args = [
             "exec",
@@ -1064,7 +1058,7 @@ final class AgentRunner {
         return args
     }
 
-    private func claudeArguments(for run: HostRun) -> [String] {
+    private static func claudeArguments(for run: HostRun) -> [String] {
         let prompt = directPrompt(for: run, engineName: "Claude")
         var args = [
             "--print",
@@ -1081,7 +1075,7 @@ final class AgentRunner {
         return args
     }
 
-    private func directPrompt(for run: HostRun, engineName: String) -> String {
+    private static func directPrompt(for run: HostRun, engineName: String) -> String {
         """
         You are \(engineName) running directly from Veqral Mac Host.
         This is direct mode: use your own native session history and memory. Do not write to Hermes memory for this run.
@@ -1092,11 +1086,114 @@ final class AgentRunner {
         """
     }
 
-    private func projectName(for path: String) -> String {
+    private static func executablePath(for engine: AgentEngine) -> String? {
+        switch engine {
+        case .hermes:
+            executablePath(
+                named: "hermes",
+                candidates: [
+                    "\(NSHomeDirectory())/.local/bin/hermes",
+                    "\(NSHomeDirectory())/.hermes/hermes-agent/venv/bin/hermes",
+                    "/opt/homebrew/bin/hermes",
+                    "/usr/local/bin/hermes"
+                ]
+            )
+        case .codex:
+            executablePath(
+                named: "codex",
+                candidates: [
+                    "\(NSHomeDirectory())/.local/bin/codex",
+                    "/opt/homebrew/bin/codex",
+                    "/usr/local/bin/codex"
+                ]
+            )
+        case .claude:
+            executablePath(
+                named: "claude",
+                candidates: [
+                    "\(NSHomeDirectory())/.local/bin/claude",
+                    "/opt/homebrew/bin/claude",
+                    "/usr/local/bin/claude"
+                ]
+            )
+        }
+    }
+
+    private static func executablePath(named name: String, candidates: [String]) -> String? {
+        if let candidate = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            return candidate
+        }
+        let output = ProcessRunner.run(
+            "/bin/zsh",
+            ["-lc", "PATH=\(shellQuoted("\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")) command -v \(shellQuoted(name))"],
+            timeout: 5
+        )
+        let discovered = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return FileManager.default.isExecutableFile(atPath: discovered) ? discovered : nil
+    }
+
+    private static func detectVersion(executable: String) -> String {
+        let output = ProcessRunner.run(executable, ["--version"], timeout: 15)
+        let text = output.combinedTrimmed
+        return text.isEmpty ? "Installed" : text
+    }
+
+    private static func compatibility(for engine: AgentEngine, version: String, installed: Bool) -> (known: Bool, note: String) {
+        guard installed else {
+            return (false, "\(engine.title) CLI is not installed.")
+        }
+        guard let parsed = SemanticVersion.first(in: version) else {
+            return (false, "Version could not be parsed. The latest known \(adapterName(for: engine)) shape will be used.")
+        }
+        let expected: SemanticVersion
+        switch engine {
+        case .hermes:
+            expected = SemanticVersion(major: 0, minor: 15, patch: 1)
+        case .codex:
+            expected = SemanticVersion(major: 0, minor: 130, patch: 0)
+        case .claude:
+            expected = SemanticVersion(major: 2, minor: 1, patch: 144)
+        }
+        if parsed.major == expected.major, parsed.minor == expected.minor {
+            var note = "Known command shape: \(adapterName(for: engine))."
+            if version.localizedCaseInsensitiveContains("update available") {
+                note += " CLI reports an update is available."
+            }
+            return (true, note)
+        }
+        if parsed.major > expected.major || (parsed.major == expected.major && parsed.minor > expected.minor) {
+            return (false, "\(engine.title) is newer than the validated adapter range. Runs still use the latest known command shape.")
+        }
+        return (false, "\(engine.title) is older than the validated adapter range. Upgrade the CLI or adjust \(adapterName(for: engine)).")
+    }
+
+    private static func adapterName(for engine: AgentEngine) -> String {
+        switch engine {
+        case .hermes:
+            "HermesChatAdapter"
+        case .codex:
+            "CodexExecAdapter"
+        case .claude:
+            "ClaudePrintAdapter"
+        }
+    }
+
+    private static func commandShape(for engine: AgentEngine) -> String {
+        switch engine {
+        case .hermes:
+            "hermes chat -Q --source veqral-<project> --provider <provider> --model <model> --checkpoints --worktree"
+        case .codex:
+            "codex exec [--model <model>] [resume <session>] <prompt>"
+        case .claude:
+            "claude --print --output-format stream-json [--resume <session>] [--model <model>] <prompt>"
+        }
+    }
+
+    private static func projectName(for path: String) -> String {
         URL(fileURLWithPath: path).lastPathComponent.nilIfBlank ?? "project"
     }
 
-    private func safeTag(_ value: String) -> String {
+    private static func safeTag(_ value: String) -> String {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
         let scalars = value.lowercased().unicodeScalars.map { scalar in
             allowed.contains(scalar) ? Character(scalar) : "-"
@@ -1105,8 +1202,78 @@ final class AgentRunner {
     }
 }
 
+struct SemanticVersion: Sendable, Equatable {
+    var major: Int
+    var minor: Int
+    var patch: Int
+
+    static func first(in text: String) -> SemanticVersion? {
+        guard let regex = try? NSRegularExpression(pattern: #"(\d+)\.(\d+)(?:\.(\d+))?"#) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let majorRange = Range(match.range(at: 1), in: text),
+              let minorRange = Range(match.range(at: 2), in: text),
+              let major = Int(text[majorRange]),
+              let minor = Int(text[minorRange]) else {
+            return nil
+        }
+        let patch: Int
+        if match.range(at: 3).location != NSNotFound,
+           let patchRange = Range(match.range(at: 3), in: text),
+           let parsedPatch = Int(text[patchRange]) {
+            patch = parsedPatch
+        } else {
+            patch = 0
+        }
+        return SemanticVersion(major: major, minor: minor, patch: patch)
+    }
+}
+
+final class AgentRunner {
+    private let state: HostState
+
+    init(state: HostState) {
+        self.state = state
+    }
+
+    static func hermesVersion() -> String {
+        CLIAdapterRegistry.hermesVersion()
+    }
+
+    func start(runID: String) async {
+        guard let run = await state.run(runID: runID) else { return }
+        guard let plan = CLIAdapterRegistry.plan(for: run) else {
+            let status = CLIAdapterRegistry.status(for: run.engineOrDefault)
+            await state.appendLog(runID: runID, stream: "error", message: status.compatibilityNote)
+            await state.finish(runID: runID, exitCode: 127)
+            return
+        }
+        await state.appendLog(runID: runID, stream: "host", message: "Starting \(plan.toolStatus.title) engine with \(plan.toolStatus.adapter) (\(plan.toolStatus.versionSummary))")
+        if !plan.toolStatus.isKnownCompatible {
+            await state.appendLog(runID: runID, stream: "warn", message: plan.toolStatus.compatibilityNote)
+        }
+        await PTYProcess.run(
+            executable: plan.executable,
+            arguments: plan.arguments,
+            workingDirectory: run.workingDirectory,
+            runID: runID,
+            state: state,
+            toolStatus: plan.toolStatus
+        )
+    }
+}
+
 enum PTYProcess {
-    static func run(executable: String, arguments: [String], workingDirectory: String, runID: String, state: HostState) async {
+    static func run(
+        executable: String,
+        arguments: [String],
+        workingDirectory: String,
+        runID: String,
+        state: HostState,
+        toolStatus: CLIToolStatus? = nil
+    ) async {
         var master: Int32 = -1
         var slave: Int32 = -1
         guard openpty(&master, &slave, nil, nil, nil) == 0 else {
@@ -1162,16 +1329,23 @@ enum PTYProcess {
 
         var waitStatus: Int32 = 0
         var lineBuffer = Data()
+        var capturedOutput = ""
         while true {
-            await readAvailable(master: master, buffer: &lineBuffer, runID: runID, state: state)
+            appendCaptured(&capturedOutput, await readAvailable(master: master, buffer: &lineBuffer, runID: runID, state: state))
             let result = waitpid(pid, &waitStatus, WNOHANG)
             if result == pid {
-                await readAvailable(master: master, buffer: &lineBuffer, runID: runID, state: state)
+                appendCaptured(&capturedOutput, await readAvailable(master: master, buffer: &lineBuffer, runID: runID, state: state))
                 if !lineBuffer.isEmpty {
                     let text = String(data: lineBuffer, encoding: .utf8) ?? ""
+                    appendCaptured(&capturedOutput, text)
                     await state.appendLog(runID: runID, stream: "pty", message: text)
                 }
-                await state.finish(runID: runID, exitCode: exitCode(from: waitStatus))
+                let code = exitCode(from: waitStatus)
+                if let toolStatus,
+                   let diagnostic = CLIAdapterRegistry.adapterDiagnostic(for: toolStatus, output: capturedOutput, exitCode: code) {
+                    await state.appendLog(runID: runID, stream: "adapter", message: diagnostic)
+                }
+                await state.finish(runID: runID, exitCode: code)
                 break
             }
             if result == -1 {
@@ -1182,8 +1356,9 @@ enum PTYProcess {
         }
     }
 
-    private static func readAvailable(master: Int32, buffer: inout Data, runID: String, state: HostState) async {
+    private static func readAvailable(master: Int32, buffer: inout Data, runID: String, state: HostState) async -> String {
         var temp = [UInt8](repeating: 0, count: 4096)
+        var emitted = ""
         while true {
             let readCount = Darwin.read(master, &temp, temp.count)
             if readCount > 0 {
@@ -1192,11 +1367,22 @@ enum PTYProcess {
                     let lineData = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
                     buffer.removeSubrange(buffer.startIndex...range.lowerBound)
                     let line = String(data: lineData, encoding: .utf8) ?? ""
+                    emitted += line + "\n"
                     await state.appendLog(runID: runID, stream: "pty", message: line)
                 }
             } else {
                 break
             }
+        }
+        return emitted
+    }
+
+    private static func appendCaptured(_ output: inout String, _ text: String) {
+        guard !text.isEmpty else { return }
+        output += text
+        let maxCharacters = 524_288
+        if output.count > maxCharacters {
+            output = String(output.suffix(maxCharacters))
         }
     }
 
@@ -2407,6 +2593,7 @@ struct HistorySessionListResponse: Codable {
     var limit: Int
     var projects: [String]
     var tools: [HistoryTool]
+    var warnings: [String]
 }
 
 struct HistoryTurn: Codable, Identifiable {
@@ -2610,6 +2797,7 @@ struct AgentHistoryStore {
         let page = max(0, request.page ?? 0)
         let limit = min(max(1, request.limit ?? 50), 100)
         let query = request.query?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let warnings = historyWarnings(for: request.tool)
         var sessions = try allSessions(tool: request.tool)
 
         if let project = request.project, !project.isEmpty {
@@ -2646,7 +2834,8 @@ struct AgentHistoryStore {
             page: page,
             limit: limit,
             projects: projects,
-            tools: HistoryTool.allCases
+            tools: HistoryTool.allCases,
+            warnings: warnings
         )
     }
 
@@ -2662,11 +2851,18 @@ struct AgentHistoryStore {
 
         try HistoryLineReader.forEachLine(url: url, maxLines: detailScanLines, maxBytes: detailScanBytes) { line in
             lineNumber += 1
-            guard let object = HistoryJSON.object(from: line),
-                  let turn = turn(from: object, tool: request.tool, fallbackID: "\(session.id)-\(lineNumber)") else {
+            let fallbackID = "\(session.id)-\(lineNumber)"
+            guard let object = HistoryJSON.object(from: line) else {
+                if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    turns.append(rawTurn(line: line, fallbackID: fallbackID, reason: "Unrecognized \(request.tool.title) history record: invalid JSONL"))
+                }
                 return
             }
-            turns.append(turn)
+            if let turn = turn(from: object, tool: request.tool, fallbackID: fallbackID) {
+                turns.append(turn)
+            } else if !shouldSkipUnknownRecord(object, tool: request.tool) {
+                turns.append(rawTurn(line: line, fallbackID: fallbackID, reason: unknownRecordReason(object, tool: request.tool)))
+            }
         } onTruncated: {
             truncated = true
         }
@@ -2688,18 +2884,13 @@ struct AgentHistoryStore {
     private func sessionFile(id: String, tool: HistoryTool) -> (url: URL, fallbackProject: String)? {
         switch tool {
         case .claude:
-            let root = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
-            for url in jsonlFiles(under: root, limit: listMaxFiles) where Self.identifier(for: url) == id {
-                return (url, decodeClaudeProject(url.deletingLastPathComponent().lastPathComponent))
+            for root in claudeProjectRoots() {
+                for url in jsonlFiles(under: root, limit: listMaxFiles) where Self.identifier(for: url) == id {
+                    return (url, decodeClaudeProject(url.deletingLastPathComponent().lastPathComponent))
+                }
             }
         case .codex:
-            let home = ProcessInfo.processInfo.environment["CODEX_HOME"].flatMap { URL(fileURLWithPath: $0.expandingTilde) }
-                ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
-            let roots = [
-                home.appendingPathComponent("sessions", isDirectory: true),
-                home.appendingPathComponent("archived_sessions", isDirectory: true)
-            ]
-            for root in roots {
+            for root in codexSessionRoots() {
                 for url in jsonlFiles(under: root, limit: listMaxFiles) where Self.identifier(for: url) == id {
                     return (url, "Codex")
                 }
@@ -2709,21 +2900,77 @@ struct AgentHistoryStore {
     }
 
     private func claudeSessions() -> [HistorySessionSummary] {
-        let root = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
-        return jsonlFiles(under: root, limit: listMaxFiles).compactMap { url in
-            summarize(url: url, tool: .claude, fallbackProject: decodeClaudeProject(url.deletingLastPathComponent().lastPathComponent))
+        let roots = claudeProjectRoots()
+        let perRootLimit = max(1, listMaxFiles / max(1, roots.count))
+        return roots.flatMap { root in
+            jsonlFiles(under: root, limit: perRootLimit).compactMap { url in
+                summarize(url: url, tool: .claude, fallbackProject: decodeClaudeProject(url.deletingLastPathComponent().lastPathComponent))
+            }
         }
     }
 
     private func codexSessions() -> [HistorySessionSummary] {
-        let home = ProcessInfo.processInfo.environment["CODEX_HOME"].flatMap { URL(fileURLWithPath: $0.expandingTilde) }
-            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
-        let roots = [
-            home.appendingPathComponent("sessions", isDirectory: true),
-            home.appendingPathComponent("archived_sessions", isDirectory: true)
-        ]
-        return roots.flatMap { jsonlFiles(under: $0, limit: listMaxFiles / roots.count) }
+        let roots = codexSessionRoots()
+        let perRootLimit = max(1, listMaxFiles / max(1, roots.count))
+        return roots.flatMap { jsonlFiles(under: $0, limit: perRootLimit) }
             .compactMap { summarize(url: $0, tool: .codex, fallbackProject: "Codex") }
+    }
+
+    private func historyWarnings(for tool: HistoryTool?) -> [String] {
+        var warnings: [String] = []
+        if tool == nil || tool == .codex {
+            let roots = codexSessionRoots()
+            if !roots.contains(where: { fileManager.fileExists(atPath: $0.path) }) {
+                warnings.append("Codex history directory not found. Checked: \(roots.map(\.path).joined(separator: ", "))")
+            }
+        }
+        if tool == nil || tool == .claude {
+            let roots = claudeProjectRoots()
+            if !roots.contains(where: { fileManager.fileExists(atPath: $0.path) }) {
+                warnings.append("Claude history directory not found. Checked: \(roots.map(\.path).joined(separator: ", "))")
+            }
+        }
+        return warnings
+    }
+
+    private func codexSessionRoots() -> [URL] {
+        let defaultHome = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        var homes: [URL] = []
+        if let envHome = ProcessInfo.processInfo.environment["CODEX_HOME"]?.nilIfBlank {
+            homes.append(URL(fileURLWithPath: envHome.expandingTilde, isDirectory: true))
+        }
+        if !homes.contains(where: { $0.standardizedFileURL.path == defaultHome.standardizedFileURL.path }) {
+            homes.append(defaultHome)
+        }
+        return uniqueURLs(homes.flatMap {
+            [
+                $0.appendingPathComponent("sessions", isDirectory: true),
+                $0.appendingPathComponent("archived_sessions", isDirectory: true)
+            ]
+        })
+    }
+
+    private func claudeProjectRoots() -> [URL] {
+        let defaultRoot = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
+        var roots: [URL] = []
+        if let configDir = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]?.nilIfBlank {
+            roots.append(URL(fileURLWithPath: configDir.expandingTilde, isDirectory: true).appendingPathComponent("projects", isDirectory: true))
+        }
+        if let homeDir = ProcessInfo.processInfo.environment["CLAUDE_HOME"]?.nilIfBlank {
+            roots.append(URL(fileURLWithPath: homeDir.expandingTilde, isDirectory: true).appendingPathComponent("projects", isDirectory: true))
+        }
+        roots.append(defaultRoot)
+        return uniqueURLs(roots)
+    }
+
+    private func uniqueURLs(_ urls: [URL]) -> [URL] {
+        var seen = Set<String>()
+        return urls.filter { url in
+            let path = url.standardizedFileURL.path
+            guard !seen.contains(path) else { return false }
+            seen.insert(path)
+            return true
+        }
     }
 
     private func jsonlFiles(under root: URL, limit: Int) -> [URL] {
@@ -2872,6 +3119,38 @@ struct AgentHistoryStore {
         }
 
         return nil
+    }
+
+    private func rawTurn(line: String, fallbackID: String, reason: String) -> HistoryTurn {
+        HistoryTurn(
+            id: fallbackID,
+            role: "unknown",
+            kind: "raw",
+            timestamp: nil,
+            text: clipped(Redactor.redact(line), limit: 8_000),
+            metadata: reason
+        )
+    }
+
+    private func shouldSkipUnknownRecord(_ object: [String: Any], tool: HistoryTool) -> Bool {
+        if tool == .codex, object["type"] as? String == "session_meta" {
+            return true
+        }
+        if tool == .claude, object["isMeta"] as? Bool == true {
+            return true
+        }
+        return false
+    }
+
+    private func unknownRecordReason(_ object: [String: Any], tool: HistoryTool) -> String {
+        if let type = object["type"] as? String {
+            return "Unrecognized \(tool.title) history record: \(type)"
+        }
+        if let payload = object["payload"] as? [String: Any],
+           let type = payload["type"] as? String {
+            return "Unrecognized \(tool.title) history payload: \(type)"
+        }
+        return "Unrecognized \(tool.title) history record schema"
     }
 
     private func fileContains(_ path: String, query: String) -> Bool {
@@ -3188,6 +3467,7 @@ struct HealthResponse: Codable {
     var tailscaleIP: String?
     var port: UInt16
     var hermesVersion: String
+    var toolStatuses: [CLIToolStatus]
 }
 
 struct PairingStatus: Codable {
