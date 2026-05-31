@@ -196,6 +196,7 @@ actor HostState {
     private var processes: [String: pid_t] = [:]
     private var devices: [DeviceRecord] = []
     private var pairingCode: String = String(UUID().uuidString.prefix(8)).uppercased()
+    private var pairingSecret: String = randomToken()
 
     init(config: HostConfig = HostConfig.load()) {
         self.config = config
@@ -226,17 +227,29 @@ actor HostState {
 
     func rotatePairingCode() -> String {
         pairingCode = String(UUID().uuidString.prefix(8)).uppercased()
+        pairingSecret = randomToken()
         return pairingCode
     }
 
     func pairingURL() -> String {
         let endpoint = "http://\(tailscaleIP() ?? localHostName()):\(config.port)"
-        return "veqral://pair?endpoint=\(endpoint.urlQueryEscaped)&code=\(pairingCode)"
+        let signature = pairingSignature(endpoint: endpoint, code: pairingCode)
+        return "veqral://pair?endpoint=\(endpoint.urlQueryEscaped)&code=\(pairingCode)&signature=\(signature.urlQueryEscaped)"
     }
 
-    func pair(deviceName: String, code: String) throws -> (deviceID: String, token: String) {
+    func pair(deviceName: String, code: String, pairingEndpoint: String? = nil, pairingSignature: String? = nil) throws -> (deviceID: String, token: String) {
         guard code == pairingCode else {
             throw HostError.unauthorized("Invalid pairing code")
+        }
+        if let signature = pairingSignature?.nilIfBlank {
+            let endpoint = pairingEndpoint?.nilIfBlank ?? ""
+            guard !endpoint.isEmpty else {
+                throw HostError.unauthorized("Missing pairing endpoint")
+            }
+            let expected = self.pairingSignature(endpoint: endpoint, code: code)
+            guard secureCompare(signature, expected) else {
+                throw HostError.unauthorized("Invalid pairing signature")
+            }
         }
         let deviceID = UUID().uuidString
         let token = randomToken()
@@ -246,6 +259,10 @@ actor HostState {
         _ = rotatePairingCode()
         appendAudit("paired device=\(deviceName) id=\(deviceID)")
         return (deviceID, token)
+    }
+
+    private func pairingSignature(endpoint: String, code: String) -> String {
+        HMACSigner.signature(token: pairingSecret, method: "PAIR", path: "/v1/pair", timestamp: code, body: Data(endpoint.utf8))
     }
 
     func validate(deviceID: String, method: String, path: String, timestamp: String, signature: String, body: Data) throws {
@@ -712,7 +729,12 @@ final class HostServer: @unchecked Sendable {
 
             if request.path == "/v1/pair", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(PairRequest.self, from: request.body)
-                let result = try await state.pair(deviceName: body.deviceName, code: body.pairingCode)
+                let result = try await state.pair(
+                    deviceName: body.deviceName,
+                    code: body.pairingCode,
+                    pairingEndpoint: body.pairingEndpoint,
+                    pairingSignature: body.pairingSignature
+                )
                 sendJSON(PairResponse(deviceID: result.deviceID, token: result.token), connection: connection)
                 return
             }
@@ -1401,11 +1423,17 @@ enum PTYProcess {
 
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
-        posix_spawn_file_actions_addchdir_np(&actions, workingDirectory)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        let chdirStatus = posix_spawn_file_actions_addchdir_np(&actions, workingDirectory)
+        guard chdirStatus == 0 else {
+            let reason = String(cString: strerror(chdirStatus))
+            await state.appendLog(runID: runID, stream: "error", message: Redactor.redact("Failed to prepare working directory \(workingDirectory): \(reason) (\(chdirStatus))"))
+            await state.finish(runID: runID, exitCode: 127)
+            return
+        }
         posix_spawn_file_actions_adddup2(&actions, slave, STDIN_FILENO)
         posix_spawn_file_actions_adddup2(&actions, slave, STDOUT_FILENO)
         posix_spawn_file_actions_adddup2(&actions, slave, STDERR_FILENO)
-        defer { posix_spawn_file_actions_destroy(&actions) }
 
         let argStrings = [executable] + arguments
         var argv: [UnsafeMutablePointer<CChar>?] = argStrings.map { strdup($0) }
@@ -1413,11 +1441,12 @@ enum PTYProcess {
         defer { argv.forEach { if $0 != nil { free($0) } } }
 
         let home = NSHomeDirectory()
-        let envStrings = [
-            "PATH=\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME=\(home)",
-            "LANG=en_US.UTF-8"
-        ]
+        var mergedEnvironment = ProcessInfo.processInfo.environment
+        mergedEnvironment["PATH"] = launchAgentPath(home: home, inherited: mergedEnvironment["PATH"])
+        mergedEnvironment["HOME"] = home
+        mergedEnvironment["LANG"] = mergedEnvironment["LANG"]?.nilIfBlank ?? "en_US.UTF-8"
+        mergedEnvironment["TERM"] = mergedEnvironment["TERM"]?.nilIfBlank ?? "xterm-256color"
+        let envStrings = mergedEnvironment.map { "\($0.key)=\($0.value)" }.sorted()
         var env: [UnsafeMutablePointer<CChar>?] = envStrings.map { strdup($0) }
         env.append(nil)
         defer { env.forEach { if $0 != nil { free($0) } } }
@@ -1433,7 +1462,9 @@ enum PTYProcess {
         close(slave)
         slave = -1
         if status != 0 {
-            await state.appendLog(runID: runID, stream: "error", message: "Failed to spawn process: \(status)")
+            let reason = String(cString: strerror(status))
+            let title = toolStatus?.title ?? "process"
+            await state.appendLog(runID: runID, stream: "error", message: Redactor.redact("Failed to spawn \(title) at \(executable): \(reason) (\(status)). Check the CLI path and working directory."))
             await state.finish(runID: runID, exitCode: 127)
             return
         }
@@ -1497,6 +1528,29 @@ enum PTYProcess {
         if output.count > maxCharacters {
             output = String(output.suffix(maxCharacters))
         }
+    }
+
+    private static func launchAgentPath(home: String, inherited: String?) -> String {
+        var seen = Set<String>()
+        let values = [
+            "\(home)/.local/bin",
+            "\(home)/.cargo/bin",
+            "\(home)/.npm-global/bin",
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+            inherited ?? ""
+        ]
+        return values
+            .flatMap { $0.split(separator: ":").map(String.init) }
+            .filter { !$0.isEmpty }
+            .filter { seen.insert($0).inserted }
+            .joined(separator: ":")
     }
 
     private static func setNonBlocking(_ fd: Int32) {
@@ -3940,6 +3994,8 @@ struct PairingStatus: Codable {
 struct PairRequest: Codable {
     var deviceName: String
     var pairingCode: String
+    var pairingEndpoint: String?
+    var pairingSignature: String?
 }
 
 struct PairResponse: Codable {

@@ -29,7 +29,9 @@
 "Reject" = "Reject";
 "Continue" = "Continue";
 "Refresh" = "Refresh";
+"Refresh Mac Host" = "Refresh Mac Host";
 "Refresh Host" = "Refresh Host";
+"Open Devices" = "Open Devices";
 "Run" = "Run";
 "Run を開始" = "Start Run";
 "New Chat" = "New Chat";

@@ -430,6 +430,48 @@ struct ApprovalActionButtons: View {
     }
 }
 
+struct RunApprovalCallout: View {
+    let approval: CommandApproval
+    var compact = false
+
+    private var tint: Color {
+        approval.tintName == "amber" ? VQTheme.amber : VQTheme.red
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 8 : 10) {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: approval.symbolName)
+                    .frame(width: compact ? 24 : 30, height: compact ? 24 : 30)
+                    .foregroundStyle(tint)
+                    .background(tint.opacity(0.13))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(L10n.tr("Approval required"))
+                        .font((compact ? Font.caption : Font.subheadline).weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    Text(approval.detail)
+                        .font(compact ? .caption2 : .caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .lineLimit(compact ? 2 : 3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+
+            ApprovalActionButtons(approval: approval, compact: compact)
+        }
+        .padding(compact ? 9 : 11)
+        .background(tint.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(tint.opacity(0.48), lineWidth: 1)
+        }
+    }
+}
+
 struct MetricTile: View {
     let metric: CommandMetric
 

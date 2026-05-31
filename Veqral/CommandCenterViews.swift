@@ -624,6 +624,10 @@ private struct RunHeader: View {
             }
             .font(.caption)
             .foregroundStyle(VQTheme.secondaryText)
+
+            if let approval = store.pendingApproval(for: run.id) {
+                RunApprovalCallout(approval: approval)
+            }
         }
     }
 }
@@ -1194,32 +1198,39 @@ private struct PhoneSectionHeader: View {
 }
 
 private struct PhoneRunRow: View {
+    @EnvironmentObject private var store: CommandCenterStore
     let run: CommandRun
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "doc.badge.gearshape")
-                .font(.caption)
-                .frame(width: 24, height: 24)
-                .foregroundStyle(run.status.tint)
-                .background(run.status.tint.opacity(0.14))
-                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(run.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(VQTheme.ink)
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    Circle().stroke(run.status.tint, lineWidth: 1).frame(width: 8, height: 8)
-                Text(run.phase.commandTitle)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.badge.gearshape")
+                    .font(.caption)
+                    .frame(width: 24, height: 24)
+                    .foregroundStyle(run.status.tint)
+                    .background(run.status.tint.opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(run.title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Circle().stroke(run.status.tint, lineWidth: 1).frame(width: 8, height: 8)
+                        Text(run.phase.commandTitle)
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
                 }
-                .font(.caption2)
-                .foregroundStyle(VQTheme.secondaryText)
+                Spacer()
+                Text(elapsed)
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
             }
-            Spacer()
-            Text(elapsed)
-                .font(.caption2)
-                .foregroundStyle(VQTheme.secondaryText)
+
+            if let approval = store.pendingApproval(for: run.id) {
+                RunApprovalCallout(approval: approval, compact: true)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)

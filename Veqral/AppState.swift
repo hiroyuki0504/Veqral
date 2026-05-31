@@ -4,6 +4,9 @@ import Darwin
 import CryptoKit
 import Security
 import UserNotifications
+#if canImport(UIKit)
+import UIKit
+#endif
 
 enum CommandRuntime: String, Codable, CaseIterable, Identifiable {
     case hermesAgent
@@ -675,8 +678,20 @@ final class CommandCenterStore: ObservableObject {
 
     var visibleRemoteDevices: [RemoteDeviceRecord] {
         let currentDeviceID = remoteHost.deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !currentDeviceID.isEmpty else { return remoteDevices }
-        return remoteDevices.filter { $0.id != currentDeviceID }
+        let currentDeviceNames = Self.currentDeviceNameCandidates()
+        return remoteDevices.filter { device in
+            let deviceID = device.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !currentDeviceID.isEmpty, deviceID == currentDeviceID {
+                return false
+            }
+
+            let deviceName = Self.normalizedDeviceName(device.name)
+            if !deviceName.isEmpty, currentDeviceNames.contains(deviceName) {
+                return false
+            }
+
+            return true
+        }
     }
     private var workspaceRefreshTask: Task<Void, Never>?
     private var remoteStreamTasks: [UUID: Task<Void, Never>] = [:]
@@ -922,10 +937,16 @@ final class CommandCenterStore: ObservableObject {
         syncPushTokenWithRemoteHost()
     }
 
-    func pairRemoteHost(endpoint: String, pairingCode: String, deviceName: String) async throws {
+    func pairRemoteHost(endpoint: String, pairingCode: String, pairingSignature: String? = nil, deviceName: String) async throws {
         let cleanEndpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanCode = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
-        let response = try await RemoteHostClient.pair(endpoint: cleanEndpoint, deviceName: deviceName, pairingCode: cleanCode)
+        let cleanSignature = pairingSignature?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        let response = try await RemoteHostClient.pair(
+            endpoint: cleanEndpoint,
+            deviceName: deviceName,
+            pairingCode: cleanCode,
+            pairingSignature: cleanSignature
+        )
         configureRemoteHost(endpoint: cleanEndpoint, deviceID: response.deviceID, token: response.token, name: "Mac Host")
         refreshRemoteHostStatus()
     }
@@ -953,17 +974,21 @@ final class CommandCenterStore: ObservableObject {
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return
         }
-        let values = Dictionary(uniqueKeysWithValues: components.queryItems?.compactMap { item in
-            item.value.map { (item.name, $0) }
-        } ?? [])
+        var values: [String: String] = [:]
+        components.queryItems?.forEach { item in
+            if let value = item.value {
+                values[item.name] = value
+            }
+        }
         guard let endpoint = values["endpoint"], let code = values["code"] else {
             remoteHostMessage = "Pairing URL is missing endpoint or code."
             return
         }
+        let signature = values["signature"] ?? values["sig"]
         remoteHostMessage = "Pairing from QR link..."
         Task { @MainActor in
             do {
-                try await pairRemoteHost(endpoint: endpoint, pairingCode: code, deviceName: ProcessInfo.processInfo.hostName)
+                try await pairRemoteHost(endpoint: endpoint, pairingCode: code, pairingSignature: signature, deviceName: ProcessInfo.processInfo.hostName)
                 remoteHostMessage = "Paired from QR link."
             } catch {
                 remoteHostMessage = "QR pairing failed: \(error.localizedDescription)"
@@ -1621,6 +1646,11 @@ final class CommandCenterStore: ObservableObject {
         let pending = approvals.filter { $0.status == .pending }
         guard let limit else { return pending }
         return Array(pending.prefix(limit))
+    }
+
+    func pendingApproval(for runID: UUID?) -> CommandApproval? {
+        guard let runID else { return nil }
+        return approvals.first { $0.runID == runID && $0.status == .pending }
     }
 
     func visibleRuns(phase: RunPhase? = nil) -> [CommandRun] {
@@ -2420,6 +2450,19 @@ final class CommandCenterStore: ObservableObject {
         UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 
+    private static func currentDeviceNameCandidates() -> Set<String> {
+        var names = [ProcessInfo.processInfo.hostName]
+        #if canImport(UIKit)
+        names.append(UIDevice.current.name)
+        #endif
+        return Set(names.map(normalizedDeviceName).filter { !$0.isEmpty })
+    }
+
+    private static func normalizedDeviceName(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
     private static func attachmentTimestamp() -> String {
         Self.attachmentDateFormatter.string(from: Date())
     }
@@ -2924,17 +2967,25 @@ enum RemoteHostError: Error, LocalizedError {
 struct RemoteHostClient: Sendable {
     let configuration: RemoteHostConfiguration
 
-    static func pair(endpoint: String, deviceName: String, pairingCode: String) async throws -> RemotePairResponse {
+    static func pair(endpoint: String, deviceName: String, pairingCode: String, pairingSignature: String? = nil) async throws -> RemotePairResponse {
         guard let url = URL(string: "/v1/pair", relativeTo: URL(string: endpoint)) else {
             throw RemoteHostError.invalidConfiguration
+        }
+        struct PairBody: Codable {
+            var deviceName: String
+            var pairingCode: String
+            var pairingEndpoint: String
+            var pairingSignature: String?
         }
         var request = URLRequest(url: url.absoluteURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder.commandCenter.encode([
-            "deviceName": deviceName,
-            "pairingCode": pairingCode
-        ])
+        request.httpBody = try JSONEncoder.commandCenter.encode(PairBody(
+            deviceName: deviceName,
+            pairingCode: pairingCode,
+            pairingEndpoint: endpoint,
+            pairingSignature: pairingSignature
+        ))
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw RemoteHostError.server("Invalid response")
