@@ -341,6 +341,24 @@ struct DevicesView: View {
                     }
                 }
 
+                VQPanel("CLI Diagnostics", systemImage: "stethoscope") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if let toolStatuses = store.remoteHostHealth?.toolStatuses, !toolStatuses.isEmpty {
+                            ForEach(toolStatuses) { status in
+                                ToolDiagnosticRow(status: status)
+                                if status.id != toolStatuses.last?.id {
+                                    EmptyDivider()
+                                }
+                            }
+                        } else {
+                            Text(store.remoteHost.isPaired ? "Refresh the Mac Host to inspect Codex, Claude, and Hermes adapters." : "Pair a Mac Host to inspect CLI versions.")
+                                .font(.subheadline)
+                                .foregroundStyle(VQTheme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
                 VQPanel("Run Agent on This Mac", systemImage: "switch.2") {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Choose which native agent the paired Mac Host should spawn for the next command.")
@@ -543,6 +561,62 @@ struct DevicesView: View {
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+private struct ToolDiagnosticRow: View {
+    let status: RemoteCLIToolStatus
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: iconName)
+                .frame(width: 28, height: 28)
+                .foregroundStyle(tint)
+                .background(tint.opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(status.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    StatusPill(title: status.isInstalled ? "Installed" : "Missing", tint: status.isInstalled ? VQTheme.green : VQTheme.amber)
+                    StatusPill(title: status.isKnownCompatible ? "Adapter OK" : "Check Adapter", tint: status.isKnownCompatible ? VQTheme.green : VQTheme.amber)
+                    Spacer(minLength: 0)
+                }
+                Text(status.versionSummary)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(2)
+                Text(status.compatibilityNote)
+                    .font(.caption)
+                    .foregroundStyle(status.isKnownCompatible ? VQTheme.secondaryText : VQTheme.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let commandShape = status.commandShape, !commandShape.isEmpty {
+                    Text(commandShape)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+            }
+        }
+    }
+
+    private var tint: Color {
+        if !status.isInstalled { return VQTheme.amber }
+        return status.isKnownCompatible ? VQTheme.green : VQTheme.amber
+    }
+
+    private var iconName: String {
+        switch status.engine {
+        case "codex":
+            return "terminal"
+        case "claude":
+            return "bubble.left.and.text.bubble.right"
+        default:
+            return "point.3.connected.trianglepath.dotted"
+        }
+    }
 }
 
 struct ProjectsView: View {
