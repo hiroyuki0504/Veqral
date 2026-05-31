@@ -18,6 +18,7 @@
 		A10000000000000000000009 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* AppState.swift */; };
 		A1000000000000000000000B /* Localization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001B /* Localization.swift */; };
 		A1000000000000000000000C /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001E /* Localizable.strings */; };
+		A1000000000000000000000D /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001F /* PushNotifications.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +35,8 @@
 		A1000000000000000000001B /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
 		A1000000000000000000001C /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		A1000000000000000000001D /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
+		A1000000000000000000001F /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotifications.swift; sourceTree = "<group>"; };
+		A10000000000000000000021 /* Veqral.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Veqral.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -67,7 +70,9 @@
 				A10000000000000000000016 /* RootView.swift */,
 				A10000000000000000000017 /* Screens.swift */,
 				A1000000000000000000001B /* Localization.swift */,
+				A1000000000000000000001F /* PushNotifications.swift */,
 				A1000000000000000000001E /* Localizable.strings */,
+				A10000000000000000000021 /* Veqral.entitlements */,
 				A1000000000000000000001A /* Assets.xcassets */,
 			);
 			path = Veqral;
@@ -113,6 +118,11 @@
 				TargetAttributes = {
 					A10000000000000000000040 = {
 						CreatedOnToolsVersion = 26.5;
+						SystemCapabilities = {
+							com.apple.Push = {
+								enabled = 1;
+							};
+						};
 					};
 				};
 			};
@@ -159,6 +169,7 @@
 				A10000000000000000000008 /* CommandCenterViews.swift in Sources */,
 				A10000000000000000000009 /* AppState.swift in Sources */,
 				A1000000000000000000000B /* Localization.swift in Sources */,
+				A1000000000000000000000D /* PushNotifications.swift in Sources */,
 				A10000000000000000000006 /* RootView.swift in Sources */,
 				A10000000000000000000007 /* Screens.swift in Sources */,
 			);
@@ -297,8 +308,10 @@
 		};
 		A10000000000000000000071 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			buildSettings = {
+				buildSettings = {
+				APS_ENVIRONMENT = development;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Veqral/Veqral.entitlements;
 					CODE_SIGN_STYLE = Automatic;
 					CURRENT_PROJECT_VERSION = 1;
 					DEVELOPMENT_TEAM = 7XR5GVNQYQ;
@@ -321,8 +334,10 @@
 		};
 		A10000000000000000000072 /* Release */ = {
 			isa = XCBuildConfiguration;
-			buildSettings = {
+				buildSettings = {
+				APS_ENVIRONMENT = production;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Veqral/Veqral.entitlements;
 					CODE_SIGN_STYLE = Automatic;
 					CURRENT_PROJECT_VERSION = 1;
 					DEVELOPMENT_TEAM = 7XR5GVNQYQ;

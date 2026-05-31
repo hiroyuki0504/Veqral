@@ -47,6 +47,11 @@ struct HostConfig: Codable, Sendable {
     var maxActiveRuns: Int = 2
     var logRetentionDays: Int = 30
     var auditRetentionDays: Int = 90
+    var apnsKeyID: String?
+    var apnsTeamID: String?
+    var apnsKeyPath: String?
+    var apnsBundleID: String?
+    var apnsEnvironment: String?
 
     static var folder: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -76,6 +81,23 @@ struct DeviceRecord: Codable, Sendable, Identifiable {
     var name: String
     var pairedAt: Date
     var lastSeenAt: Date?
+    var pushToken: String? = nil
+    var pushEnvironment: String? = nil
+    var pushBundleID: String? = nil
+    var pushLocale: String? = nil
+    var pushUpdatedAt: Date? = nil
+}
+
+enum PushEventType: String, Codable, Sendable {
+    case approval
+    case question
+    case complete
+    case failed
+}
+
+enum ApprovalSeverity: String, Codable, Sendable {
+    case low
+    case high
 }
 
 enum RunStatusWire: String, Codable, Sendable {
@@ -122,6 +144,7 @@ struct HostRun: Codable, Sendable, Identifiable {
     var chatID: String?
     var provider: String?
     var model: String?
+    var approvalSeverity: ApprovalSeverity? = nil
 
     var engineOrDefault: AgentEngine {
         engine ?? .hermes
@@ -235,6 +258,19 @@ actor HostState {
         devices
     }
 
+    func registerPushToken(deviceID: String, request: PushTokenRequest) {
+        guard let index = devices.firstIndex(where: { $0.id == deviceID }) else { return }
+        devices[index].pushToken = request.deviceToken
+        devices[index].pushEnvironment = request.environment
+        devices[index].pushBundleID = request.bundleID
+        devices[index].pushLocale = request.locale
+        devices[index].pushUpdatedAt = Date()
+        devices[index].lastSeenAt = Date()
+        persistDevices()
+        let suffix = request.deviceToken.suffix(6)
+        appendAudit("registered push device=\(deviceID) env=\(request.environment) tokenSuffix=\(suffix)")
+    }
+
     func runsList() -> [HostRun] {
         runs.values.sorted { $0.startedAt > $1.startedAt }
     }
@@ -290,6 +326,13 @@ actor HostState {
         } else {
             nil
         }
+        let approvalSeverity: ApprovalSeverity? = if approvalReason == nil {
+            nil
+        } else if approvalReason == "Budget guard exceeded" {
+            .high
+        } else {
+            risk.severity
+        }
         var run = HostRun(
             id: UUID().uuidString,
             prompt: prompt,
@@ -306,7 +349,8 @@ actor HostState {
             projectID: projectID?.nilIfBlank,
             chatID: chatID?.nilIfBlank,
             provider: provider?.nilIfBlank,
-            model: model?.nilIfBlank
+            model: model?.nilIfBlank,
+            approvalSeverity: approvalSeverity
         )
         let savedAttachments = try AttachmentStore.save(attachments, runID: run.id)
         if !savedAttachments.isEmpty {
@@ -319,6 +363,7 @@ actor HostState {
         if let approvalReason {
             appendAudit("created approval run id=\(run.id) engine=\(engine.rawValue) dir=\(directory) reason=\(approvalReason)")
             publish(HostLogEvent(runID: run.id, kind: .approval, stream: "approval", message: approvalReason, createdAt: Date()))
+            notifyDevices(run: run, event: .approval, message: approvalReason, severity: approvalSeverity ?? .high)
         } else {
             appendAudit("created run id=\(run.id) engine=\(engine.rawValue) dir=\(directory)")
         }
@@ -357,6 +402,12 @@ actor HostState {
         persistRuns()
         appendAudit("finished run id=\(runID) exit=\(exitCode)")
         publish(HostLogEvent(runID: runID, kind: .complete, stream: "host", message: "Exit code: \(exitCode)", createdAt: Date(), sessionID: run.sessionID, exitCode: exitCode))
+        notifyDevices(
+            run: run,
+            event: exitCode == 0 ? .complete : .failed,
+            message: exitCode == 0 ? "Run complete" : "Run failed with exit code \(exitCode)",
+            severity: .low
+        )
     }
 
     func cancel(runID: String) {
@@ -434,6 +485,29 @@ actor HostState {
         logs[event.runID, default: []].append(event)
         appendLogFile(event)
         subscribers[event.runID]?.values.forEach { $0(event) }
+        if event.kind == .log,
+           let run = runs[event.runID],
+           Self.isQuestionLike(event.message) {
+            notifyDevices(run: run, event: .question, message: event.message, severity: .low)
+        }
+    }
+
+    private func notifyDevices(run: HostRun, event: PushEventType, message: String, severity: ApprovalSeverity) {
+        let recipients = devices.filter { $0.pushToken?.nilIfBlank != nil }
+        guard !recipients.isEmpty else { return }
+        let config = config
+        Task.detached {
+            await APNsPushService.send(run: run, event: event, message: Redactor.redact(message), severity: severity, devices: recipients, config: config)
+        }
+    }
+
+    private static func isQuestionLike(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("need input")
+            || lower.contains("waiting for user")
+            || lower.contains("question:")
+            || lower.contains("ユーザー確認")
+            || lower.contains("質問:")
     }
 
     private func appendAudit(_ line: String) {
@@ -626,7 +700,14 @@ final class HostServer: @unchecked Sendable {
                 return
             }
 
-            try await authenticate(request)
+            let authenticatedDeviceID = try await authenticate(request)
+
+            if request.path == "/v1/push/token", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(PushTokenRequest.self, from: request.body)
+                await state.registerPushToken(deviceID: authenticatedDeviceID, request: body)
+                sendJSON(PushTokenResponse(ok: true), connection: connection)
+                return
+            }
 
             if request.path == "/v1/setup/unattended/status", request.method == "GET" {
                 sendJSON(UnattendedSetupManager.status(), connection: connection)
@@ -677,7 +758,8 @@ final class HostServer: @unchecked Sendable {
             }
 
             if request.path == "/v1/devices", request.method == "GET" {
-                sendJSON(DeviceListResponse(devices: await state.devicesList()), connection: connection)
+                let devices = await state.devicesList().map { DeviceListRecord(device: $0) }
+                sendJSON(DeviceListResponse(devices: devices), connection: connection)
                 return
             }
 
@@ -756,7 +838,8 @@ final class HostServer: @unchecked Sendable {
                         sessionID: run.sessionID,
                         status: run.status.rawValue,
                         approvalRequired: run.status == .waitingApproval,
-                        approvalReason: run.approvalReason
+                        approvalReason: run.approvalReason,
+                        approvalSeverity: run.approvalSeverity?.rawValue
                     ),
                     connection: connection
                 )
@@ -825,7 +908,7 @@ final class HostServer: @unchecked Sendable {
         }
     }
 
-    private func authenticate(_ request: HTTPRequest) async throws {
+    private func authenticate(_ request: HTTPRequest) async throws -> String {
         guard let device = request.headers["x-veqral-device"],
               let timestamp = request.headers["x-veqral-timestamp"],
               let signature = request.headers["x-veqral-signature"] else {
@@ -839,6 +922,7 @@ final class HostServer: @unchecked Sendable {
             signature: signature,
             body: request.body
         )
+        return device
     }
 
     private func upgradeToWebSocket(_ request: HTTPRequest, connection: NWConnection) async throws {
@@ -3459,6 +3543,309 @@ enum ProcessRunner {
     }
 }
 
+struct APNsConfiguration: Sendable {
+    var keyID: String
+    var teamID: String
+    var keyPath: String
+    var bundleID: String
+    var environment: String
+
+    var endpointHost: String {
+        environment.lowercased().contains("prod") ? "api.push.apple.com" : "api.sandbox.push.apple.com"
+    }
+
+    static func load(from config: HostConfig) -> APNsConfiguration? {
+        let env = ProcessInfo.processInfo.environment
+        func configured(_ envKey: String, _ keychainAccount: String, _ configValue: String?) -> String? {
+            env[envKey]?.nilIfBlank
+                ?? KeychainStore.get(account: keychainAccount)?.nilIfBlank
+                ?? configValue?.nilIfBlank
+        }
+
+        guard let keyID = configured("VEQRAL_APNS_KEY_ID", "apns:key-id", config.apnsKeyID),
+              let teamID = configured("VEQRAL_APNS_TEAM_ID", "apns:team-id", config.apnsTeamID),
+              let keyPath = configured("VEQRAL_APNS_KEY_PATH", "apns:key-path", config.apnsKeyPath),
+              let bundleID = configured("VEQRAL_APNS_BUNDLE_ID", "apns:bundle-id", config.apnsBundleID) else {
+            return nil
+        }
+        let environment = configured("VEQRAL_APNS_ENVIRONMENT", "apns:environment", config.apnsEnvironment) ?? "development"
+        return APNsConfiguration(
+            keyID: keyID,
+            teamID: teamID,
+            keyPath: keyPath.expandingTilde,
+            bundleID: bundleID,
+            environment: environment
+        )
+    }
+}
+
+enum APNsPushService {
+    private static let lowApprovalCategory = "VEQRAL_APPROVAL_LOW"
+    private static let highApprovalCategory = "VEQRAL_APPROVAL_HIGH"
+    private static let statusCategory = "VEQRAL_STATUS"
+
+    static func send(
+        run: HostRun,
+        event: PushEventType,
+        message: String,
+        severity: ApprovalSeverity,
+        devices: [DeviceRecord],
+        config: HostConfig
+    ) async {
+        guard let apns = APNsConfiguration.load(from: config),
+              let token = APNsJWTSigner.token(configuration: apns) else {
+            return
+        }
+
+        for device in devices {
+            guard let deviceToken = device.pushToken?.nilIfBlank else { continue }
+            await sendOne(
+                deviceToken: deviceToken,
+                token: token,
+                run: run,
+                event: event,
+                message: message,
+                severity: severity,
+                device: device,
+                apns: apns
+            )
+        }
+    }
+
+    private static func sendOne(
+        deviceToken: String,
+        token: String,
+        run: HostRun,
+        event: PushEventType,
+        message: String,
+        severity: ApprovalSeverity,
+        device: DeviceRecord,
+        apns: APNsConfiguration
+    ) async {
+        guard let payload = payloadData(
+            run: run,
+            event: event,
+            message: message,
+            severity: severity,
+            locale: device.pushLocale
+        ),
+        let url = URL(string: "https://\(apns.endpointHost)/3/device/\(deviceToken)") else {
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = payload
+        request.setValue("bearer \(token)", forHTTPHeaderField: "authorization")
+        request.setValue(device.pushBundleID?.nilIfBlank ?? apns.bundleID, forHTTPHeaderField: "apns-topic")
+        request.setValue("alert", forHTTPHeaderField: "apns-push-type")
+        request.setValue("10", forHTTPHeaderField: "apns-priority")
+        request.setValue("veqral-\(run.id)-\(event.rawValue)", forHTTPHeaderField: "apns-collapse-id")
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return
+            }
+        } catch {
+            return
+        }
+    }
+
+    private static func payloadData(
+        run: HostRun,
+        event: PushEventType,
+        message: String,
+        severity: ApprovalSeverity,
+        locale: String?
+    ) -> Data? {
+        let title = title(for: event, locale: locale)
+        let body = body(for: run, event: event, message: message, locale: locale)
+        let category: String = if event == .approval {
+            severity == .low ? lowApprovalCategory : highApprovalCategory
+        } else {
+            statusCategory
+        }
+        let aps: [String: Any] = [
+            "alert": [
+                "title": title,
+                "body": body
+            ],
+            "sound": "default",
+            "category": category,
+            "thread-id": "veqral-\(run.id)"
+        ]
+        let payload: [String: Any] = [
+            "aps": aps,
+            "veqral_run_id": run.id,
+            "veqral_event": event.rawValue,
+            "veqral_severity": severity.rawValue,
+            "veqral_engine": run.engineOrDefault.rawValue
+        ]
+        return try? JSONSerialization.data(withJSONObject: payload)
+    }
+
+    private static func title(for event: PushEventType, locale: String?) -> String {
+        let japanese = locale?.lowercased().hasPrefix("ja") == true
+        switch event {
+        case .approval:
+            return japanese ? "承認が必要です" : "Approval required"
+        case .question:
+            return japanese ? "確認が必要です" : "Agent question"
+        case .complete:
+            return japanese ? "Run 完了" : "Run complete"
+        case .failed:
+            return japanese ? "Run 失敗" : "Run failed"
+        }
+    }
+
+    private static func body(for run: HostRun, event: PushEventType, message: String, locale: String?) -> String {
+        let firstPromptLine = run.prompt
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+        let prompt = firstPromptLine ?? run.engineOrDefault.title
+        let cleanMessage = Redactor.redact(message)
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+        let detail = cleanMessage ?? (locale?.lowercased().hasPrefix("ja") == true ? "Veqral を確認してください" : "Open Veqral to review")
+        let text = event == .complete || event == .failed ? "\(prompt): \(detail)" : "\(detail): \(prompt)"
+        return String(text.prefix(180))
+    }
+}
+
+enum APNsJWTSigner {
+    static func token(configuration: APNsConfiguration) -> String? {
+        let issuedAt = Int(Date().timeIntervalSince1970)
+        guard let header = jsonBase64URL(["alg": "ES256", "kid": configuration.keyID]),
+              let claims = jsonBase64URL(["iss": configuration.teamID, "iat": issuedAt]) else {
+            return nil
+        }
+        let signingInput = "\(header).\(claims)"
+        guard let derSignature = OpenSSLSigner.sign(Data(signingInput.utf8), keyPath: configuration.keyPath),
+              let rawSignature = ECDSASignatureDER.rawSignature(from: derSignature) else {
+            return nil
+        }
+        return "\(signingInput).\(base64URL(rawSignature))"
+    }
+
+    private static func jsonBase64URL(_ object: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
+            return nil
+        }
+        return base64URL(data)
+    }
+
+    private static func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+enum OpenSSLSigner {
+    static func sign(_ data: Data, keyPath: String) -> Data? {
+        guard let openssl = opensslPath() else { return nil }
+        let process = Process()
+        let input = Pipe()
+        let output = Pipe()
+        let error = Pipe()
+        process.executableURL = URL(fileURLWithPath: openssl)
+        process.currentDirectoryURL = URL(fileURLWithPath: "/")
+        process.arguments = ["dgst", "-sha256", "-sign", keyPath]
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = error
+        do {
+            try process.run()
+            input.fileHandleForWriting.write(data)
+            try? input.fileHandleForWriting.close()
+            let signature = output.fileHandleForReading.readDataToEndOfFile()
+            _ = error.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0, !signature.isEmpty else { return nil }
+            return signature
+        } catch {
+            return nil
+        }
+    }
+
+    private static func opensslPath() -> String? {
+        ["/usr/bin/openssl", "/opt/homebrew/bin/openssl", "/usr/local/bin/openssl"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+}
+
+enum ECDSASignatureDER {
+    static func rawSignature(from der: Data) -> Data? {
+        var reader = DERReader(data: Array(der))
+        guard reader.readByte() == 0x30,
+              reader.readLength() != nil,
+              reader.readByte() == 0x02,
+              let rLength = reader.readLength(),
+              let r = reader.readBytes(rLength),
+              reader.readByte() == 0x02,
+              let sLength = reader.readLength(),
+              let s = reader.readBytes(sLength) else {
+            return nil
+        }
+        return normalizeInteger(r) + normalizeInteger(s)
+    }
+
+    private static func normalizeInteger(_ bytes: [UInt8]) -> Data {
+        var trimmed = bytes
+        while trimmed.count > 1, trimmed.first == 0 {
+            trimmed.removeFirst()
+        }
+        if trimmed.count > 32 {
+            trimmed = Array(trimmed.suffix(32))
+        }
+        if trimmed.count < 32 {
+            trimmed = Array(repeating: 0, count: 32 - trimmed.count) + trimmed
+        }
+        return Data(trimmed)
+    }
+}
+
+struct DERReader {
+    var data: [UInt8]
+    var index: Int = 0
+
+    mutating func readByte() -> UInt8? {
+        guard index < data.count else { return nil }
+        defer { index += 1 }
+        return data[index]
+    }
+
+    mutating func readLength() -> Int? {
+        guard let first = readByte() else { return nil }
+        if first < 0x80 {
+            return Int(first)
+        }
+        let byteCount = Int(first & 0x7f)
+        guard byteCount > 0, byteCount <= 4 else { return nil }
+        var length = 0
+        for _ in 0..<byteCount {
+            guard let byte = readByte() else { return nil }
+            length = (length << 8) | Int(byte)
+        }
+        return length
+    }
+
+    mutating func readBytes(_ count: Int) -> [UInt8]? {
+        guard count >= 0, index + count <= data.count else { return nil }
+        let slice = Array(data[index..<(index + count)])
+        index += count
+        return slice
+    }
+}
+
 struct HTTPRequest {
     var method: String
     var path: String
@@ -3535,6 +3922,17 @@ struct PairResponse: Codable {
     var token: String
 }
 
+struct PushTokenRequest: Codable {
+    var deviceToken: String
+    var environment: String
+    var bundleID: String
+    var locale: String?
+}
+
+struct PushTokenResponse: Codable {
+    var ok: Bool
+}
+
 struct CreateRunRequest: Codable {
     var prompt: String
     var workingDirectory: String
@@ -3560,6 +3958,7 @@ struct CreateRunResponse: Codable {
     var status: String
     var approvalRequired: Bool
     var approvalReason: String?
+    var approvalSeverity: String?
 }
 
 struct RunListResponse: Codable {
@@ -3577,8 +3976,30 @@ struct RunSnapshotResponse: Codable {
     var artifacts: [HostArtifact]
 }
 
+struct DeviceListRecord: Codable {
+    var id: String
+    var name: String
+    var pairedAt: Date
+    var lastSeenAt: Date?
+    var pushEnvironment: String?
+    var pushBundleID: String?
+    var pushLocale: String?
+    var pushUpdatedAt: Date?
+
+    init(device: DeviceRecord) {
+        self.id = device.id
+        self.name = device.name
+        self.pairedAt = device.pairedAt
+        self.lastSeenAt = device.lastSeenAt
+        self.pushEnvironment = device.pushEnvironment
+        self.pushBundleID = device.pushBundleID
+        self.pushLocale = device.pushLocale
+        self.pushUpdatedAt = device.pushUpdatedAt
+    }
+}
+
 struct DeviceListResponse: Codable {
-    var devices: [DeviceRecord]
+    var devices: [DeviceListRecord]
 }
 
 struct AuditLogResponse: Codable {
@@ -3682,6 +4103,7 @@ enum HostError: Error, CustomStringConvertible {
 struct RiskResult {
     var requiresApproval: Bool
     var reason: String
+    var severity: ApprovalSeverity
 }
 
 enum RiskClassifier {
@@ -3694,9 +4116,9 @@ enum RiskClassifier {
             "computer use", "screen control"
         ]
         if let hit = highRisk.first(where: { lower.contains($0.lowercased()) }) {
-            return RiskResult(requiresApproval: true, reason: "Approval required for \(hit)")
+            return RiskResult(requiresApproval: true, reason: "Approval required for \(hit)", severity: .high)
         }
-        return RiskResult(requiresApproval: false, reason: "auto")
+        return RiskResult(requiresApproval: false, reason: "auto", severity: .low)
     }
 }
 

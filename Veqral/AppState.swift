@@ -283,6 +283,7 @@ struct RemoteCreateRunResponse: Codable, Sendable {
     var status: String
     var approvalRequired: Bool?
     var approvalReason: String?
+    var approvalSeverity: String?
 }
 
 struct RemoteRunAttachment: Codable, Sendable {
@@ -299,6 +300,10 @@ struct RemoteSimpleResponse: Codable, Sendable {
 struct RemotePairResponse: Codable, Sendable {
     var deviceID: String
     var token: String
+}
+
+struct RemotePushTokenResponse: Codable, Sendable {
+    var ok: Bool
 }
 
 struct RemoteHealthResponse: Codable, Sendable {
@@ -339,6 +344,7 @@ struct RemoteRunRecord: Codable, Identifiable, Equatable, Sendable {
     var exitCode: Int32?
     var pid: Int32?
     var approvalReason: String?
+    var approvalSeverity: String?
     var engine: String?
     var resumeSessionID: String?
     var projectID: String?
@@ -390,6 +396,11 @@ struct RemoteDeviceRecord: Codable, Identifiable, Equatable, Sendable {
     var name: String
     var pairedAt: Date
     var lastSeenAt: Date?
+    var pushToken: String?
+    var pushEnvironment: String?
+    var pushBundleID: String?
+    var pushLocale: String?
+    var pushUpdatedAt: Date?
 }
 
 struct RemoteDeviceListResponse: Codable, Sendable {
@@ -628,11 +639,14 @@ final class CommandCenterStore: ObservableObject {
     @Published var isRefreshingRemoteHost = false
     @Published var pendingAttachments: [CommandAttachment] = []
     @Published var attachmentMessage: String = ""
+    @Published var pushNotificationMessage: String = ""
+    @Published var requestedSection: AppSection?
     @Published var appLanguage: AppLanguage {
         didSet {
             UserDefaults.standard.set(appLanguage.rawValue, forKey: "appLanguage")
             guard isReadyForAutosave, oldValue != appLanguage else { return }
             persist()
+            syncPushTokenWithRemoteHost()
         }
     }
     @Published var sessionTitles: [String: String] {
@@ -661,6 +675,8 @@ final class CommandCenterStore: ObservableObject {
     private var workspaceRefreshTask: Task<Void, Never>?
     private var remoteStreamTasks: [UUID: Task<Void, Never>] = [:]
     private var remoteRunIDs: [String: String]
+    private var remoteNotificationToken: String?
+    private var remoteNotificationEnvironment: String?
 
     var selectedRun: CommandRun? {
         if let selectedRunID, let run = runs.first(where: { $0.id == selectedRunID }) {
@@ -897,6 +913,7 @@ final class CommandCenterStore: ObservableObject {
             name: name
         )
         persist()
+        syncPushTokenWithRemoteHost()
     }
 
     func pairRemoteHost(endpoint: String, pairingCode: String, deviceName: String) async throws {
@@ -911,6 +928,17 @@ final class CommandCenterStore: ObservableObject {
         remoteHost.isEnabled = false
         remoteHostHealth = nil
         persist()
+    }
+
+    func handleAppURL(_ url: URL) {
+        guard url.scheme == "veqral" else {
+            return
+        }
+        if url.host == "pair" {
+            handlePairingURL(url)
+            return
+        }
+        handleNotificationDeepLink(url: url)
     }
 
     func handlePairingURL(_ url: URL) {
@@ -935,6 +963,113 @@ final class CommandCenterStore: ObservableObject {
                 remoteHostMessage = "QR pairing failed: \(error.localizedDescription)"
             }
         }
+    }
+
+    func receiveRemoteNotificationToken(_ token: String, environment: String) {
+        remoteNotificationToken = token
+        remoteNotificationEnvironment = environment
+        pushNotificationMessage = L10n.tr("Push token ready.")
+        syncPushTokenWithRemoteHost()
+    }
+
+    func syncPushTokenWithRemoteHost() {
+        guard remoteHost.isEnabled,
+              remoteHost.isPaired,
+              let token = remoteNotificationToken?.nilIfBlank else {
+            return
+        }
+        let environment = remoteNotificationEnvironment ?? "development"
+        let configuration = remoteHost
+        let localeID = appLanguage.locale.identifier
+        Task { @MainActor in
+            do {
+                _ = try await RemoteHostClient(configuration: configuration).registerPushToken(
+                    deviceToken: token,
+                    environment: environment,
+                    bundleID: Bundle.main.bundleIdentifier ?? "dev.hiroyuki.veqral",
+                    locale: localeID
+                )
+                pushNotificationMessage = L10n.tr("Push notifications connected.")
+            } catch {
+                pushNotificationMessage = Self.remoteFailureMessage(error, context: "Push notifications")
+            }
+        }
+    }
+
+    func handlePushNotificationResponse(actionIdentifier: String, userInfo: [String: String]) async {
+        let remoteRunID = userInfo["veqral_run_id"]
+        let event = userInfo["veqral_event"]
+        let severity = userInfo["veqral_severity"]
+
+        if actionIdentifier == VeqralPushAction.approve || actionIdentifier == VeqralPushAction.reject {
+            guard severity != "high", let remoteRunID else {
+                focusPushTarget(remoteRunID: remoteRunID, event: event)
+                return
+            }
+            await handleLowRiskPushAction(actionIdentifier: actionIdentifier, remoteRunID: remoteRunID)
+            return
+        }
+
+        focusPushTarget(remoteRunID: remoteRunID, event: event)
+    }
+
+    private func handleNotificationDeepLink(url: URL) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        let values = Dictionary(uniqueKeysWithValues: components.queryItems?.compactMap { item in
+            item.value.map { (item.name, $0) }
+        } ?? [])
+        focusPushTarget(remoteRunID: values["remoteRunID"] ?? values["runID"], event: url.host)
+    }
+
+    private func handleLowRiskPushAction(actionIdentifier: String, remoteRunID: String) async {
+        guard remoteHost.isEnabled, remoteHost.isPaired else { return }
+        do {
+            let client = RemoteHostClient(configuration: remoteHost)
+            if actionIdentifier == VeqralPushAction.approve {
+                try await client.approve(remoteRunID: remoteRunID)
+                pushNotificationMessage = L10n.tr("Approved from notification.")
+            } else {
+                try await client.reject(remoteRunID: remoteRunID)
+                pushNotificationMessage = L10n.tr("Rejected from notification.")
+            }
+            updateLocalApprovalAfterPush(actionIdentifier: actionIdentifier, remoteRunID: remoteRunID)
+            refreshRemoteHostStatus()
+        } catch {
+            pushNotificationMessage = Self.remoteFailureMessage(error, context: "Notification action")
+            focusPushTarget(remoteRunID: remoteRunID, event: "approval")
+        }
+    }
+
+    private func updateLocalApprovalAfterPush(actionIdentifier: String, remoteRunID: String) {
+        guard let localID = localRunID(forRemoteRunID: remoteRunID) else { return }
+        if let approvalIndex = approvals.firstIndex(where: { $0.runID == localID && $0.status == .pending }) {
+            approvals[approvalIndex].status = actionIdentifier == VeqralPushAction.approve ? .approved : .rejected
+        }
+        if let runIndex = runs.firstIndex(where: { $0.id == localID }) {
+            runs[runIndex].status = actionIdentifier == VeqralPushAction.approve ? .running : .failed
+            runs[runIndex].progress = actionIdentifier == VeqralPushAction.approve ? 0.2 : 1
+            if actionIdentifier == VeqralPushAction.reject {
+                runs[runIndex].completedAt = Date()
+            }
+            let run = runs[runIndex]
+            if actionIdentifier == VeqralPushAction.approve {
+                startRemoteStream(localRun: run, remoteRunID: remoteRunID)
+            }
+        }
+        persist()
+    }
+
+    private func focusPushTarget(remoteRunID: String?, event: String?) {
+        if let remoteRunID, let localID = localRunID(forRemoteRunID: remoteRunID) {
+            selectedRunID = localID
+        } else if remoteHost.isPaired {
+            refreshRemoteHostStatus()
+        }
+        requestedSection = event == "approval" ? .approvals : .home
+    }
+
+    private func localRunID(forRemoteRunID remoteRunID: String) -> UUID? {
+        remoteRunIDs.first { $0.value == remoteRunID }.flatMap { UUID(uuidString: $0.key) }
     }
 
     func refreshRemoteHostStatus() {
@@ -1561,7 +1696,11 @@ final class CommandCenterStore: ObservableObject {
                 runs[index].provider = remoteRun.provider
                 runs[index].providerModel = remoteRun.model
                 if remoteRun.status == "waitingApproval", !approvals.contains(where: { $0.runID == localID && $0.status == .pending }) {
-                    insertRemoteApproval(for: runs[index], reason: remoteRun.approvalReason ?? "Remote approval required")
+                    insertRemoteApproval(
+                        for: runs[index],
+                        reason: remoteRun.approvalReason ?? "Remote approval required",
+                        severity: remoteRun.approvalSeverity
+                    )
                 }
                 await syncRemoteRunDetails(localRunID: localID, remoteRunID: remoteRun.id, client: client)
                 continue
@@ -1590,7 +1729,11 @@ final class CommandCenterStore: ObservableObject {
             runs.append(localRun)
             remoteRunIDs[localRun.id.uuidString] = remoteRun.id
             if remoteRun.status == "waitingApproval" {
-                insertRemoteApproval(for: localRun, reason: remoteRun.approvalReason ?? "Remote approval required")
+                insertRemoteApproval(
+                    for: localRun,
+                    reason: remoteRun.approvalReason ?? "Remote approval required",
+                    severity: remoteRun.approvalSeverity
+                )
             }
 
             do {
@@ -1660,7 +1803,8 @@ final class CommandCenterStore: ObservableObject {
             || path.hasSuffix(".gif")
     }
 
-    private func insertRemoteApproval(for run: CommandRun, reason: String) {
+    private func insertRemoteApproval(for run: CommandRun, reason: String, severity: String? = nil) {
+        let isHigh = severity != "low"
         approvals.insert(
             CommandApproval(
                 id: UUID(),
@@ -1668,8 +1812,8 @@ final class CommandCenterStore: ObservableObject {
                 title: run.title,
                 detail: reason,
                 command: run.command,
-                risk: "高",
-                tintName: "red",
+                risk: isHigh ? "高" : "中",
+                tintName: isHigh ? "red" : "amber",
                 status: .pending,
                 createdAt: Date()
             ),
@@ -1762,8 +1906,8 @@ final class CommandCenterStore: ObservableObject {
                             title: run.title,
                             detail: message,
                             command: run.command,
-                            risk: "高",
-                            tintName: "red",
+                            risk: response.approvalSeverity == "low" ? "中" : "高",
+                            tintName: response.approvalSeverity == "low" ? "amber" : "red",
                             status: .pending,
                             createdAt: Date()
                         ),
@@ -2915,6 +3059,23 @@ struct RemoteHostClient: Sendable {
         ])
         let data = try await request(path: "/v1/github/draft-pr", method: "POST", body: bodyData)
         return try JSONDecoder.commandCenter.decode(RemoteDraftPRResponse.self, from: data)
+    }
+
+    func registerPushToken(deviceToken: String, environment: String, bundleID: String, locale: String) async throws -> RemotePushTokenResponse {
+        struct Body: Encodable {
+            var deviceToken: String
+            var environment: String
+            var bundleID: String
+            var locale: String
+        }
+        let body = try JSONEncoder.commandCenter.encode(Body(
+            deviceToken: deviceToken,
+            environment: environment,
+            bundleID: bundleID,
+            locale: locale
+        ))
+        let data = try await request(path: "/v1/push/token", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemotePushTokenResponse.self, from: data)
     }
 
     func memoryList() async throws -> RemoteMemoryListResponse {

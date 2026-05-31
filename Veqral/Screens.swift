@@ -291,6 +291,7 @@ struct DevicesView: View {
                         KeyValueLine(key: "Tailscale", value: store.remoteHostHealth?.tailscaleIP ?? (store.workspace.tailscaleIP.isEmpty ? "Not verified" : store.workspace.tailscaleIP))
                         KeyValueLine(key: "Host", value: store.remoteHostHealth?.host ?? "Not connected")
                         KeyValueLine(key: "Hermes", value: store.remoteHostHealth?.hermesVersion ?? "Not checked")
+                        KeyValueLine(key: "Push", value: store.pushNotificationMessage.isEmpty ? L10n.tr("Not registered") : store.pushNotificationMessage)
                         KeyValueLine(key: "Execution", value: store.remoteHost.isEnabled ? "iPhone/iPad -> Tailscale -> Mac Host -> Hermes" : "Pair a Mac Host before running on iPhone/iPad")
 
                         RemoteConnectionField(title: "Endpoint", placeholder: store.workspace.macHostEndpoint, text: $remoteEndpoint)
@@ -423,6 +424,9 @@ struct DevicesView: View {
                                     Text("Last seen \(dateLabel(device.lastSeenAt))")
                                         .font(.caption)
                                         .foregroundStyle(VQTheme.secondaryText)
+                                    Text(device.pushUpdatedAt == nil ? L10n.tr("Push not registered") : "Push \(device.pushEnvironment ?? L10n.tr("unknown")) / \(dateLabel(device.pushUpdatedAt))")
+                                        .font(.caption)
+                                        .foregroundStyle(device.pushUpdatedAt == nil ? VQTheme.secondaryText : VQTheme.green)
                                     Text(device.id)
                                         .font(.caption2.monospaced())
                                         .foregroundStyle(VQTheme.secondaryText)
