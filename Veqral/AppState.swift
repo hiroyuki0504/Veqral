@@ -7,6 +7,8 @@ import UserNotifications
 
 enum CommandRuntime: String, Codable, CaseIterable, Identifiable {
     case hermesAgent
+    case codexDirect
+    case claudeDirect
     case localShell
 
     var id: String { rawValue }
@@ -14,6 +16,8 @@ enum CommandRuntime: String, Codable, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .hermesAgent: "Hermes Agent"
+        case .codexDirect: "Codex Direct"
+        case .claudeDirect: "Claude Direct"
         case .localShell: "Local Shell"
         }
     }
@@ -21,6 +25,8 @@ enum CommandRuntime: String, Codable, CaseIterable, Identifiable {
     var shortTitle: String {
         switch self {
         case .hermesAgent: "Hermes"
+        case .codexDirect: "Codex"
+        case .claudeDirect: "Claude"
         case .localShell: "Shell"
         }
     }
@@ -28,7 +34,37 @@ enum CommandRuntime: String, Codable, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .hermesAgent: "sparkles"
+        case .codexDirect: "curlybraces.square"
+        case .claudeDirect: "text.bubble"
         case .localShell: "terminal"
+        }
+    }
+
+    var remoteEngine: String {
+        switch self {
+        case .hermesAgent:
+            "hermes"
+        case .codexDirect:
+            "codex"
+        case .claudeDirect:
+            "claude"
+        case .localShell:
+            "shell"
+        }
+    }
+
+    var usesRemoteAgent: Bool {
+        self != .localShell
+    }
+
+    var contextModeDescription: String {
+        switch self {
+        case .hermesAgent:
+            "Unified Hermes project memory"
+        case .codexDirect, .claudeDirect:
+            "Siloed native tool history"
+        case .localShell:
+            "No agent memory"
         }
     }
 }
@@ -47,6 +83,11 @@ struct CommandRun: Identifiable, Codable, Equatable {
     var startedAt: Date
     var completedAt: Date?
     var workingDirectory: String
+    var resumeSessionID: String? = nil
+    var agentProjectID: String? = nil
+    var agentChatID: String? = nil
+    var provider: String? = nil
+    var providerModel: String? = nil
 
     var elapsedLabel: String {
         let end = completedAt ?? Date()
@@ -278,6 +319,12 @@ struct RemoteRunRecord: Codable, Identifiable, Equatable, Sendable {
     var exitCode: Int32?
     var pid: Int32?
     var approvalReason: String?
+    var engine: String?
+    var resumeSessionID: String?
+    var projectID: String?
+    var chatID: String?
+    var provider: String?
+    var model: String?
 }
 
 struct RemoteRunListResponse: Codable, Sendable {
@@ -410,6 +457,7 @@ enum RemoteHistoryTool: String, Codable, CaseIterable, Identifiable, Sendable {
 struct RemoteHistorySession: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var tool: RemoteHistoryTool
+    var resumeID: String?
     var project: String
     var projectPath: String
     var startedAt: Date?
@@ -443,6 +491,38 @@ struct RemoteHistoryDetailResponse: Codable, Sendable {
     var session: RemoteHistorySession
     var turns: [RemoteHistoryTurn]
     var truncated: Bool
+}
+
+struct AgentChatSpace: Codable, Identifiable, Equatable {
+    var id: String
+    var title: String
+    var sessionID: String?
+    var provider: String
+    var model: String
+    var createdAt: Date
+    var updatedAt: Date
+}
+
+struct AgentProjectSpace: Codable, Identifiable, Equatable {
+    var id: String
+    var name: String
+    var workingDirectory: String
+    var createdAt: Date
+    var chats: [AgentChatSpace]
+}
+
+struct HermesModelChoice: Codable, Equatable, Identifiable {
+    var id: String { provider.isEmpty ? model : "\(provider):\(model)" }
+    var provider: String
+    var model: String
+    var title: String
+
+    static let defaults: [HermesModelChoice] = [
+        HermesModelChoice(provider: "auto", model: "", title: "Hermes Auto"),
+        HermesModelChoice(provider: "anthropic", model: "claude-sonnet-4", title: "Claude Sonnet"),
+        HermesModelChoice(provider: "openai", model: "gpt-5", title: "GPT-5"),
+        HermesModelChoice(provider: "openai", model: "codex", title: "Codex")
+    ]
 }
 
 @MainActor
@@ -486,6 +566,36 @@ final class CommandCenterStore: ObservableObject {
     @Published var remoteHistoryTotal: Int = 0
     @Published var remoteHistoryMessage: String = ""
     @Published var isLoadingRemoteHistory = false
+    @Published var agentProjects: [AgentProjectSpace] = [] {
+        didSet {
+            guard isReadyForAutosave, oldValue != agentProjects else { return }
+            persist()
+        }
+    }
+    @Published var selectedAgentProjectID: String? {
+        didSet {
+            guard isReadyForAutosave, oldValue != selectedAgentProjectID else { return }
+            persist()
+        }
+    }
+    @Published var selectedAgentChatID: String? {
+        didSet {
+            guard isReadyForAutosave, oldValue != selectedAgentChatID else { return }
+            persist()
+        }
+    }
+    @Published var selectedHermesProvider: String = "auto" {
+        didSet {
+            guard isReadyForAutosave, oldValue != selectedHermesProvider else { return }
+            persist()
+        }
+    }
+    @Published var selectedHermesModel: String = "" {
+        didSet {
+            guard isReadyForAutosave, oldValue != selectedHermesModel else { return }
+            persist()
+        }
+    }
     @Published var isRefreshingRemoteHost = false
     @Published var pendingAttachments: [CommandAttachment] = []
     @Published var attachmentMessage: String = ""
@@ -494,6 +604,7 @@ final class CommandCenterStore: ObservableObject {
             guard isReadyForAutosave, oldValue != workingDirectory else { return }
             persist()
             scheduleWorkspaceRefresh()
+            ensureProjectWithoutChatCreation()
         }
     }
 
@@ -508,6 +619,23 @@ final class CommandCenterStore: ObservableObject {
             return run
         }
         return runs.first
+    }
+
+    var selectedAgentProject: AgentProjectSpace? {
+        guard let selectedAgentProjectID else { return agentProjects.first }
+        return agentProjects.first { $0.id == selectedAgentProjectID } ?? agentProjects.first
+    }
+
+    var selectedAgentChat: AgentChatSpace? {
+        guard let project = selectedAgentProject else { return nil }
+        guard let selectedAgentChatID else { return project.chats.first }
+        return project.chats.first { $0.id == selectedAgentChatID } ?? project.chats.first
+    }
+
+    var selectedHermesChoiceTitle: String {
+        HermesModelChoice.defaults.first {
+            $0.provider == selectedHermesProvider && $0.model == selectedHermesModel
+        }?.title ?? [selectedHermesProvider, selectedHermesModel].filter { !$0.isEmpty }.joined(separator: " / ")
     }
 
     var pairingPayload: String {
@@ -546,6 +674,11 @@ final class CommandCenterStore: ObservableObject {
             selectedRuntime = cleaned.selectedRuntime ?? selectedRuntime
             remoteHost = Self.hydrateRemoteHost(cleaned.remoteHost ?? .empty)
             remoteRunIDs = cleaned.remoteRunIDs ?? [:]
+            agentProjects = cleaned.agentProjects ?? []
+            selectedAgentProjectID = cleaned.selectedAgentProjectID
+            selectedAgentChatID = cleaned.selectedAgentChatID
+            selectedHermesProvider = cleaned.selectedHermesProvider ?? "auto"
+            selectedHermesModel = cleaned.selectedHermesModel ?? ""
             if cleaned.runs.count != snapshot.runs.count || cleaned.approvals.count != snapshot.approvals.count || cleaned.logs.count != snapshot.logs.count || cleaned.diffs.count != snapshot.diffs.count {
                 persist()
             }
@@ -559,9 +692,15 @@ final class CommandCenterStore: ObservableObject {
             selectedRuntime = empty.selectedRuntime ?? selectedRuntime
             remoteHost = empty.remoteHost ?? .empty
             remoteRunIDs = empty.remoteRunIDs ?? [:]
+            agentProjects = empty.agentProjects ?? []
+            selectedAgentProjectID = empty.selectedAgentProjectID
+            selectedAgentChatID = empty.selectedAgentChatID
+            selectedHermesProvider = empty.selectedHermesProvider ?? "auto"
+            selectedHermesModel = empty.selectedHermesModel ?? ""
             persist()
         }
         isReadyForAutosave = true
+        ensureAgentProjectForCurrentWorkspace()
         scheduleWorkspaceRefresh(delayNanoseconds: 0)
         requestNotificationPermission()
         reconnectRemoteRuns()
@@ -577,18 +716,33 @@ final class CommandCenterStore: ObservableObject {
         let trimmed = commandDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         commandDraft = ""
+        if selectedRuntime == .hermesAgent {
+            submitHermesProjectCommand(trimmed)
+            return
+        }
         submitCommand(trimmed)
     }
 
-    func submitCommand(_ command: String, runtime: CommandRuntime? = nil, attachments explicitAttachments: [CommandAttachment]? = nil) {
+    func submitCommand(
+        _ command: String,
+        runtime: CommandRuntime? = nil,
+        attachments explicitAttachments: [CommandAttachment]? = nil,
+        workingDirectory explicitWorkingDirectory: String? = nil,
+        resumeSessionID: String? = nil,
+        agentProjectID: String? = nil,
+        agentChatID: String? = nil,
+        provider: String? = nil,
+        providerModel: String? = nil
+    ) {
         let runtime = runtime ?? selectedRuntime
+        let runWorkingDirectory = explicitWorkingDirectory?.nilIfBlank ?? workingDirectory
         let attachments = explicitAttachments ?? pendingAttachments
         if explicitAttachments == nil {
             pendingAttachments = []
             attachmentMessage = ""
         }
         let remoteWillClassifyRisk = remoteHost.isEnabled && remoteHost.isPaired
-        let risky = remoteWillClassifyRisk ? nil : (runtime == .hermesAgent ? hermesRiskDescription(for: command) : riskDescription(for: command))
+        let risky = remoteWillClassifyRisk ? nil : (runtime.usesRemoteAgent ? hermesRiskDescription(for: command) : riskDescription(for: command))
         let run = CommandRun(
             id: UUID(),
             title: title(for: command),
@@ -596,13 +750,18 @@ final class CommandCenterStore: ObservableObject {
             runtime: runtime,
             phase: .implementation,
             status: risky == nil ? .running : .approval,
-            agent: runtime == .hermesAgent ? "Hermes" : "Local Mac",
+            agent: agentLabel(for: runtime),
             device: ProcessInfo.processInfo.hostName,
-            model: runtime.title,
+            model: providerModel?.nilIfBlank ?? provider?.nilIfBlank ?? runtime.title,
             progress: risky == nil ? 0.15 : 0.0,
             startedAt: Date(),
             completedAt: nil,
-            workingDirectory: workingDirectory
+            workingDirectory: runWorkingDirectory,
+            resumeSessionID: resumeSessionID,
+            agentProjectID: agentProjectID,
+            agentChatID: agentChatID,
+            provider: provider,
+            providerModel: providerModel
         )
         runs.insert(run, at: 0)
         selectedRunID = run.id
@@ -977,6 +1136,180 @@ final class CommandCenterStore: ObservableObject {
         }
     }
 
+    func selectRuntime(_ runtime: CommandRuntime) {
+        selectedRuntime = runtime
+    }
+
+    func selectHermesModel(_ choice: HermesModelChoice) {
+        selectedHermesProvider = choice.provider
+        selectedHermesModel = choice.model
+        if var chat = selectedAgentChat {
+            chat.provider = choice.provider
+            chat.model = choice.model
+            updateAgentChat(chat)
+        }
+    }
+
+    func ensureAgentProjectForCurrentWorkspace() {
+        let directory = workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSHomeDirectory() : workingDirectory
+        let expanded = NSString(string: directory).expandingTildeInPath
+        let id = Self.stableAgentProjectID(for: expanded)
+        if !agentProjects.contains(where: { $0.id == id }) {
+            agentProjects.insert(
+                AgentProjectSpace(
+                    id: id,
+                    name: URL(fileURLWithPath: expanded).lastPathComponent.nilIfBlank ?? "Project",
+                    workingDirectory: expanded,
+                    createdAt: Date(),
+                    chats: []
+                ),
+                at: 0
+            )
+        }
+        selectedAgentProjectID = selectedAgentProjectID ?? id
+        if selectedAgentProjectID == id, selectedAgentChatID == nil {
+            createHermesChat(title: "Chat \(agentProjectChatCount(projectID: id) + 1)", select: true)
+        }
+        persist()
+    }
+
+    func useCurrentWorkspaceForHermes() {
+        let directory = workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSHomeDirectory() : workingDirectory
+        let expanded = NSString(string: directory).expandingTildeInPath
+        let id = Self.stableAgentProjectID(for: expanded)
+        ensureProjectWithoutChatCreation()
+        selectedAgentProjectID = id
+        if agentProjects.first(where: { $0.id == id })?.chats.isEmpty != false {
+            createHermesChat(title: "Chat 1", select: true)
+        } else {
+            selectedAgentChatID = agentProjects.first(where: { $0.id == id })?.chats.first?.id
+        }
+        persist()
+    }
+
+    func selectAgentProject(_ project: AgentProjectSpace) {
+        selectedAgentProjectID = project.id
+        selectedAgentChatID = project.chats.first?.id
+    }
+
+    func createHermesChat(title: String? = nil, select: Bool = true) {
+        ensureProjectWithoutChatCreation()
+        guard let projectIndex = agentProjects.firstIndex(where: { $0.id == (selectedAgentProjectID ?? agentProjects.first?.id) }) else { return }
+        let count = agentProjects[projectIndex].chats.count + 1
+        let chat = AgentChatSpace(
+            id: UUID().uuidString,
+            title: title?.nilIfBlank ?? "Chat \(count)",
+            sessionID: nil,
+            provider: selectedHermesProvider,
+            model: selectedHermesModel,
+            createdAt: Date(),
+            updatedAt: Date()
+        )
+        agentProjects[projectIndex].chats.insert(chat, at: 0)
+        if select {
+            selectedAgentProjectID = agentProjects[projectIndex].id
+            selectedAgentChatID = chat.id
+        }
+        persist()
+    }
+
+    func selectAgentChat(_ chat: AgentChatSpace) {
+        selectedAgentChatID = chat.id
+        selectedHermesProvider = chat.provider
+        selectedHermesModel = chat.model
+    }
+
+    func submitHermesProjectCommand(_ command: String? = nil) {
+        ensureAgentProjectForCurrentWorkspace()
+        guard let project = selectedAgentProject else { return }
+        if selectedAgentChat == nil {
+            createHermesChat(select: true)
+        }
+        guard let chat = selectedAgentChat else { return }
+        let text = (command ?? commandDraft).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        if command == nil {
+            commandDraft = ""
+        }
+        submitCommand(
+            text,
+            runtime: .hermesAgent,
+            workingDirectory: project.workingDirectory,
+            resumeSessionID: chat.sessionID,
+            agentProjectID: project.id,
+            agentChatID: chat.id,
+            provider: chat.provider,
+            providerModel: chat.model
+        )
+    }
+
+    func continueHistorySession(_ session: RemoteHistorySession, command: String? = nil) {
+        let text = (command ?? commandDraft).trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = text.isEmpty ? "Continue this session from Veqral. Briefly orient me to the current state and wait for the next instruction." : text
+        if command == nil {
+            commandDraft = ""
+        }
+        let runtime: CommandRuntime = session.tool == .codex ? .codexDirect : .claudeDirect
+        submitCommand(
+            prompt,
+            runtime: runtime,
+            workingDirectory: session.projectPath.nilIfBlank ?? workingDirectory,
+            resumeSessionID: session.resumeID ?? session.id,
+            agentProjectID: nil,
+            agentChatID: nil,
+            provider: nil,
+            providerModel: session.model
+        )
+    }
+
+    private func updateAgentChat(_ chat: AgentChatSpace) {
+        guard let projectIndex = agentProjects.firstIndex(where: { project in
+            project.chats.contains(where: { $0.id == chat.id })
+        }),
+        let chatIndex = agentProjects[projectIndex].chats.firstIndex(where: { $0.id == chat.id }) else {
+            return
+        }
+        var updated = chat
+        updated.updatedAt = Date()
+        agentProjects[projectIndex].chats[chatIndex] = updated
+        persist()
+    }
+
+    private func updateAgentChatSession(chatID: String, sessionID: String) {
+        guard let projectIndex = agentProjects.firstIndex(where: { project in
+            project.chats.contains(where: { $0.id == chatID })
+        }),
+        let chatIndex = agentProjects[projectIndex].chats.firstIndex(where: { $0.id == chatID }) else {
+            return
+        }
+        agentProjects[projectIndex].chats[chatIndex].sessionID = sessionID
+        agentProjects[projectIndex].chats[chatIndex].updatedAt = Date()
+        persist()
+    }
+
+    private func ensureProjectWithoutChatCreation() {
+        let directory = workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSHomeDirectory() : workingDirectory
+        let expanded = NSString(string: directory).expandingTildeInPath
+        let id = Self.stableAgentProjectID(for: expanded)
+        if !agentProjects.contains(where: { $0.id == id }) {
+            agentProjects.insert(
+                AgentProjectSpace(
+                    id: id,
+                    name: URL(fileURLWithPath: expanded).lastPathComponent.nilIfBlank ?? "Project",
+                    workingDirectory: expanded,
+                    createdAt: Date(),
+                    chats: []
+                ),
+                at: 0
+            )
+        }
+        selectedAgentProjectID = selectedAgentProjectID ?? id
+    }
+
+    private func agentProjectChatCount(projectID: String) -> Int {
+        agentProjects.first { $0.id == projectID }?.chats.count ?? 0
+    }
+
     func approve(_ approval: CommandApproval) {
         guard let index = approvals.firstIndex(where: { $0.id == approval.id }) else { return }
         approvals[index].status = .approved
@@ -1098,7 +1431,13 @@ final class CommandCenterStore: ObservableObject {
                 runs[index].progress = Self.progress(for: remoteRun.status)
                 runs[index].completedAt = remoteRun.completedAt
                 runs[index].device = remoteHost.name.isEmpty ? remoteHost.endpoint : remoteHost.name
-                runs[index].model = "Hermes via Mac Host"
+                runs[index].runtime = Self.runtime(from: remoteRun.engine)
+                runs[index].model = "\(runs[index].runtimeOrDefault.shortTitle) via Mac Host"
+                runs[index].resumeSessionID = remoteRun.resumeSessionID ?? remoteRun.sessionID
+                runs[index].agentProjectID = remoteRun.projectID
+                runs[index].agentChatID = remoteRun.chatID
+                runs[index].provider = remoteRun.provider
+                runs[index].providerModel = remoteRun.model
                 if remoteRun.status == "waitingApproval", !approvals.contains(where: { $0.runID == localID && $0.status == .pending }) {
                     insertRemoteApproval(for: runs[index], reason: remoteRun.approvalReason ?? "Remote approval required")
                 }
@@ -1110,16 +1449,21 @@ final class CommandCenterStore: ObservableObject {
                 id: UUID(),
                 title: title(for: remoteRun.prompt),
                 command: remoteRun.prompt,
-                runtime: .hermesAgent,
+                runtime: Self.runtime(from: remoteRun.engine),
                 phase: .implementation,
                 status: Self.localStatus(from: remoteRun.status),
-                agent: "Hermes",
+                agent: agentLabel(for: Self.runtime(from: remoteRun.engine)),
                 device: remoteHost.name.isEmpty ? remoteHost.endpoint : remoteHost.name,
-                model: "Hermes via Mac Host",
+                model: "\(Self.runtime(from: remoteRun.engine).shortTitle) via Mac Host",
                 progress: Self.progress(for: remoteRun.status),
                 startedAt: remoteRun.startedAt,
                 completedAt: remoteRun.completedAt,
-                workingDirectory: remoteRun.workingDirectory
+                workingDirectory: remoteRun.workingDirectory,
+                resumeSessionID: remoteRun.resumeSessionID ?? remoteRun.sessionID,
+                agentProjectID: remoteRun.projectID,
+                agentChatID: remoteRun.chatID,
+                provider: remoteRun.provider,
+                providerModel: remoteRun.model
             )
             runs.append(localRun)
             remoteRunIDs[localRun.id.uuidString] = remoteRun.id
@@ -1206,6 +1550,13 @@ final class CommandCenterStore: ObservableObject {
                 switch run.runtimeOrDefault {
                 case .hermesAgent:
                     LocalCommandExecutor.runHermes(prompt: run.command, workingDirectory: run.workingDirectory)
+                case .codexDirect, .claudeDirect:
+                    LocalCommandResult(
+                        exitCode: 64,
+                        stdoutLines: [],
+                        stderrLines: ["Direct Codex/Claude runs are launched through the paired Mac Host so session history stays in the native CLI store."],
+                        diffEntries: []
+                    )
                 case .localShell:
                     LocalCommandExecutor.run(command: run.command, workingDirectory: run.workingDirectory)
                 }
@@ -1236,13 +1587,27 @@ final class CommandCenterStore: ObservableObject {
         let configuration = remoteHost
         Task {
             do {
-                let response = try await RemoteHostClient(configuration: configuration).createRun(prompt: run.command, workingDirectory: run.workingDirectory, attachments: attachments)
+                let response = try await RemoteHostClient(configuration: configuration).createRun(
+                    prompt: run.command,
+                    workingDirectory: run.workingDirectory,
+                    runtime: run.runtimeOrDefault,
+                    resumeSessionID: run.resumeSessionID,
+                    projectID: run.agentProjectID,
+                    chatID: run.agentChatID,
+                    provider: run.provider,
+                    model: run.providerModel,
+                    attachments: attachments
+                )
                 remoteRunIDs[run.id.uuidString] = response.runID
+                if let sessionID = response.sessionID ?? run.resumeSessionID, let chatID = run.agentChatID {
+                    updateAgentChatSession(chatID: chatID, sessionID: sessionID)
+                }
                 if let index = runs.firstIndex(where: { $0.id == run.id }) {
                     runs[index].status = response.approvalRequired == true || response.status == "waitingApproval" ? .approval : .running
                     runs[index].progress = response.approvalRequired == true || response.status == "waitingApproval" ? 0.0 : 0.20
                     runs[index].device = configuration.name.isEmpty ? configuration.endpoint : configuration.name
-                    runs[index].model = "Hermes via Mac Host"
+                    runs[index].model = "\(run.runtimeOrDefault.shortTitle) via Mac Host"
+                    runs[index].resumeSessionID = response.sessionID ?? run.resumeSessionID
                 }
                 appendLog(runID: run.id, stream: "ok", message: "Remote run \(response.runID) \(response.status)")
                 persist()
@@ -1313,6 +1678,9 @@ final class CommandCenterStore: ObservableObject {
                     appendLog(runID: run.id, stream: event.stream, message: event.message)
                     if let sessionID = event.sessionID {
                         appendLog(runID: run.id, stream: "session", message: "session_id: \(sessionID)")
+                        if let chatID = run.agentChatID {
+                            updateAgentChatSession(chatID: chatID, sessionID: sessionID)
+                        }
                     }
                     if event.kind == "complete" {
                         if let index = runs.firstIndex(where: { $0.id == run.id }) {
@@ -1423,6 +1791,19 @@ final class CommandCenterStore: ObservableObject {
         return String(command.prefix(49)) + "..."
     }
 
+    private func agentLabel(for runtime: CommandRuntime) -> String {
+        switch runtime {
+        case .hermesAgent:
+            "Hermes"
+        case .codexDirect:
+            "Codex"
+        case .claudeDirect:
+            "Claude"
+        case .localShell:
+            "Local Mac"
+        }
+    }
+
     private static func localStatus(from remoteStatus: String) -> RunStatus {
         switch remoteStatus {
         case "queued", "running":
@@ -1454,6 +1835,19 @@ final class CommandCenterStore: ObservableObject {
             1
         default:
             0.2
+        }
+    }
+
+    private static func runtime(from remoteEngine: String?) -> CommandRuntime {
+        switch remoteEngine {
+        case "codex":
+            .codexDirect
+        case "claude":
+            .claudeDirect
+        case "shell":
+            .localShell
+        default:
+            .hermesAgent
         }
     }
 
@@ -1605,7 +1999,7 @@ final class CommandCenterStore: ObservableObject {
         var persistedRemoteHost = remoteHost
         persistedRemoteHost.token = ""
         let snapshot = CommandCenterSnapshot(
-            schemaVersion: 2,
+            schemaVersion: 3,
             runs: runs,
             approvals: approvals,
             logs: logs,
@@ -1614,7 +2008,12 @@ final class CommandCenterStore: ObservableObject {
             selectedRuntime: selectedRuntime,
             remoteHost: persistedRemoteHost,
             remoteRunIDs: remoteRunIDs,
-            workingDirectory: workingDirectory
+            workingDirectory: workingDirectory,
+            agentProjects: agentProjects,
+            selectedAgentProjectID: selectedAgentProjectID,
+            selectedAgentChatID: selectedAgentChatID,
+            selectedHermesProvider: selectedHermesProvider,
+            selectedHermesModel: selectedHermesModel
         )
         do {
             let data = try JSONEncoder.commandCenter.encode(snapshot)
@@ -1640,14 +2039,19 @@ final class CommandCenterStore: ObservableObject {
             selectedRuntime: .hermesAgent,
             remoteHost: .empty,
             remoteRunIDs: [:],
-            workingDirectory: defaultWorkingDirectory
+            workingDirectory: defaultWorkingDirectory,
+            agentProjects: [],
+            selectedAgentProjectID: nil,
+            selectedAgentChatID: nil,
+            selectedHermesProvider: "auto",
+            selectedHermesModel: ""
         )
     }
 
     private static func productionCleanedSnapshot(_ snapshot: CommandCenterSnapshot) -> CommandCenterSnapshot {
         let removedRunIDs = Set(snapshot.runs.filter(isLegacySeedOrDiagnosticRun).map(\.id))
         var cleaned = snapshot
-        cleaned.schemaVersion = 2
+        cleaned.schemaVersion = 3
         cleaned.runs = snapshot.runs.filter { !removedRunIDs.contains($0.id) }
         cleaned.approvals = snapshot.approvals.filter { approval in
             if let runID = approval.runID, removedRunIDs.contains(runID) { return false }
@@ -1726,6 +2130,10 @@ final class CommandCenterStore: ObservableObject {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
+    private static func stableAgentProjectID(for path: String) -> String {
+        SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
     private static func hydrateRemoteHost(_ configuration: RemoteHostConfiguration) -> RemoteHostConfiguration {
         guard configuration.token.isEmpty,
               !configuration.deviceID.isEmpty,
@@ -1753,6 +2161,11 @@ private struct CommandCenterSnapshot: Codable {
     var remoteHost: RemoteHostConfiguration?
     var remoteRunIDs: [String: String]?
     var workingDirectory: String
+    var agentProjects: [AgentProjectSpace]?
+    var selectedAgentProjectID: String?
+    var selectedAgentChatID: String?
+    var selectedHermesProvider: String?
+    var selectedHermesModel: String?
 }
 
 struct LocalCommandResult: Sendable {
@@ -2228,15 +2641,37 @@ struct RemoteHostClient: Sendable {
         return try JSONDecoder.commandCenter.decode(RemoteHealthResponse.self, from: data)
     }
 
-    func createRun(prompt: String, workingDirectory: String, attachments: [CommandAttachment] = []) async throws -> RemoteCreateRunResponse {
+    func createRun(
+        prompt: String,
+        workingDirectory: String,
+        runtime: CommandRuntime,
+        resumeSessionID: String?,
+        projectID: String?,
+        chatID: String?,
+        provider: String?,
+        model: String?,
+        attachments: [CommandAttachment] = []
+    ) async throws -> RemoteCreateRunResponse {
         struct Body: Encodable {
             var prompt: String
             var workingDirectory: String
+            var engine: String?
+            var resumeSessionID: String?
+            var projectID: String?
+            var chatID: String?
+            var provider: String?
+            var model: String?
             var attachments: [RemoteRunAttachment]
         }
         let body = try JSONEncoder.commandCenter.encode(Body(
             prompt: prompt,
             workingDirectory: workingDirectory,
+            engine: runtime == .localShell ? nil : runtime.remoteEngine,
+            resumeSessionID: resumeSessionID,
+            projectID: projectID,
+            chatID: chatID,
+            provider: provider == "auto" ? nil : provider,
+            model: model?.nilIfBlank,
             attachments: attachments.map {
                 RemoteRunAttachment(id: $0.id, fileName: $0.fileName, mimeType: $0.mimeType, data: $0.data)
             }
@@ -2533,5 +2968,12 @@ private extension JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
+    }
+}
+
+private extension String {
+    var nilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

@@ -88,6 +88,23 @@ enum RunStatusWire: String, Codable, Sendable {
     case needsAttention
 }
 
+enum AgentEngine: String, Codable, Sendable, CaseIterable {
+    case hermes
+    case codex
+    case claude
+
+    var title: String {
+        switch self {
+        case .hermes:
+            "Hermes"
+        case .codex:
+            "Codex"
+        case .claude:
+            "Claude"
+        }
+    }
+}
+
 struct HostRun: Codable, Sendable, Identifiable {
     var id: String
     var prompt: String
@@ -99,6 +116,16 @@ struct HostRun: Codable, Sendable, Identifiable {
     var exitCode: Int32?
     var pid: Int32?
     var approvalReason: String?
+    var engine: AgentEngine?
+    var resumeSessionID: String?
+    var projectID: String?
+    var chatID: String?
+    var provider: String?
+    var model: String?
+
+    var engineOrDefault: AgentEngine {
+        engine ?? .hermes
+    }
 }
 
 struct HostLogEvent: Codable, Sendable {
@@ -240,7 +267,17 @@ actor HostState {
             && activeRuns < config.maxActiveRuns
     }
 
-    func createRun(prompt: String, workingDirectory: String, attachments: [RunAttachmentUpload] = []) throws -> HostRun {
+    func createRun(
+        prompt: String,
+        workingDirectory: String,
+        engine: AgentEngine = .hermes,
+        resumeSessionID: String? = nil,
+        projectID: String? = nil,
+        chatID: String? = nil,
+        provider: String? = nil,
+        model: String? = nil,
+        attachments: [RunAttachmentUpload] = []
+    ) throws -> HostRun {
         let directory = (workingDirectory.isEmpty ? config.defaultWorkingDirectory : workingDirectory).expandingTilde
         guard FileManager.default.fileExists(atPath: directory) else {
             throw HostError.badRequest("Working directory does not exist")
@@ -263,7 +300,13 @@ actor HostState {
             completedAt: nil,
             exitCode: nil,
             pid: nil,
-            approvalReason: approvalReason
+            approvalReason: approvalReason,
+            engine: engine,
+            resumeSessionID: resumeSessionID?.nilIfBlank,
+            projectID: projectID?.nilIfBlank,
+            chatID: chatID?.nilIfBlank,
+            provider: provider?.nilIfBlank,
+            model: model?.nilIfBlank
         )
         let savedAttachments = try AttachmentStore.save(attachments, runID: run.id)
         if !savedAttachments.isEmpty {
@@ -274,10 +317,10 @@ actor HostState {
         runs[run.id] = run
         persistRuns()
         if let approvalReason {
-            appendAudit("created approval run id=\(run.id) dir=\(directory) reason=\(approvalReason)")
+            appendAudit("created approval run id=\(run.id) engine=\(engine.rawValue) dir=\(directory) reason=\(approvalReason)")
             publish(HostLogEvent(runID: run.id, kind: .approval, stream: "approval", message: approvalReason, createdAt: Date()))
         } else {
-            appendAudit("created run id=\(run.id) dir=\(directory)")
+            appendAudit("created run id=\(run.id) engine=\(engine.rawValue) dir=\(directory)")
         }
         return run
     }
@@ -317,17 +360,17 @@ actor HostState {
     }
 
     func cancel(runID: String) {
+        guard var run = runs[runID] else { return }
+        guard ![RunStatusWire.complete, .failed, .cancelled].contains(run.status) else { return }
         if let pid = processes[runID] {
             kill(pid, SIGTERM)
             usleep(200_000)
             kill(pid, SIGKILL)
         }
-        if var run = runs[runID] {
-            run.status = .cancelled
-            run.completedAt = Date()
-            run.pid = nil
-            runs[runID] = run
-        }
+        run.status = .cancelled
+        run.completedAt = Date()
+        run.pid = nil
+        runs[runID] = run
         processes[runID] = nil
         persistRuns()
         appendAudit("cancelled run id=\(runID)")
@@ -481,7 +524,7 @@ final class HostServer: @unchecked Sendable {
     private let config: HostConfig
     private let state: HostState
     private let listener: NWListener
-    private let runner: HermesRunner
+    private let runner: AgentRunner
     private let memoryStore = HermesMemoryStore()
     private let historyStore = AgentHistoryStore()
     private let connectionLock = NSLock()
@@ -491,7 +534,7 @@ final class HostServer: @unchecked Sendable {
         self.config = config
         self.state = state
         self.listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: config.port)!)
-        self.runner = HermesRunner(state: state)
+        self.runner = AgentRunner(state: state)
     }
 
     func start() throws {
@@ -561,7 +604,7 @@ final class HostServer: @unchecked Sendable {
                     host: localHostName(),
                     tailscaleIP: tailscaleIP(),
                     port: config.port,
-                    hermesVersion: HermesRunner.hermesVersion()
+                    hermesVersion: AgentRunner.hermesVersion()
                 )
                 sendJSON(response, connection: connection)
                 return
@@ -694,7 +737,17 @@ final class HostServer: @unchecked Sendable {
 
             if request.path == "/v1/runs", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(CreateRunRequest.self, from: request.body)
-                let run = try await state.createRun(prompt: body.prompt, workingDirectory: body.workingDirectory, attachments: body.attachments ?? [])
+                let run = try await state.createRun(
+                    prompt: body.prompt,
+                    workingDirectory: body.workingDirectory,
+                    engine: body.engine ?? .hermes,
+                    resumeSessionID: body.resumeSessionID,
+                    projectID: body.projectID,
+                    chatID: body.chatID,
+                    provider: body.provider,
+                    model: body.model,
+                    attachments: body.attachments ?? []
+                )
                 sendJSON(
                     CreateRunResponse(
                         runID: run.id,
@@ -852,7 +905,7 @@ final class HostServer: @unchecked Sendable {
     }
 }
 
-final class HermesRunner {
+final class AgentRunner {
     private let state: HostState
 
     init(state: HostState) {
@@ -883,16 +936,82 @@ final class HermesRunner {
         return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Installed"
     }
 
+    static func codexPath() -> String? {
+        executablePath(
+            named: "codex",
+            candidates: [
+                "\(NSHomeDirectory())/.local/bin/codex",
+                "/opt/homebrew/bin/codex",
+                "/usr/local/bin/codex"
+            ]
+        )
+    }
+
+    static func claudePath() -> String? {
+        executablePath(
+            named: "claude",
+            candidates: [
+                "\(NSHomeDirectory())/.local/bin/claude",
+                "/opt/homebrew/bin/claude",
+                "/usr/local/bin/claude"
+            ]
+        )
+    }
+
+    private static func executablePath(named name: String, candidates: [String]) -> String? {
+        if let candidate = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            return candidate
+        }
+        let output = ProcessRunner.run(
+            "/bin/zsh",
+            ["-lc", "PATH=\(shellQuoted("\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")) command -v \(shellQuoted(name))"],
+            timeout: 5
+        )
+        let discovered = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return FileManager.default.isExecutableFile(atPath: discovered) ? discovered : nil
+    }
+
     func start(runID: String) async {
         guard let run = await state.run(runID: runID) else { return }
-        guard let hermes = Self.hermesPath() else {
-            await state.appendLog(runID: runID, stream: "error", message: "Hermes is not installed")
+        guard let plan = executionPlan(for: run) else {
+            await state.appendLog(runID: runID, stream: "error", message: "\(run.engineOrDefault.title) CLI is not installed")
             await state.finish(runID: runID, exitCode: 127)
             return
         }
+        await state.appendLog(runID: runID, stream: "host", message: "Starting \(run.engineOrDefault.title) engine")
+        await PTYProcess.run(
+            executable: plan.executable,
+            arguments: plan.arguments,
+            workingDirectory: run.workingDirectory,
+            runID: runID,
+            state: state
+        )
+    }
+
+    private func executionPlan(for run: HostRun) -> (executable: String, arguments: [String])? {
+        switch run.engineOrDefault {
+        case .hermes:
+            guard let hermes = Self.hermesPath() else { return nil }
+            return (hermes, hermesArguments(for: run))
+        case .codex:
+            guard let codex = Self.codexPath() else { return nil }
+            return (codex, codexArguments(for: run))
+        case .claude:
+            guard let claude = Self.claudePath() else { return nil }
+            return (claude, claudeArguments(for: run))
+        }
+    }
+
+    private func hermesArguments(for run: HostRun) -> [String] {
+        let source = "veqral-\(safeTag(run.projectID ?? projectName(for: run.workingDirectory)))"
+        let modelLine = [run.provider, run.model].compactMap { $0?.nilIfBlank }.joined(separator: " / ")
         let prompt = """
         You are Hermes Agent running under Veqral Mac Host.
         Use Codex CLI and other configured CLI tools through Hermes when useful.
+        Project scope: \(run.projectID ?? projectName(for: run.workingDirectory))
+        Chat: \(run.chatID ?? "new")
+        Model/provider selection: \(modelLine.isEmpty ? "Hermes configured default" : modelLine)
+        Use Hermes native persistent memory, skills, checkpoints, and session history. Do not create a separate shared memory store for Veqral.
         Follow Veqral's P0 policy:
         - Use --worktree for repository work.
         - Auto-run implementation, tests, commits, branch creation, non-main push, and draft PR creation when appropriate.
@@ -905,26 +1024,84 @@ final class HermesRunner {
         var args = [
             "chat",
             "-Q",
-            "--source", "veqral",
+            "--source", source,
             "--checkpoints",
             "--worktree",
             "--pass-session-id",
             "--toolsets", "terminal,file,skills,memory,browser",
             "--max-turns", "40"
         ]
-        if let sessionID = run.sessionID {
+        if let provider = run.provider?.nilIfBlank {
+            args.append(contentsOf: ["--provider", provider])
+        }
+        if let model = run.model?.nilIfBlank {
+            args.append(contentsOf: ["--model", model])
+        }
+        if let sessionID = run.resumeSessionID?.nilIfBlank ?? run.sessionID?.nilIfBlank {
             args.append(contentsOf: ["--resume", sessionID])
         }
         args.append(contentsOf: [
             "-q", prompt
         ])
-        await PTYProcess.run(
-            executable: hermes,
-            arguments: args,
-            workingDirectory: run.workingDirectory,
-            runID: runID,
-            state: state
-        )
+        return args
+    }
+
+    private func codexArguments(for run: HostRun) -> [String] {
+        let prompt = directPrompt(for: run, engineName: "Codex")
+        var args = [
+            "exec",
+            "--cd", run.workingDirectory,
+            "--sandbox", "workspace-write"
+        ]
+        if let model = run.model?.nilIfBlank {
+            args.append(contentsOf: ["--model", model])
+        }
+        if let resumeID = run.resumeSessionID?.nilIfBlank ?? run.sessionID?.nilIfBlank {
+            args.append(contentsOf: ["resume", resumeID, prompt])
+        } else {
+            args.append(prompt)
+        }
+        return args
+    }
+
+    private func claudeArguments(for run: HostRun) -> [String] {
+        let prompt = directPrompt(for: run, engineName: "Claude")
+        var args = [
+            "--print",
+            "--output-format", "stream-json",
+            "--permission-mode", "auto"
+        ]
+        if let model = run.model?.nilIfBlank {
+            args.append(contentsOf: ["--model", model])
+        }
+        if let resumeID = run.resumeSessionID?.nilIfBlank ?? run.sessionID?.nilIfBlank {
+            args.append(contentsOf: ["--resume", resumeID])
+        }
+        args.append(prompt)
+        return args
+    }
+
+    private func directPrompt(for run: HostRun, engineName: String) -> String {
+        """
+        You are \(engineName) running directly from Veqral Mac Host.
+        This is direct mode: use your own native session history and memory. Do not write to Hermes memory for this run.
+        Follow Veqral safety: stop and explain before deletion, main/force push, merge, production deploy, billing, secrets, tokens, .env, or Computer Use.
+
+        User request:
+        \(run.prompt)
+        """
+    }
+
+    private func projectName(for path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent.nilIfBlank ?? "project"
+    }
+
+    private func safeTag(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let scalars = value.lowercased().unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        return String(scalars).trimmingCharacters(in: CharacterSet(charactersIn: "-")).nilIfBlank ?? "project"
     }
 }
 
@@ -976,7 +1153,7 @@ enum PTYProcess {
         close(slave)
         slave = -1
         if status != 0 {
-            await state.appendLog(runID: runID, stream: "error", message: "Failed to spawn Hermes: \(status)")
+            await state.appendLog(runID: runID, stream: "error", message: "Failed to spawn process: \(status)")
             await state.finish(runID: runID, exitCode: 127)
             return
         }
@@ -2211,6 +2388,7 @@ struct HistorySessionDetailRequest: Codable {
 struct HistorySessionSummary: Codable, Identifiable {
     var id: String
     var tool: HistoryTool
+    var resumeID: String?
     var project: String
     var projectPath: String
     var startedAt: Date?
@@ -2610,6 +2788,7 @@ struct AgentHistoryStore {
         return HistorySessionSummary(
             id: Self.identifier(for: url),
             tool: tool,
+            resumeID: resumeIdentifier(for: url, tool: tool),
             project: projectName(from: projectPath, fallback: fallbackProject),
             projectPath: projectPath,
             startedAt: startedAt,
@@ -2620,6 +2799,22 @@ struct AgentHistoryStore {
             filePath: url.path,
             bytes: values?.fileSize ?? 0
         )
+    }
+
+    private func resumeIdentifier(for url: URL, tool: HistoryTool) -> String {
+        let stem = url.deletingPathExtension().lastPathComponent
+        switch tool {
+        case .claude:
+            return stem
+        case .codex:
+            if let range = stem.range(
+                of: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#,
+                options: .regularExpression
+            ) {
+                return String(stem[range])
+            }
+            return stem
+        }
     }
 
     private func turn(from object: [String: Any], tool: HistoryTool, fallbackID: String) -> HistoryTurn? {
@@ -3013,6 +3208,12 @@ struct PairResponse: Codable {
 struct CreateRunRequest: Codable {
     var prompt: String
     var workingDirectory: String
+    var engine: AgentEngine?
+    var resumeSessionID: String?
+    var projectID: String?
+    var chatID: String?
+    var provider: String?
+    var model: String?
     var attachments: [RunAttachmentUpload]?
 }
 
@@ -3179,7 +3380,9 @@ enum SessionParser {
     static func sessionID(from line: String) -> String? {
         let patterns = [
             #"session_id:\s*([A-Za-z0-9_\-]+)"#,
-            #"Session ID:\s*([A-Za-z0-9_\-]+)"#
+            #"Session ID:\s*([A-Za-z0-9_\-]+)"#,
+            #""session_id"\s*:\s*"([A-Za-z0-9_\-]+)""#,
+            #""sessionId"\s*:\s*"([A-Za-z0-9_\-]+)""#
         ]
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
@@ -3306,6 +3509,11 @@ private extension String {
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~:/")
         return addingPercentEncoding(withAllowedCharacters: allowed) ?? self
+    }
+
+    var nilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
