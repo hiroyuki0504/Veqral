@@ -18,6 +18,7 @@ struct RootView: View {
 }
 
 private struct CompactRootView: View {
+    @EnvironmentObject private var store: CommandCenterStore
     @State private var selectedTab: AppSection = .home
 
     var body: some View {
@@ -58,6 +59,11 @@ private struct CompactRootView: View {
         .tint(VQTheme.accent)
         .toolbarBackground(VQTheme.canvas, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
+        .onChange(of: store.requestedSection) { _, section in
+            guard let section else { return }
+            selectedTab = AppSection.primaryTabs.contains(section) ? section : .home
+            store.requestedSection = nil
+        }
     }
 }
 
@@ -115,6 +121,7 @@ private struct MoreView: View {
 }
 
 private struct RegularRootView: View {
+    @EnvironmentObject private var store: CommandCenterStore
     @State private var selectedSection: AppSection? = .home
 
     var body: some View {
@@ -150,6 +157,11 @@ private struct RegularRootView: View {
                 )
                 .ignoresSafeArea()
             }
+        }
+        .onChange(of: store.requestedSection) { _, section in
+            guard let section else { return }
+            selectedSection = section
+            store.requestedSection = nil
         }
     }
 }

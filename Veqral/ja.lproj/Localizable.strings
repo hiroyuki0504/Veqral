@@ -194,3 +194,14 @@
 "Veqral approval required" = "Veqral の承認が必要です";
 "Veqral run complete" = "Veqral Run が完了しました";
 "Veqral run failed" = "Veqral Run が失敗しました";
+"Push notifications are disabled." = "Push 通知が無効です。";
+"Push token ready." = "Push token を取得しました。";
+"Push notifications connected." = "Push 通知を Mac Host に登録しました。";
+"Approved from notification." = "通知から承認しました。";
+"Rejected from notification." = "通知から拒否しました。";
+"Push registration failed" = "Push 登録に失敗しました";
+"Notification action" = "通知アクション";
+"Push" = "Push";
+"Push not registered" = "Push 未登録";
+"Not registered" = "未登録";
+"unknown" = "不明";

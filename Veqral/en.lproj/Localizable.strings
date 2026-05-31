@@ -194,3 +194,14 @@
 "Veqral approval required" = "Veqral approval required";
 "Veqral run complete" = "Veqral run complete";
 "Veqral run failed" = "Veqral run failed";
+"Push notifications are disabled." = "Push notifications are disabled.";
+"Push token ready." = "Push token ready.";
+"Push notifications connected." = "Push notifications connected.";
+"Approved from notification." = "Approved from notification.";
+"Rejected from notification." = "Rejected from notification.";
+"Push registration failed" = "Push registration failed";
+"Notification action" = "Notification action";
+"Push" = "Push";
+"Push not registered" = "Push not registered";
+"Not registered" = "Not registered";
+"unknown" = "unknown";
