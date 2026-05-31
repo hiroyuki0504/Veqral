@@ -115,16 +115,11 @@
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2600;
 				LastUpgradeCheck = 2600;
-				TargetAttributes = {
-					A10000000000000000000040 = {
-						CreatedOnToolsVersion = 26.5;
-						SystemCapabilities = {
-							com.apple.Push = {
-								enabled = 1;
-							};
+					TargetAttributes = {
+						A10000000000000000000040 = {
+							CreatedOnToolsVersion = 26.5;
 						};
 					};
-				};
 			};
 			buildConfigurationList = A10000000000000000000080 /* Build configuration list for PBXProject "Veqral" */;
 			compatibilityVersion = "Xcode 15.0";
@@ -309,10 +304,8 @@
 		A10000000000000000000071 /* Debug */ = {
 			isa = XCBuildConfiguration;
 				buildSettings = {
-				APS_ENVIRONMENT = development;
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = Veqral/Veqral.entitlements;
-					CODE_SIGN_STYLE = Automatic;
+					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+						CODE_SIGN_STYLE = Automatic;
 					CURRENT_PROJECT_VERSION = 1;
 					DEVELOPMENT_TEAM = 7XR5GVNQYQ;
 					GENERATE_INFOPLIST_FILE = NO;
@@ -335,10 +328,8 @@
 		A10000000000000000000072 /* Release */ = {
 			isa = XCBuildConfiguration;
 				buildSettings = {
-				APS_ENVIRONMENT = production;
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = Veqral/Veqral.entitlements;
-					CODE_SIGN_STYLE = Automatic;
+					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+						CODE_SIGN_STYLE = Automatic;
 					CURRENT_PROJECT_VERSION = 1;
 					DEVELOPMENT_TEAM = 7XR5GVNQYQ;
 					GENERATE_INFOPLIST_FILE = NO;

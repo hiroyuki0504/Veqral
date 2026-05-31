@@ -9,6 +9,14 @@ enum VeqralPushAction {
     static let statusCategory = "VEQRAL_STATUS"
 }
 
+enum VeqralFeatureFlags {
+    static let pushNotificationsEnabled = false
+
+    static var pushUnavailableMessage: String {
+        L10n.tr("Push requires paid Apple Developer Program.")
+    }
+}
+
 @MainActor
 final class VeqralPushNotificationCenter: NSObject, UNUserNotificationCenterDelegate {
     static let shared = VeqralPushNotificationCenter()
@@ -18,12 +26,20 @@ final class VeqralPushNotificationCenter: NSObject, UNUserNotificationCenterDele
 
     func attach(store: CommandCenterStore) {
         self.store = store
+        guard VeqralFeatureFlags.pushNotificationsEnabled else {
+            store.pushNotificationMessage = VeqralFeatureFlags.pushUnavailableMessage
+            return
+        }
         if let cachedToken {
             store.receiveRemoteNotificationToken(cachedToken.token, environment: cachedToken.environment)
         }
     }
 
     func register() {
+        guard VeqralFeatureFlags.pushNotificationsEnabled else {
+            store?.pushNotificationMessage = VeqralFeatureFlags.pushUnavailableMessage
+            return
+        }
         #if targetEnvironment(macCatalyst)
         return
         #else
@@ -46,12 +62,14 @@ final class VeqralPushNotificationCenter: NSObject, UNUserNotificationCenterDele
     }
 
     func receiveToken(_ token: String) {
+        guard VeqralFeatureFlags.pushNotificationsEnabled else { return }
         let environment = Self.apnsEnvironment
         cachedToken = (token, environment)
         store?.receiveRemoteNotificationToken(token, environment: environment)
     }
 
     func receiveRegistrationError(_ error: Error) {
+        guard VeqralFeatureFlags.pushNotificationsEnabled else { return }
         store?.pushNotificationMessage = "\(L10n.tr("Push registration failed")): \(error.localizedDescription)"
     }
 

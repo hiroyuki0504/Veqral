@@ -79,7 +79,7 @@ struct PanelBackground: ViewModifier {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(VQTheme.hairline.opacity(0.92), lineWidth: 1)
             }
-            .shadow(color: .black.opacity(0.20), radius: 18, x: 0, y: 10)
+            .shadow(color: .black.opacity(0.14), radius: 10, x: 0, y: 6)
     }
 }
 
