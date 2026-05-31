@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @EnvironmentObject private var store: CommandCenterStore
 
     var body: some View {
         Group {
@@ -12,6 +13,7 @@ struct RootView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .environment(\.locale, store.appLanguage.locale)
     }
 }
 
@@ -50,7 +52,7 @@ private struct CompactRootView: View {
             NavigationStack {
                 MoreView()
             }
-            .tabItem { Label("More", systemImage: "ellipsis.circle") }
+            .tabItem { Label(L10n.tr("More"), systemImage: "ellipsis.circle") }
             .tag(AppSection.github)
         }
         .tint(VQTheme.accent)
@@ -60,9 +62,11 @@ private struct CompactRootView: View {
 }
 
 private struct MoreView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
     var body: some View {
         List {
-            Section("Command") {
+            Section(L10n.tr("Command")) {
                 ForEach(AppSection.commandGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
                     NavigationLink(value: section) {
                         Label(section.title, systemImage: section.symbol)
@@ -70,7 +74,7 @@ private struct MoreView: View {
                 }
             }
 
-            Section("Operations") {
+            Section(L10n.tr("Operations")) {
                 ForEach(AppSection.operationGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
                     NavigationLink(value: section) {
                         Label(section.title, systemImage: section.symbol)
@@ -78,12 +82,23 @@ private struct MoreView: View {
                 }
             }
 
-            Section("System") {
+            Section(L10n.tr("System")) {
                 ForEach(AppSection.systemGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
                     NavigationLink(value: section) {
                         Label(section.title, systemImage: section.symbol)
                     }
                 }
+            }
+
+            Section(L10n.tr("Settings")) {
+                Picker(L10n.tr("App Language"), selection: $store.appLanguage) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.title).tag(language)
+                    }
+                }
+                Text(L10n.tr("Japanese UI with English developer terms where useful."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Veqral")

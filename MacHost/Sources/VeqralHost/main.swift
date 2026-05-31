@@ -794,6 +794,11 @@ final class HostServer: @unchecked Sendable {
                 case ("GET", "artifacts"):
                     guard let run = await state.run(runID: runID) else { throw HostError.notFound("Run not found") }
                     sendJSON(ArtifactListResponse(artifacts: ArtifactScanner.artifacts(for: run)), connection: connection)
+                case ("POST", "artifact-content"):
+                    guard let run = await state.run(runID: runID) else { throw HostError.notFound("Run not found") }
+                    let body = try JSONDecoder.dates.decode(ArtifactContentRequest.self, from: request.body)
+                    let response = try ArtifactScanner.content(run: run, artifactID: body.artifactID)
+                    sendJSON(response, connection: connection)
                 case ("POST", "cancel"):
                     await state.cancel(runID: runID)
                     sendJSON(SimpleResponse(ok: true), connection: connection)
@@ -2073,8 +2078,22 @@ enum GitDiffInspector {
                       let deletions = Int(parts[1]) else {
                     return nil
                 }
-                return GitDiffEntry(path: parts[2], additions: additions, deletions: deletions)
+                let path = parts[2]
+                return GitDiffEntry(
+                    path: path,
+                    additions: additions,
+                    deletions: deletions,
+                    patch: patch(path: path, workingDirectory: workingDirectory)
+                )
             }
+    }
+
+    private static func patch(path: String, workingDirectory: String) -> String? {
+        let output = runGit("git diff -- \(shellQuoted(path))", workingDirectory: workingDirectory)
+        guard output.exitCode == 0 else { return nil }
+        let trimmed = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(40_000))
     }
 
     static func runGit(_ command: String, workingDirectory: String) -> ProcessOutput {
@@ -2087,6 +2106,8 @@ enum GitDiffInspector {
 }
 
 enum ArtifactScanner {
+    private static let maxInlineArtifactBytes = 12 * 1024 * 1024
+
     static func artifacts(for run: HostRun) -> [HostArtifact] {
         var artifacts = AttachmentStore.artifacts(runID: run.id)
         let root = URL(fileURLWithPath: run.workingDirectory.expandingTilde)
@@ -2117,6 +2138,35 @@ enum ArtifactScanner {
             ))
         }
         return artifacts.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }.prefix(50).map { $0 }
+    }
+
+    static func content(run: HostRun, artifactID: String) throws -> ArtifactContentResponse {
+        guard let artifact = artifacts(for: run).first(where: { $0.id == artifactID }) else {
+            throw HostError.notFound("Artifact not found")
+        }
+        let url = URL(fileURLWithPath: artifact.path)
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values.isRegularFile == true else {
+            throw HostError.notFound("Artifact is not a regular file")
+        }
+        if (values.fileSize ?? 0) > maxInlineArtifactBytes {
+            throw HostError.badRequest("Artifact is too large to preview inline")
+        }
+        let data = try Data(contentsOf: url)
+        return ArtifactContentResponse(artifactID: artifact.id, mimeType: mimeType(for: artifact), data: data)
+    }
+
+    private static func mimeType(for artifact: HostArtifact) -> String {
+        switch artifact.type.lowercased() {
+        case "png", "image/png":
+            "image/png"
+        case "jpg", "jpeg", "image/jpeg":
+            "image/jpeg"
+        case "gif", "image/gif":
+            "image/gif"
+        default:
+            "application/octet-stream"
+        }
     }
 }
 
@@ -3539,6 +3589,7 @@ struct GitDiffEntry: Codable {
     var path: String
     var additions: Int
     var deletions: Int
+    var patch: String?
 }
 
 struct GitDiffResponse: Codable {
@@ -3556,6 +3607,16 @@ struct HostArtifact: Codable, Identifiable {
 
 struct ArtifactListResponse: Codable {
     var artifacts: [HostArtifact]
+}
+
+struct ArtifactContentRequest: Codable {
+    var artifactID: String
+}
+
+struct ArtifactContentResponse: Codable {
+    var artifactID: String
+    var mimeType: String
+    var data: Data
 }
 
 struct GitHubStatusRequest: Codable {
