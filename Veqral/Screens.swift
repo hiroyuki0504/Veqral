@@ -341,6 +341,49 @@ struct DevicesView: View {
                     }
                 }
 
+                VQPanel("Run Agent on This Mac", systemImage: "switch.2") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Choose which native agent the paired Mac Host should spawn for the next command.")
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        ForEach([CommandRuntime.codexDirect, .claudeDirect, .hermesAgent]) { runtime in
+                            Button {
+                                store.selectRuntime(runtime)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: runtime.symbol)
+                                        .frame(width: 34, height: 34)
+                                        .foregroundStyle(store.selectedRuntime == runtime ? VQTheme.accent : VQTheme.secondaryText)
+                                        .background((store.selectedRuntime == runtime ? VQTheme.accent : VQTheme.steel).opacity(0.10))
+                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(runtime.title)
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(VQTheme.ink)
+                                        Text(runtime.contextModeDescription)
+                                            .font(.caption)
+                                            .foregroundStyle(VQTheme.secondaryText)
+                                    }
+                                    Spacer()
+                                    StatusPill(
+                                        title: store.selectedRuntime == runtime ? "Selected" : "Available",
+                                        tint: store.selectedRuntime == runtime ? VQTheme.green : VQTheme.steel
+                                    )
+                                }
+                                .padding(10)
+                                .background(store.selectedRuntime == runtime ? VQTheme.accent.opacity(0.08) : VQTheme.control.opacity(0.30))
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        KeyValueLine(key: "Direct mode", value: "Codex and Claude keep their own native history.")
+                        KeyValueLine(key: "Hermes mode", value: "Project chats share Hermes memory across model changes.")
+                    }
+                }
+
                 VQPanel("Paired Devices", systemImage: "iphone.gen3.radiowaves.left.and.right") {
                     VStack(alignment: .leading, spacing: 12) {
                         if store.remoteDevices.isEmpty {
@@ -504,6 +547,7 @@ struct DevicesView: View {
 
 struct ProjectsView: View {
     @EnvironmentObject private var store: CommandCenterStore
+    @State private var newChatTitle = ""
 
     var body: some View {
         ScreenScaffold(title: "Projects", systemImage: "folder") {
@@ -520,10 +564,129 @@ struct ProjectsView: View {
                     KeyValueLine(key: "Local path", value: store.workspace.workingDirectory)
                     KeyValueLine(key: "Git root", value: store.workspace.rootPath.isEmpty ? "Not detected" : store.workspace.rootPath)
                     KeyValueLine(key: "Branch", value: store.workspace.branchLabel)
-                    FlowLayout(items: ["Hermes Agent", "Local Shell", "Approvals", "Persisted Runs", "Git Diff"])
+                    FlowLayout(items: ["Hermes Project", "Codex Direct", "Claude Direct", "Approvals", "Git Diff"])
+                }
+            }
+
+            VQPanel("Hermes Projects", systemImage: "sparkles.rectangle.stack") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        StatusPill(title: "Unified memory", tint: VQTheme.green)
+                        StatusPill(title: store.selectedHermesChoiceTitle.isEmpty ? "Hermes Auto" : store.selectedHermesChoiceTitle, tint: VQTheme.accent)
+                        Spacer()
+                        Button {
+                            store.useCurrentWorkspaceForHermes()
+                        } label: {
+                            Label("Use Current Folder", systemImage: "folder.badge.plus")
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                    }
+                    .font(.footnote.weight(.semibold))
+
+                    if store.agentProjects.isEmpty {
+                        Text("Select a folder on Mac or use the current workspace to create the first Hermes project.")
+                            .font(.subheadline)
+                            .foregroundStyle(VQTheme.secondaryText)
+                    }
+
+                    ForEach(store.agentProjects) { project in
+                        Button {
+                            store.selectAgentProject(project)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text(project.name)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(VQTheme.ink)
+                                    Spacer()
+                                    StatusPill(
+                                        title: store.selectedAgentProject?.id == project.id ? "Selected" : "\(project.chats.count) chats",
+                                        tint: store.selectedAgentProject?.id == project.id ? VQTheme.green : VQTheme.steel
+                                    )
+                                }
+                                Text(project.workingDirectory)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(VQTheme.secondaryText)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .padding(10)
+                            .background(store.selectedAgentProject?.id == project.id ? VQTheme.accent.opacity(0.08) : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            VQPanel("Hermes Chats", systemImage: "bubble.left.and.text.bubble.right") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        TextField("New chat title", text: $newChatTitle)
+                            .textFieldStyle(.roundedBorder)
+                        Button {
+                            store.createHermesChat(title: newChatTitle)
+                            newChatTitle = ""
+                        } label: {
+                            Label("New Chat", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                    }
+
+                    if store.selectedAgentProject?.chats.isEmpty != false {
+                        Text("Create a chat to run Hermes inside the selected project. Separate chats can use different models while Hermes keeps project memory.")
+                            .font(.subheadline)
+                            .foregroundStyle(VQTheme.secondaryText)
+                    }
+
+                    ForEach(store.selectedAgentProject?.chats ?? []) { chat in
+                        Button {
+                            store.selectAgentChat(chat)
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "message.badge.waveform")
+                                    .foregroundStyle(store.selectedAgentChat?.id == chat.id ? VQTheme.accent : VQTheme.secondaryText)
+                                    .frame(width: 30)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(chat.title)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(VQTheme.ink)
+                                    Text(chat.sessionID ?? "New Hermes session")
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(VQTheme.secondaryText)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Spacer()
+                                StatusPill(title: chat.model.isEmpty ? chat.provider : chat.model, tint: VQTheme.accent)
+                            }
+                            .padding(10)
+                            .background(store.selectedAgentChat?.id == chat.id ? VQTheme.accent.opacity(0.08) : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    HStack {
+                        Button {
+                            store.submitHermesProjectCommand()
+                        } label: {
+                            Label("Send to Selected Chat", systemImage: "paperplane")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                        .disabled(store.commandDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Spacer()
+                        Text("Uses Command draft")
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.secondaryText)
+                    }
                 }
             }
         }
+        .onAppear(perform: store.ensureAgentProjectForCurrentWorkspace)
     }
 }
 
@@ -553,6 +716,20 @@ struct AgentsView: View {
                         KeyValueLine(key: "Model path", value: "Hermes -> configured CLI tools")
                         KeyValueLine(key: "Device", value: store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : store.workspace.deviceName)
                         FlowLayout(items: ["Terminal", "Files", "Memory", "Browser", "Approval gate"])
+                    }
+                }
+
+                VQPanel("Direct CLI Agents", systemImage: "rectangle.3.group.bubble.left") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Native sessions")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            StatusPill(title: store.remoteHost.isPaired ? "Host Ready" : "Needs Host", tint: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber)
+                        }
+                        KeyValueLine(key: "Codex", value: "~/.codex sessions, resumable from History")
+                        KeyValueLine(key: "Claude", value: "~/.claude sessions, resumable from History")
+                        FlowLayout(items: ["Siloed memory", "Read-only history", "PTY stream", "Cancel/resume"])
                     }
                 }
 
@@ -621,7 +798,7 @@ struct ModelAssignmentView: View {
                         VStack(alignment: .leading, spacing: 12) {
                             HStack(alignment: .top) {
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(runtime == .hermesAgent ? "Hermes Agent via configured CLI" : "Local shell")
+                                    Text(runtime.contextModeDescription)
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(VQTheme.ink)
                                     Text(runtime == store.selectedRuntime ? "Selected runtime" : "Available runtime")
@@ -633,19 +810,46 @@ struct ModelAssignmentView: View {
                             }
 
                             HStack(spacing: 8) {
-                                ModelTrait(label: "Execution", value: runtime == .hermesAgent ? "Remote" : "Local", tint: runtime == .hermesAgent ? VQTheme.accent : VQTheme.steel)
+                                ModelTrait(label: "Execution", value: runtime.usesRemoteAgent ? "Mac Host" : "Local", tint: runtime.usesRemoteAgent ? VQTheme.accent : VQTheme.steel)
                                 ModelTrait(label: "Approvals", value: "Host gated", tint: VQTheme.amber)
-                                ModelTrait(label: "Context", value: "Unified", tint: VQTheme.green)
+                                ModelTrait(label: "Context", value: runtime == .hermesAgent ? "Unified" : "Siloed", tint: runtime == .hermesAgent ? VQTheme.green : VQTheme.steel)
                             }
 
-                            Text(runtime == .hermesAgent ? "Uses Hermes memory, skills, and configured monthly CLI credentials on the paired Mac Host." : "Runs only where local command execution is available and keeps risky operations behind approval.")
+                            Text(runtimeDescription(runtime))
                                 .font(.caption)
                                 .foregroundStyle(VQTheme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
 
-                            FlowLayout(items: runtime == .hermesAgent ? ["Hermes", "Codex CLI", "Memory", "Skills", "PTY stream"] : ["Shell", "Git", "Build", "Diff"])
+                            FlowLayout(items: runtimeTraits(runtime))
                         }
                     }
+                }
+            }
+
+            VQPanel("Hermes Provider Routing", systemImage: "slider.horizontal.3") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Model", selection: Binding(
+                        get: { store.selectedHermesProvider + "|" + store.selectedHermesModel },
+                        set: { value in
+                            let parts = value.split(separator: "|", maxSplits: 1).map(String.init)
+                            let choice = HermesModelChoice.defaults.first { $0.provider == parts.first && $0.model == (parts.count > 1 ? parts[1] : "") }
+                            if let choice {
+                                store.selectHermesModel(choice)
+                            }
+                        }
+                    )) {
+                        ForEach(HermesModelChoice.defaults) { choice in
+                            Text(choice.title).tag(choice.provider + "|" + choice.model)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    KeyValueLine(key: "Provider", value: store.selectedHermesProvider)
+                    KeyValueLine(key: "Model", value: store.selectedHermesModel.isEmpty ? "Hermes default" : store.selectedHermesModel)
+                    Text("Only Hermes mode uses provider routing here. Codex and Claude direct modes keep their own CLI model/profile settings.")
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -668,6 +872,32 @@ struct ModelAssignmentView: View {
         if lower.contains("reviewer") { return "checkmark.seal" }
         if lower.contains("tester") { return "testtube.2" }
         return "magnifyingglass"
+    }
+
+    private func runtimeDescription(_ runtime: CommandRuntime) -> String {
+        switch runtime {
+        case .hermesAgent:
+            "Uses Hermes native memory, skills, checkpoints, and provider routing on the paired Mac Host."
+        case .codexDirect:
+            "Spawns Codex CLI directly and resumes Codex sessions from ~/.codex without going through Hermes."
+        case .claudeDirect:
+            "Spawns Claude Code directly and resumes Claude sessions from ~/.claude without going through Hermes."
+        case .localShell:
+            "Runs local shell commands only where local command execution is available."
+        }
+    }
+
+    private func runtimeTraits(_ runtime: CommandRuntime) -> [String] {
+        switch runtime {
+        case .hermesAgent:
+            ["Hermes memory", "Provider routing", "Skills", "Worktree", "PTY stream"]
+        case .codexDirect:
+            ["Codex CLI", "~/.codex", "Resume", "Siloed"]
+        case .claudeDirect:
+            ["Claude Code", "~/.claude", "Resume", "Siloed"]
+        case .localShell:
+            ["Shell", "Git", "Build", "Diff"]
+        }
     }
 }
 
@@ -1079,6 +1309,13 @@ struct HistoryView: View {
                                     .truncationMode(.middle)
                             }
                             Spacer()
+                            Button {
+                                store.continueHistorySession(session)
+                            } label: {
+                                Label("Continue", systemImage: "arrowshape.turn.up.right")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
                             StatusPill(title: "\(store.remoteHistoryTurns.count) turns", tint: VQTheme.accent)
                         }
 
