@@ -672,6 +672,12 @@ final class CommandCenterStore: ObservableObject {
 
     private let persistenceURL: URL
     private var isReadyForAutosave = false
+
+    var visibleRemoteDevices: [RemoteDeviceRecord] {
+        let currentDeviceID = remoteHost.deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !currentDeviceID.isEmpty else { return remoteDevices }
+        return remoteDevices.filter { $0.id != currentDeviceID }
+    }
     private var workspaceRefreshTask: Task<Void, Never>?
     private var remoteStreamTasks: [UUID: Task<Void, Never>] = [:]
     private var remoteRunIDs: [String: String]

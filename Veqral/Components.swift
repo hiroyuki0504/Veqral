@@ -401,6 +401,35 @@ struct StatusPill: View {
     }
 }
 
+struct ApprovalActionButtons: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let approval: CommandApproval
+    var compact = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button {
+                store.reject(approval)
+            } label: {
+                Label(L10n.tr("Reject"), systemImage: "xmark")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                store.approve(approval)
+            } label: {
+                Label(L10n.tr("Approve"), systemImage: "checkmark")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .buttonBorderShape(.roundedRectangle(radius: 8))
+        .controlSize(compact ? .small : .regular)
+        .font((compact ? Font.caption2 : Font.footnote).weight(.semibold))
+    }
+}
+
 struct MetricTile: View {
     let metric: CommandMetric
 

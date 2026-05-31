@@ -66,14 +66,14 @@ struct DashboardView: View {
 
                 VQPanel("Device Fleet", systemImage: "macbook.and.iphone", actionImage: "qrcode.viewfinder") {
                     VStack(alignment: .leading, spacing: 12) {
-                        if store.remoteDevices.isEmpty {
-                            Text(store.remoteHost.isPaired ? L10n.tr("No paired devices reported yet. Refresh the Host once it is reachable.") : L10n.tr("Pair a Mac Host to list trusted iPhone/iPad clients."))
+                        let devices = Array(store.visibleRemoteDevices.prefix(3))
+                        if devices.isEmpty {
+                            Text(store.remoteHost.isPaired ? L10n.tr("No other paired devices yet.") : L10n.tr("Pair a Mac Host to list trusted iPhone/iPad clients."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
-                        let devices = Array(store.remoteDevices.prefix(3))
                         ForEach(devices) { device in
-                            RemoteDeviceSummaryRow(device: device, isCurrent: device.id == store.remoteHost.deviceID)
+                            RemoteDeviceSummaryRow(device: device, isCurrent: false)
                             if device.id != devices.last?.id {
                                 EmptyDivider()
                             }
@@ -235,32 +235,6 @@ struct DevicesView: View {
     var body: some View {
         ScreenScaffold(title: "Devices", systemImage: "macbook.and.iphone") {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
-                VQPanel("This Device", systemImage: "laptopcomputer") {
-                    HStack(alignment: .top, spacing: 16) {
-                        Image(systemName: store.workspace.canRunLocalCommands ? "checkmark.seal" : "exclamationmark.triangle")
-                            .font(.system(size: 44, weight: .light))
-                            .frame(width: 92, height: 92)
-                            .foregroundStyle(store.workspace.canRunLocalCommands ? VQTheme.green : VQTheme.amber)
-                            .background((store.workspace.canRunLocalCommands ? VQTheme.green : VQTheme.amber).opacity(0.12))
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        VStack(alignment: .leading, spacing: 12) {
-                            KeyValueLine(key: "Device", value: VQDisplay.hostName(store))
-                            KeyValueLine(key: "Host", value: store.workspace.hostName)
-                            KeyValueLine(key: "Local shell", value: store.workspace.canRunLocalCommands ? L10n.tr("Available") : L10n.tr("Mac Host required"))
-                            KeyValueLine(key: "Hermes", value: store.workspace.hermesLabel)
-                            CompactKeyValueLine(key: "Workspace", value: store.workspace.workingDirectory, monospaced: true)
-                            HStack {
-                                Button(action: store.refreshWorkspace) {
-                                    Label(L10n.tr("Refresh"), systemImage: "arrow.clockwise")
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .buttonBorderShape(.roundedRectangle(radius: 8))
-                            }
-                            .font(.footnote.weight(.semibold))
-                        }
-                    }
-                }
-
                 VQPanel("Workspace", systemImage: "folder") {
                     VStack(alignment: .leading, spacing: 12) {
                         KeyValueLine(key: "Project", value: VQDisplay.workspaceName(store.workspace))
@@ -437,15 +411,16 @@ struct DevicesView: View {
 
                 VQPanel("Paired Devices", systemImage: "iphone.gen3.radiowaves.left.and.right") {
                     VStack(alignment: .leading, spacing: 12) {
-                        if store.remoteDevices.isEmpty {
-                            Text(store.remoteHost.isPaired ? L10n.tr("No paired devices reported yet. Refresh the Host once it is reachable.") : L10n.tr("Pair a Mac Host to list trusted iPhone/iPad clients."))
+                        let devices = store.visibleRemoteDevices
+                        if devices.isEmpty {
+                            Text(store.remoteHost.isPaired ? L10n.tr("No other paired devices yet.") : L10n.tr("Pair a Mac Host to list trusted iPhone/iPad clients."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
 
-                        ForEach(store.remoteDevices) { device in
+                        ForEach(devices) { device in
                             HStack(alignment: .center, spacing: 10) {
-                                Image(systemName: device.id == store.remoteHost.deviceID ? "iphone.gen3" : "rectangle.connected.to.line.below")
+                                Image(systemName: "rectangle.connected.to.line.below")
                                     .foregroundStyle(device.lastSeenAt == nil ? VQTheme.unavailable : VQTheme.green)
                                     .frame(width: 28)
                                 VStack(alignment: .leading, spacing: 3) {
@@ -467,12 +442,12 @@ struct DevicesView: View {
                                 Button(role: .destructive) {
                                     store.revokeRemoteDevice(device)
                                 } label: {
-                                    Label(device.id == store.remoteHost.deviceID ? L10n.tr("Unpair") : L10n.tr("Revoke"), systemImage: "xmark.circle")
+                                    Label(L10n.tr("Revoke"), systemImage: "xmark.circle")
                                 }
                                 .buttonStyle(.bordered)
                                 .buttonBorderShape(.roundedRectangle(radius: 8))
                             }
-                            if device.id != store.remoteDevices.last?.id {
+                            if device.id != devices.last?.id {
                                 EmptyDivider()
                             }
                         }
@@ -1003,18 +978,18 @@ struct AgentsView: View {
                     }
                 }
 
-                if store.remoteDevices.isEmpty {
+                if store.visibleRemoteDevices.isEmpty {
                     VQPanel("Paired Devices", systemImage: "iphone.gen3.radiowaves.left.and.right") {
-                        Text(store.remoteHost.isPaired ? L10n.tr("Refresh the Host to load paired devices.") : L10n.tr("Pair iPhone or iPad with Mac Host to show trusted devices."))
+                        Text(store.remoteHost.isPaired ? L10n.tr("No other paired devices yet.") : L10n.tr("Pair iPhone or iPad with Mac Host to show trusted devices."))
                             .font(.subheadline)
                             .foregroundStyle(VQTheme.secondaryText)
                     }
                 } else {
-                    ForEach(store.remoteDevices) { device in
+                    ForEach(store.visibleRemoteDevices) { device in
                         VQPanel(device.name, systemImage: "iphone.gen3") {
                             VStack(alignment: .leading, spacing: 10) {
                                 HStack {
-                                    Text(L10n.tr(device.id == store.remoteHost.deviceID ? "Current device" : "Trusted client"))
+                                    Text(L10n.tr("Trusted client"))
                                         .font(.subheadline.weight(.semibold))
                                     Spacer()
                                     StatusPill(title: device.lastSeenAt == nil ? "Paired" : "Seen", tint: device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green)
@@ -1259,7 +1234,6 @@ private struct ApprovalFastLane: View {
 }
 
 private struct CompactApprovalDecisionRow: View {
-    @EnvironmentObject private var store: CommandCenterStore
     let approval: CommandApproval
 
     var body: some View {
@@ -1280,16 +1254,8 @@ private struct CompactApprovalDecisionRow: View {
                     .lineLimit(2)
             }
             Spacer(minLength: 8)
-            Button(L10n.tr("Reject")) {
-                store.reject(approval)
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.roundedRectangle(radius: 8))
-            Button(L10n.tr("Approve")) {
-                store.approve(approval)
-            }
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.roundedRectangle(radius: 8))
+            ApprovalActionButtons(approval: approval)
+                .frame(minWidth: 190)
         }
         .font(.footnote.weight(.semibold))
     }
@@ -2091,7 +2057,6 @@ struct ApprovalsView: View {
 }
 
 private struct CommandApprovalQueueRow: View {
-    @EnvironmentObject private var store: CommandCenterStore
     let approval: CommandApproval
 
     var body: some View {
@@ -2121,16 +2086,8 @@ private struct CommandApprovalQueueRow: View {
             HStack {
                 StatusPill(title: approval.riskLabel, tint: approval.tint)
                 Spacer()
-                    Button(L10n.tr("Reject")) {
-                    store.reject(approval)
-                }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.roundedRectangle(radius: 8))
-                    Button(L10n.tr("Approve")) {
-                    store.approve(approval)
-                }
-                .buttonStyle(.borderedProminent)
-                .buttonBorderShape(.roundedRectangle(radius: 8))
+                ApprovalActionButtons(approval: approval)
+                    .frame(maxWidth: 260)
             }
             .font(.footnote.weight(.semibold))
         }
@@ -2347,12 +2304,12 @@ struct InspectorView: View {
 
                 VQPanel("Mac Fleet", systemImage: "desktopcomputer") {
                     VStack(alignment: .leading, spacing: 10) {
-                        if store.remoteDevices.isEmpty {
+                        if store.visibleRemoteDevices.isEmpty {
                             Text(L10n.tr("No paired devices loaded."))
                                 .font(.caption)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
-                        ForEach(store.remoteDevices.prefix(3)) { device in
+                        ForEach(store.visibleRemoteDevices.prefix(3)) { device in
                             HStack {
                                 Circle()
                                     .fill(device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green)

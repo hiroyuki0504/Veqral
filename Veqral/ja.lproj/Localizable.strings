@@ -287,6 +287,7 @@
 "Codex and Claude keep their own native history." = "Codex と Claude はそれぞれのネイティブ履歴を使います。";
 "Project chats share Hermes memory across model changes." = "プロジェクト内の Chat は、モデルを変えても Hermes 記憶を共有します。";
 "No paired devices reported yet. Refresh the Host once it is reachable." = "ペアリング済みデバイスはまだ報告されていません。Host 到達後に更新してください。";
+"No other paired devices yet." = "他のペアリング済みデバイスはまだありません。";
 "Pair a Mac Host to list trusted iPhone/iPad clients." = "信頼済み iPhone・iPad を表示するには Mac Host をペアリングしてください。";
 "Last seen" = "最終確認";
 "Never" = "未確認";
