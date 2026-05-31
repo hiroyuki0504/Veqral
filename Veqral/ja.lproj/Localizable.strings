@@ -29,7 +29,9 @@
 "Reject" = "拒否";
 "Continue" = "続ける";
 "Refresh" = "更新";
+"Refresh Mac Host" = "Mac Host を更新";
 "Refresh Host" = "Host を更新";
+"Open Devices" = "デバイスを開く";
 "Run" = "実行";
 "Run を開始" = "Run を開始";
 "New Chat" = "Chat 作成";

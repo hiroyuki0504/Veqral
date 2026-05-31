@@ -42,21 +42,23 @@ Device(Mac)
 ## 現状（重要）
 
 - `main` = `18b29b4`（PR #2〜#8 統合済み: P0 パイプライン + 実行時修正）
-- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き
+- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き ← `codex/pr1-core-fixes`
 - #9: Device→エージェント選択、Codex/Claude 直接、Hermes Project→Chat→model、History「Continue」resume。（更新耐性 adapter を同ブランチに足す指示済み → 入っているかブランチで確認）
 - #10: ワンタップ承認(一覧から)、Chat/セッション名前付け+フィルタ、画像 diff 3 モード+hunk 添付、swipe、日本語/English/System 切替（`Localizable.strings` 体系。`.xcstrings` 移行は未）
 - #11: APNs push（device build は free team では Push capability 非対応で停止 → #12 で外した）
 - #12: Push capability/entitlement を build から除去 + push を feature flag OFF（コードは温存）、Devices に QR スキャナ + 手動 fallback、全画面共通の接続ストリップ、UI を少し製品寄りに。free team で実機 build 成功
 - #13: Codex 用の引継ぎ `AGENTS.md` をリポジトリ直下に追加。
 - #14 (`codex/ui-japanese-polish`): UI/UX のみ。日本語一本化、Home の警告カード中立化、UUID/パス前面表示抑制、状態色整理、Projects/Devices/Approvals/More 配下の文言・余白・重複 UI を整理。Run/pairing/WebSocket/Hermes/履歴/承認の挙動変更なし。
+- `codex/pr1-core-fixes`: QR pairing URL に署名を追加（手動 code fallback は維持）、LaunchAgent 由来の Host 実行環境 PATH/HOME を補強、Mac Catalyst は常時 3 ペイン + 最小サイズ。実機指摘対応として、停止中 Run の近くにも承認ボタンを表示し、Devices は current deviceID と端末名一致の自分/旧自分レコードを非表示にする。iPhone 16 Pro Max はインストール+起動確認済み。iPad Pro 13-inch はインストール成功、起動は iPad 側の free team developer profile 信頼待ち。
 
 ## 未完了・次の手番
 
 1. 実機検証（最優先）
    - QR ペアリング（カメラで認識→connected）
    - Hermes の記憶継承。同 Project で Chat①(モデル A)に記憶→Chat②(モデル B)が継承（プロジェクトの心臓、まだ未検証）
-   - 使いやすさ機能
+   - 使いやすさ機能（承認ボタンは Approvals/Run detail/phone run row で見えること、Devices に自分自身が出ないこと）
    - UI 受け入れ確認: 日本語のみ、赤い 0 バッジなし、未ペアリング strip が細い、UUID/コンテナパスが主表示に出ない、Unavailable/Offline が緑でない
+   - iPad で `0504yamayama@gmail.com` の開発者プロファイルを信頼して起動確認（app install は成功済み）
 2. スタック統合：実機 OK 後、#9→#12 を main にまとめて取り込む（和集合・落とさず・壊さず・build & smoke 検証）
 3. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
 4. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）

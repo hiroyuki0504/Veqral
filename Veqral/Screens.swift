@@ -550,7 +550,7 @@ struct DevicesView: View {
         }
     }
 
-    private func pairRemoteHost() {
+    private func pairRemoteHost(pairingSignature: String? = nil) {
         isPairing = true
         remoteStatusMessage = L10n.tr("Pairing with Mac Host...")
         let endpoint = remoteEndpoint
@@ -558,7 +558,7 @@ struct DevicesView: View {
         let deviceName = remoteDeviceName.isEmpty ? ProcessInfo.processInfo.hostName : remoteDeviceName
         Task { @MainActor in
             do {
-                try await store.pairRemoteHost(endpoint: endpoint, pairingCode: code, deviceName: deviceName)
+                try await store.pairRemoteHost(endpoint: endpoint, pairingCode: code, pairingSignature: pairingSignature, deviceName: deviceName)
                 remotePairingCode = ""
                 remoteStatusMessage = L10n.tr("Paired. Future runs will launch through Mac Host.")
             } catch {
@@ -615,18 +615,22 @@ struct DevicesView: View {
             remoteStatusMessage = L10n.tr("Pairing QR was not recognized.")
             return
         }
-        let values = Dictionary(uniqueKeysWithValues: components.queryItems?.compactMap { item in
-            item.value.map { (item.name, $0) }
-        } ?? [])
+        var values: [String: String] = [:]
+        components.queryItems?.forEach { item in
+            if let value = item.value {
+                values[item.name] = value
+            }
+        }
         guard let endpoint = values["endpoint"], let code = values["code"] else {
             remoteStatusMessage = L10n.tr("Pairing URL is missing endpoint or code.")
             return
         }
+        let signature = values["signature"] ?? values["sig"]
         remoteEndpoint = endpoint
         remotePairingCode = code
         pairingURLInput = payload
         remoteStatusMessage = L10n.tr("QR recognized. Pairing...")
-        pairRemoteHost()
+        pairRemoteHost(pairingSignature: signature)
     }
 
     private var remoteOnline: Bool {
@@ -1325,6 +1329,10 @@ struct TerminalView: View {
                             .foregroundStyle(VQTheme.secondaryText)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                    }
+
+                    if let approval = store.pendingApproval(for: store.selectedRun?.id) {
+                        RunApprovalCallout(approval: approval)
                     }
 
                     VStack(alignment: .leading, spacing: 7) {

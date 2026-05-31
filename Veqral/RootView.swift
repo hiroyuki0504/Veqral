@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct RootView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -6,14 +9,78 @@ struct RootView: View {
 
     var body: some View {
         Group {
+            #if targetEnvironment(macCatalyst)
+            MacRootView()
+            #else
             if horizontalSizeClass == .compact {
                 CompactRootView()
             } else {
                 RegularRootView()
             }
+            #endif
         }
         .preferredColorScheme(.dark)
         .environment(\.locale, store.appLanguage.locale)
+        .onAppear {
+            CatalystWindowConfigurator.applyMinimumSize()
+        }
+    }
+}
+
+private enum CatalystWindowConfigurator {
+    @MainActor
+    static func applyMinimumSize() {
+        #if targetEnvironment(macCatalyst)
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .forEach { scene in
+                scene.sizeRestrictions?.minimumSize = CGSize(width: 1180, height: 720)
+            }
+        #endif
+    }
+}
+
+private struct MacRootView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    @State private var selectedSection: AppSection? = .home
+
+    var body: some View {
+        NavigationSplitView {
+            CommandCenterSidebar(selection: $selectedSection)
+                .frame(minWidth: 260, idealWidth: 286, maxWidth: 320)
+        } content: {
+            NavigationStack {
+                sectionDestination(selectedSection ?? .home)
+            }
+            .frame(minWidth: 620)
+        } detail: {
+            CommandCenterInspectorView(selection: $selectedSection)
+                .frame(minWidth: 300, idealWidth: 340, maxWidth: 380)
+        }
+        .navigationSplitViewStyle(.balanced)
+        .background(VQTheme.canvas.ignoresSafeArea())
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    store.refreshRemoteHostStatus()
+                } label: {
+                    Label(L10n.tr("Refresh"), systemImage: "arrow.clockwise")
+                }
+                .help(L10n.tr("Refresh Mac Host"))
+
+                Button {
+                    store.requestedSection = .devices
+                } label: {
+                    Label(L10n.tr("Pair Mac Host"), systemImage: "qrcode.viewfinder")
+                }
+                .help(L10n.tr("Open Devices"))
+            }
+        }
+        .onChange(of: store.requestedSection) { _, section in
+            guard let section else { return }
+            selectedSection = section
+            store.requestedSection = nil
+        }
     }
 }
 
