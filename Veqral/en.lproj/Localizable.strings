@@ -287,6 +287,7 @@
 "Codex and Claude keep their own native history." = "Codex and Claude keep their own native history.";
 "Project chats share Hermes memory across model changes." = "Project chats share Hermes memory across model changes.";
 "No paired devices reported yet. Refresh the Host once it is reachable." = "No paired devices reported yet. Refresh the Host once it is reachable.";
+"No other paired devices yet." = "No other paired devices yet.";
 "Pair a Mac Host to list trusted iPhone/iPad clients." = "Pair a Mac Host to list trusted iPhone/iPad clients.";
 "Last seen" = "Last seen";
 "Never" = "Never";

@@ -351,10 +351,24 @@ struct CommandCenterPhoneDashboard: View {
                     }
                 }
 
-                PhoneSectionHeader(title: L10n.tr("Devices"), count: nil, trailing: store.remoteHost.isPaired ? L10n.tr("Connected") : L10n.tr("Pair Mac Host"))
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                    PhoneDeviceCard(name: VQDisplay.hostName(store), detail: store.remoteHost.isPaired ? VQDisplay.endpoint(store.remoteHost) : L10n.tr("Not Paired"), status: store.remoteHost.isPaired ? .online : .offline)
-                    PhoneDeviceCard(name: VQDisplay.workspaceName(store.workspace), detail: VQDisplay.workspaceStatus(store.workspace), status: store.workspace.errorMessage == nil ? .online : .offline)
+                let visibleDevices = Array(store.visibleRemoteDevices.prefix(4))
+                PhoneSectionHeader(title: L10n.tr("Devices"), count: visibleDevices.count, trailing: store.remoteHost.isPaired ? L10n.tr("Connected") : L10n.tr("Pair Mac Host"))
+                if visibleDevices.isEmpty {
+                    PhoneEmptyState(
+                        symbol: "iphone.slash",
+                        text: store.remoteHost.isPaired ? L10n.tr("No other paired devices yet.") : L10n.tr("Pair a Mac Host to list trusted iPhone/iPad clients.")
+                    )
+                    .commandPanel()
+                } else {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                        ForEach(visibleDevices) { device in
+                            PhoneDeviceCard(
+                                name: device.name,
+                                detail: device.lastSeenAt == nil ? L10n.tr("Paired") : L10n.tr("Seen"),
+                                status: device.lastSeenAt == nil ? .offline : .online
+                            )
+                        }
+                    }
                 }
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
@@ -990,7 +1004,6 @@ private struct InspectorPanel<Content: View>: View {
 }
 
 private struct InspectorApprovalRow: View {
-    @EnvironmentObject private var store: CommandCenterStore
     let approval: CommandApproval
 
     private var tint: Color {
@@ -1010,19 +1023,7 @@ private struct InspectorApprovalRow: View {
                 }
                 Spacer()
             }
-            HStack {
-                Spacer()
-                Button(L10n.tr("Reject")) {
-                    store.reject(approval)
-                }
-                    .buttonStyle(CommandButtonStyle())
-                Button {
-                    store.approve(approval)
-                } label: {
-                    Label(L10n.tr("Approve"), systemImage: "checkmark")
-                }
-                .buttonStyle(CommandButtonStyle(tint: VQTheme.accent))
-            }
+            ApprovalActionButtons(approval: approval, compact: true)
         }
         .padding(9)
         .background(tint.opacity(0.08))
@@ -1300,7 +1301,6 @@ private struct CommandChip: View {
 }
 
 private struct CompactApprovalStrip: View {
-    @EnvironmentObject private var store: CommandCenterStore
     let approval: CommandApproval
 
     private var tint: Color {
@@ -1316,18 +1316,11 @@ private struct CompactApprovalStrip: View {
                     .font(.caption2)
             }
             Spacer()
-            VStack(spacing: 6) {
+            VStack(alignment: .trailing, spacing: 6) {
                 Text(approval.risk)
                     .font(.caption2.weight(.semibold))
-                HStack(spacing: 6) {
-                    Button(L10n.tr("Reject")) {
-                        store.reject(approval)
-                    }
-                    Button(L10n.tr("Approve")) {
-                        store.approve(approval)
-                    }
-                }
-                .font(.caption2.weight(.semibold))
+                ApprovalActionButtons(approval: approval, compact: true)
+                    .frame(minWidth: 150)
             }
         }
         .foregroundStyle(tint)
