@@ -1817,8 +1817,7 @@ enum AttachmentStore {
 enum GitHubInspector {
     static func status(workingDirectory: String) -> GitHubStatusResponse {
         let directory = workingDirectory.expandingTilde
-        let root = firstLine(shell("git rev-parse --show-toplevel", in: directory))
-        guard !root.isEmpty else {
+        guard let root = findGitRoot(startingAt: directory) else {
             return GitHubStatusResponse(
                 workingDirectory: directory,
                 gitRoot: "",
@@ -1833,13 +1832,24 @@ enum GitHubInspector {
                 error: "Not a Git repository"
             )
         }
-        let branch = firstLine(shell("git branch --show-current", in: root))
-        let remote = firstLine(shell("git remote get-url origin", in: root))
-        let status = shell("git status --porcelain", in: root)
-        let upstream = shell("git rev-list --left-right --count @{upstream}...HEAD 2>/dev/null", in: root)
-        let auth = shell("gh auth status -h github.com >/dev/null 2>&1 && echo yes || echo no", in: root)
-        let prJSON = shell("gh pr view --json url,state,statusCheckRollup 2>/dev/null || true", in: root)
+        let branch = firstLine(git("symbolic-ref --short HEAD 2>/dev/null || rev-parse --short HEAD 2>/dev/null", root: root, timeout: 2))
+        let remote = firstLine(git("remote get-url origin", root: root, timeout: 2))
+        let status = git("status --porcelain", root: root, timeout: 2)
+        let upstream = git("rev-list --left-right --count @{upstream}...HEAD 2>/dev/null", root: root, timeout: 2)
+        let auth = shell("gh auth status -h github.com >/dev/null 2>&1 && echo yes || echo no", timeout: 10)
+        let prJSON: ProcessOutput
+        if let slug = githubSlug(from: remote), !branch.isEmpty {
+            prJSON = shell("gh pr list --repo \(shellQuoted(slug)) --head \(shellQuoted(branch)) --json url,state,statusCheckRollup --limit 1 2>/dev/null || true", timeout: 10)
+        } else {
+            prJSON = ProcessOutput(exitCode: 0, stdout: "[]", stderr: "")
+        }
         let pr = parsePR(prJSON.stdout)
+        var errors: [String] = []
+        if branch.isEmpty { errors.append("git branch unavailable") }
+        if remote.isEmpty { errors.append("git remote unavailable") }
+        if status.exitCode != 0 {
+            errors.append(status.combinedTrimmed.isEmpty ? "git status unavailable (exit \(status.exitCode))" : status.combinedTrimmed)
+        }
         return GitHubStatusResponse(
             workingDirectory: directory,
             gitRoot: root,
@@ -1851,23 +1861,107 @@ enum GitHubInspector {
             pullRequestURL: pr.url,
             pullRequestState: pr.state,
             checksSummary: pr.checks,
-            error: status.exitCode == 0 ? nil : status.combinedTrimmed
+            error: errors.isEmpty ? nil : errors.joined(separator: "; ")
         )
     }
 
     static func createDraftPR(workingDirectory: String, title: String, body: String) throws -> CreateDraftPRResponse {
         let directory = workingDirectory.expandingTilde
+        guard let root = findGitRoot(startingAt: directory) else {
+            throw HostError.badRequest("Not a Git repository")
+        }
+        let branch = firstLine(git("symbolic-ref --short HEAD 2>/dev/null || rev-parse --short HEAD 2>/dev/null", root: root, timeout: 5))
+        let remote = firstLine(git("remote get-url origin", root: root, timeout: 5))
+        guard let slug = githubSlug(from: remote), !branch.isEmpty else {
+            throw HostError.badRequest("GitHub remote or branch not found")
+        }
         let titleArg = title.isEmpty ? "--fill" : "--title \(shellQuoted(title))"
         let bodyArg = body.isEmpty ? "" : "--body \(shellQuoted(body))"
-        let output = shell("gh pr create --draft \(titleArg) \(bodyArg)", in: directory, timeout: 60)
+        let output = shell("gh pr create --repo \(shellQuoted(slug)) --head \(shellQuoted(branch)) --draft \(titleArg) \(bodyArg)", timeout: 60)
         guard output.exitCode == 0 else {
             throw HostError.badRequest(Redactor.redact(output.combinedTrimmed))
         }
         return CreateDraftPRResponse(ok: true, url: firstLine(output))
     }
 
-    private static func shell(_ command: String, in directory: String, timeout: TimeInterval = 30) -> ProcessOutput {
-        ProcessRunner.run("/bin/zsh", ["-lc", "cd \(shellQuoted(directory)) && \(command)"], timeout: timeout)
+    private static func git(_ arguments: String, root: String, timeout: TimeInterval = 30) -> ProcessOutput {
+        let gitDir = gitDirectory(for: root)
+        return shell("\(gitCommand) --git-dir \(shellQuoted(gitDir)) --work-tree \(shellQuoted(root)) \(arguments)", timeout: timeout)
+    }
+
+    private static func shell(_ command: String, timeout: TimeInterval = 30) -> ProcessOutput {
+        ProcessRunner.run("/bin/zsh", ["-lc", command], timeout: timeout)
+    }
+
+    private static let gitCommand = "GIT_OPTIONAL_LOCKS=0 /usr/bin/git -c core.fsmonitor=false"
+
+    private static func findGitRoot(startingAt path: String) -> String? {
+        var isDirectory = ObjCBool(false)
+        var url = URL(fileURLWithPath: path)
+        if !FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) || !isDirectory.boolValue {
+            url.deleteLastPathComponent()
+        }
+        while true {
+            if FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path) {
+                return url.path
+            }
+            let parent = url.deletingLastPathComponent()
+            if parent.path == url.path { return nil }
+            url = parent
+        }
+    }
+
+    private static func gitDirectory(for root: String) -> String {
+        let dotGit = URL(fileURLWithPath: root).appendingPathComponent(".git")
+        var isDirectory = ObjCBool(false)
+        if FileManager.default.fileExists(atPath: dotGit.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return dotGit.path
+        }
+        if let content = try? String(contentsOf: dotGit, encoding: .utf8),
+           content.hasPrefix("gitdir:") {
+            let rawValue = content
+                .replacingOccurrences(of: "gitdir:", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if rawValue.hasPrefix("/") { return rawValue }
+            return URL(fileURLWithPath: root)
+                .appendingPathComponent(rawValue)
+                .standardizedFileURL
+                .path
+        }
+        return dotGit.path
+    }
+
+    private static func currentBranch(root: String) -> String {
+        let headURL = URL(fileURLWithPath: gitDirectory(for: root)).appendingPathComponent("HEAD")
+        guard let head = try? String(contentsOf: headURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+              !head.isEmpty else {
+            return ""
+        }
+        let prefix = "ref: refs/heads/"
+        if head.hasPrefix(prefix) {
+            return String(head.dropFirst(prefix.count))
+        }
+        return String(head.prefix(12))
+    }
+
+    private static func originRemote(root: String) -> String {
+        let configURL = URL(fileURLWithPath: gitDirectory(for: root)).appendingPathComponent("config")
+        guard let config = try? String(contentsOf: configURL, encoding: .utf8) else {
+            return ""
+        }
+        var inOrigin = false
+        for rawLine in config.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") {
+                inOrigin = line == "[remote \"origin\"]"
+                continue
+            }
+            if inOrigin, line.hasPrefix("url") {
+                let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                if parts.count == 2 { return parts[1] }
+            }
+        }
+        return ""
     }
 
     private static func firstLine(_ output: ProcessOutput) -> String {
@@ -1880,7 +1974,16 @@ enum GitHubInspector {
 
     private static func parsePR(_ text: String) -> (url: String, state: String, checks: String) {
         guard let data = text.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+              let json = try? JSONSerialization.jsonObject(with: data) else {
+            return ("", "Not opened", "No checks")
+        }
+        let object: [String: Any]
+        if let array = json as? [[String: Any]] {
+            guard let first = array.first else { return ("", "Not opened", "No checks") }
+            object = first
+        } else if let dictionary = json as? [String: Any] {
+            object = dictionary
+        } else {
             return ("", "Not opened", "No checks")
         }
         let url = object["url"] as? String ?? ""
@@ -1894,6 +1997,23 @@ enum GitHubInspector {
         if failed > 0 { return (url, state, "\(failed) failing") }
         if pending > 0 { return (url, state, "\(pending) pending") }
         return (url, state, "\(checks.count) passing")
+    }
+
+    private static func githubSlug(from remote: String) -> String? {
+        let trimmed = remote.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let path: String
+        if trimmed.hasPrefix("git@github.com:") {
+            path = String(trimmed.dropFirst("git@github.com:".count))
+        } else if let url = URL(string: trimmed), url.host?.lowercased() == "github.com" {
+            path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        } else {
+            return nil
+        }
+        let withoutSuffix = path.hasSuffix(".git") ? String(path.dropLast(4)) : path
+        let parts = withoutSuffix.split(separator: "/")
+        guard parts.count >= 2 else { return nil }
+        return "\(parts[0])/\(parts[1])"
     }
 }
 
@@ -2754,6 +2874,7 @@ enum ProcessRunner {
         let stdout = Pipe()
         let stderr = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
+        process.currentDirectoryURL = URL(fileURLWithPath: "/")
         process.arguments = arguments
         process.standardOutput = stdout
         process.standardError = stderr
