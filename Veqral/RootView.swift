@@ -233,65 +233,6 @@ private struct RegularRootView: View {
     }
 }
 
-private struct SidebarView: View {
-    @EnvironmentObject private var store: CommandCenterStore
-    @Binding var selection: AppSection?
-
-    var body: some View {
-        List(selection: $selection) {
-            Section(L10n.tr("Command")) {
-                ForEach(AppSection.commandGroup) { section in
-                    Label(section.title, systemImage: section.symbol)
-                        .tag(section)
-                }
-            }
-
-            Section(L10n.tr("Operations")) {
-                ForEach(AppSection.operationGroup) { section in
-                    Label(section.title, systemImage: section.symbol)
-                        .tag(section)
-                }
-            }
-
-            Section(L10n.tr("System")) {
-                ForEach(AppSection.systemGroup) { section in
-                    Label(section.title, systemImage: section.symbol)
-                        .tag(section)
-                }
-            }
-        }
-        .navigationTitle("Veqral")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                SpinningCommandNodeMark(size: 20)
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            VStack(alignment: .leading, spacing: 8) {
-                EmptyDivider()
-                HStack {
-                    Image(systemName: "bolt.horizontal.circle.fill")
-                        .foregroundStyle(VQTheme.green)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Mac Host")
-                            .font(.caption.weight(.semibold))
-                        Text(store.remoteHost.isPaired ? VQDisplay.endpoint(store.remoteHost) : L10n.tr("Pair Mac Host"))
-                            .font(.caption2)
-                            .foregroundStyle(VQTheme.secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer()
-                }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 10)
-            }
-            .background(.regularMaterial)
-        }
-    }
-}
-
 @MainActor
 @ViewBuilder
 private func sectionDestination(_ section: AppSection) -> some View {
