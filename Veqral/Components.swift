@@ -55,7 +55,7 @@ struct ScreenScaffold<Content: View>: View {
                 .ignoresSafeArea()
             }
         }
-        .navigationTitle(L10n.tr(title))
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -64,35 +64,36 @@ struct HostConnectionStrip: View {
     @EnvironmentObject private var store: CommandCenterStore
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: symbol)
-                .font(.caption.weight(.semibold))
-                .frame(width: 28, height: 28)
-                .foregroundStyle(tint)
-                .background(tint.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        if !store.remoteHost.isPaired {
+            HStack(spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 24, height: 24)
+                    .foregroundStyle(tint)
+                    .background(tint.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 2) {
                 Text(L10n.tr(title))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
+
                 Text(detail)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(VQTheme.secondaryText)
                     .lineLimit(1)
-                    .truncationMode(.middle)
-            }
+                    .truncationMode(.tail)
 
-            Spacer(minLength: 8)
-            StatusPill(title: status, tint: tint)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(VQTheme.elevated.opacity(0.72))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(tint.opacity(0.24), lineWidth: 1)
+                Spacer(minLength: 8)
+                StatusPill(title: status, tint: tint)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(VQTheme.elevated.opacity(0.72))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(tint.opacity(0.24), lineWidth: 1)
+            }
         }
     }
 
@@ -128,7 +129,70 @@ struct HostConnectionStrip: View {
     private var tint: Color {
         if isOnline { return VQTheme.green }
         if store.remoteHost.isEnabled && store.remoteHost.isPaired { return VQTheme.amber }
-        return VQTheme.accent
+        return VQTheme.amber
+    }
+}
+
+enum VQDisplay {
+    static func workspaceName(_ workspace: WorkspaceSnapshot) -> String {
+        humanName(workspace.projectName, fallbackPath: workspace.workingDirectory, fallback: L10n.tr("Workspace"))
+    }
+
+    static func projectName(_ project: AgentProjectSpace) -> String {
+        humanName(project.name, fallbackPath: project.workingDirectory, fallback: L10n.tr("Project"))
+    }
+
+    @MainActor
+    static func hostName(_ store: CommandCenterStore) -> String {
+        let candidate = store.remoteHost.name.nilIfBlank ?? store.workspace.hostName.nilIfBlank ?? store.workspace.deviceName
+        return humanName(candidate, fallbackPath: store.workspace.workingDirectory, fallback: "Mac Host")
+    }
+
+    static func endpoint(_ host: RemoteHostConfiguration) -> String {
+        host.endpoint.nilIfBlank ?? L10n.tr("Not Paired")
+    }
+
+    static func workspaceStatus(_ workspace: WorkspaceSnapshot) -> String {
+        let raw = workspace.statusSummary.nilIfBlank ?? (workspace.errorMessage == nil ? "Ready" : "Unavailable")
+        return L10n.tr(raw)
+    }
+
+    static func workspaceStatusTint(_ workspace: WorkspaceSnapshot) -> Color {
+        let status = workspace.statusSummary.lowercased()
+        if workspace.errorMessage != nil || status.contains("unavailable") || status.contains("not detected") {
+            return VQTheme.unavailable
+        }
+        if status.contains("refresh") || status.contains("check") || status.contains("pending") {
+            return VQTheme.amber
+        }
+        return workspace.changedFiles == 0 ? VQTheme.green : VQTheme.amber
+    }
+
+    static func pathTail(_ path: String, fallback: String = "Not detected") -> String {
+        let clean = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return L10n.tr(fallback) }
+        let name = URL(fileURLWithPath: clean).lastPathComponent
+        return name.isEmpty ? clean : name
+    }
+
+    private static func humanName(_ name: String, fallbackPath: String, fallback: String) -> String {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !clean.isEmpty, !looksOpaque(clean) {
+            return clean
+        }
+        let pathName = pathTail(fallbackPath, fallback: fallback)
+        return looksOpaque(pathName) ? fallback : pathName
+    }
+
+    private static func looksOpaque(_ value: String) -> Bool {
+        UUID(uuidString: value) != nil || value.contains("/private/var/mobile/Containers/")
+    }
+}
+
+private extension String {
+    var nilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -357,7 +421,7 @@ struct MetricTile: View {
                 Text(L10n.tr(metric.title))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
-                Text(metric.detail)
+                Text(L10n.tr(metric.detail))
                     .font(.footnote)
                     .foregroundStyle(VQTheme.secondaryText)
                     .lineLimit(1)
@@ -380,7 +444,7 @@ struct CommandComposer: View {
             HStack(spacing: 10) {
                 Image(systemName: "sparkle.magnifyingglass")
                     .foregroundStyle(VQTheme.accent)
-                TextField(L10n.tr("What should the agents do next?"), text: $store.commandDraft, axis: .vertical)
+                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...3)
                     .font(.body)
@@ -407,7 +471,7 @@ struct CommandComposer: View {
                 QuickCommandButton(title: L10n.tr("Status"), symbol: "checklist", command: "git status --short")
                 QuickCommandButton(title: L10n.tr("Diff"), symbol: "plus.forwardslash.minus", command: "git diff --stat")
                 QuickCommandButton(title: L10n.tr("Build"), symbol: "hammer", command: "xcodebuild -project Veqral.xcodeproj -scheme Veqral -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' CODE_SIGNING_ALLOWED=NO build")
-                QuickCommandButton(title: "Remote", symbol: "arrow.triangle.pull", command: "git remote -v")
+                QuickCommandButton(title: L10n.tr("Remote"), symbol: "arrow.triangle.pull", command: "git remote -v")
             }
 
             CommandAttachmentControls()
@@ -973,8 +1037,8 @@ struct RemoteDeviceSummaryRow: View {
         HStack(alignment: .center, spacing: 10) {
             Image(systemName: isCurrent ? "iphone.gen3" : "rectangle.connected.to.line.below")
                 .frame(width: 28, height: 28)
-                .foregroundStyle(device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green)
-                .background((device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green).opacity(0.12))
+                .foregroundStyle(device.lastSeenAt == nil ? VQTheme.unavailable : VQTheme.green)
+                .background((device.lastSeenAt == nil ? VQTheme.unavailable : VQTheme.green).opacity(0.12))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             VStack(alignment: .leading, spacing: 3) {
                 Text(device.name)
@@ -988,7 +1052,7 @@ struct RemoteDeviceSummaryRow: View {
                     .truncationMode(.middle)
             }
             Spacer()
-            StatusPill(title: device.lastSeenAt == nil ? "Paired" : "Seen", tint: device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green)
+            StatusPill(title: device.lastSeenAt == nil ? "Paired" : "Seen", tint: device.lastSeenAt == nil ? VQTheme.unavailable : VQTheme.green)
         }
         .padding(.vertical, 4)
     }
@@ -1018,10 +1082,10 @@ struct ContextPackageIndicator: View {
                     .background(VQTheme.green.opacity(0.12))
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
+                    Text(L10n.tr(title))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(VQTheme.ink)
-                    Text(subtitle)
+                    Text(L10n.tr(subtitle))
                         .font(.caption)
                         .foregroundStyle(VQTheme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1087,7 +1151,7 @@ struct FlowLayout: View {
     var body: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 82), spacing: 6)], alignment: .leading, spacing: 6) {
             ForEach(items, id: \.self) { item in
-                Text(item)
+                Text(L10n.tr(item))
                     .font(.caption2.weight(.medium))
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
@@ -1148,7 +1212,7 @@ struct ApprovalRow: View {
 
                 HStack(spacing: 8) {
                     StatusPill(title: "Review in Approvals", tint: VQTheme.accent)
-                    Text("Approve, reject, or follow up from the live approval queue.")
+                    Text(L10n.tr("Approve, reject, or follow up from the live approval queue."))
                         .font(.caption)
                         .foregroundStyle(VQTheme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1178,10 +1242,47 @@ struct KeyValueLine: View {
     }
 }
 
+struct CompactKeyValueLine: View {
+    let key: String
+    let value: String
+    var monospaced = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(L10n.tr(key))
+                .font(.caption)
+                .foregroundStyle(VQTheme.secondaryText)
+            Spacer(minLength: 16)
+            Text(value)
+                .font(monospaced ? .caption.monospaced().weight(.semibold) : .caption.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+    }
+}
+
 struct EmptyDivider: View {
     var body: some View {
         Rectangle()
             .fill(VQTheme.hairline)
             .frame(height: 1)
+    }
+}
+
+private extension CommandRuntime {
+    var commandPlaceholder: String {
+        switch self {
+        case .hermesAgent:
+            L10n.tr("Send instructions to Hermes...")
+        case .codexDirect:
+            L10n.tr("Send instructions to Codex...")
+        case .claudeDirect:
+            L10n.tr("Send instructions to Claude...")
+        case .localShell:
+            L10n.tr("Enter a shell command...")
+        }
     }
 }

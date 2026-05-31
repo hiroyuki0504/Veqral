@@ -32,7 +32,7 @@ enum AppLanguage: String, Codable, CaseIterable, Identifiable {
     var bundleLanguageCode: String {
         switch self {
         case .system:
-            Locale.autoupdatingCurrent.language.languageCode?.identifier == "ja" ? "ja" : "en"
+            "ja"
         case .japanese:
             "ja"
         case .english:

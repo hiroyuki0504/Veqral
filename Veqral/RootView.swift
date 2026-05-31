@@ -172,21 +172,21 @@ private struct SidebarView: View {
 
     var body: some View {
         List(selection: $selection) {
-            Section("Command") {
+            Section(L10n.tr("Command")) {
                 ForEach(AppSection.commandGroup) { section in
                     Label(section.title, systemImage: section.symbol)
                         .tag(section)
                 }
             }
 
-            Section("Operations") {
+            Section(L10n.tr("Operations")) {
                 ForEach(AppSection.operationGroup) { section in
                     Label(section.title, systemImage: section.symbol)
                         .tag(section)
                 }
             }
 
-            Section("System") {
+            Section(L10n.tr("System")) {
                 ForEach(AppSection.systemGroup) { section in
                     Label(section.title, systemImage: section.symbol)
                         .tag(section)
@@ -207,9 +207,9 @@ private struct SidebarView: View {
                     Image(systemName: "bolt.horizontal.circle.fill")
                         .foregroundStyle(VQTheme.green)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("Agent Host")
+                        Text("Mac Host")
                             .font(.caption.weight(.semibold))
-                        Text(store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : "Pair a Mac Host")
+                        Text(store.remoteHost.isPaired ? VQDisplay.endpoint(store.remoteHost) : L10n.tr("Pair Mac Host"))
                             .font(.caption2)
                             .foregroundStyle(VQTheme.secondaryText)
                             .lineLimit(1)
