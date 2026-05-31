@@ -472,39 +472,6 @@ struct RunApprovalCallout: View {
     }
 }
 
-struct MetricTile: View {
-    let metric: CommandMetric
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: metric.symbol)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(metric.tint)
-                Spacer()
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(metric.value)
-                    .font(.system(size: 34, weight: .semibold, design: .default))
-                    .foregroundStyle(VQTheme.ink)
-                    .minimumScaleFactor(0.75)
-                Text(L10n.tr(metric.title))
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(VQTheme.ink)
-                Text(L10n.tr(metric.detail))
-                    .font(.footnote)
-                    .foregroundStyle(VQTheme.secondaryText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .panelBackground()
-    }
-}
-
 struct CommandComposer: View {
     @EnvironmentObject private var store: CommandCenterStore
 
@@ -956,41 +923,6 @@ private extension View {
     }
 }
 
-struct RunRow: View {
-    let run: AgentRun
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: run.phaseSymbol)
-                    .frame(width: 28, height: 28)
-                    .foregroundStyle(run.status.tint)
-                    .background(run.status.tint.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(run.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(VQTheme.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("\(run.agent) · \(run.device) · \(run.model)")
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                }
-
-                Spacer()
-                StatusPill(title: run.status.title, tint: run.status.tint)
-            }
-
-            ProgressView(value: run.progress)
-                .tint(run.status.tint)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
 struct CommandRunListRow: View {
     let run: CommandRun
     var isSelected: Bool = false
@@ -1039,18 +971,6 @@ struct CommandRunListRow: View {
     }
 }
 
-extension AgentRun {
-    var phaseSymbol: String {
-        switch phase {
-        case .requirements: "checklist"
-        case .implementation: "hammer"
-        case .testing: "testtube.2"
-        case .github: "point.3.connected.trianglepath.dotted"
-        case .deploy: "paperplane"
-        }
-    }
-}
-
 extension CommandRun {
     var phaseSymbol: String {
         switch phase {
@@ -1060,43 +980,6 @@ extension CommandRun {
         case .github: "point.3.connected.trianglepath.dotted"
         case .deploy: "paperplane"
         }
-    }
-}
-
-struct DeviceRow: View {
-    let device: Device
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(device.name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(VQTheme.ink)
-                    Text("\(device.type) · \(device.hostName)")
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                }
-                Spacer()
-                StatusPill(title: device.status.title, tint: device.status.tint)
-            }
-
-            HStack {
-                Label(device.tailscaleIP, systemImage: "network")
-                Spacer()
-                if let battery = device.battery {
-                    Label(battery, systemImage: "battery.75percent")
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(VQTheme.secondaryText)
-
-            ProgressView(value: device.workload)
-                .tint(device.status.tint)
-
-            FlowLayout(items: device.capabilities)
-        }
-        .padding(.vertical, 4)
     }
 }
 
@@ -1234,64 +1117,6 @@ struct FlowLayout: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
         }
-    }
-}
-
-struct ApprovalRow: View {
-    let approval: ApprovalRequest
-    let compact: Bool
-
-    init(_ approval: ApprovalRequest, compact: Bool = false) {
-        self.approval = approval
-        self.compact = compact
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: approval.riskType.symbol)
-                    .frame(width: 28, height: 28)
-                    .foregroundStyle(VQTheme.amber)
-                    .background(VQTheme.amber.opacity(0.14))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(approval.summary)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(VQTheme.ink)
-                    Text(approval.reason)
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(approval.action)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(VQTheme.steel)
-                        .lineLimit(2)
-                }
-            }
-
-            if !compact {
-                HStack {
-                    StatusPill(title: approval.riskType.title, tint: VQTheme.amber)
-                    Text(approval.affectedTarget)
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
-                }
-
-                HStack(spacing: 8) {
-                    StatusPill(title: "Review in Approvals", tint: VQTheme.accent)
-                    Text(L10n.tr("Approve, reject, or follow up from the live approval queue."))
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .font(.footnote.weight(.semibold))
-            }
-        }
-        .padding(.vertical, 4)
     }
 }
 
