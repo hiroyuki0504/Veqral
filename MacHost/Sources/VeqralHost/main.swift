@@ -15,6 +15,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
     private let state = HostState()
 
     static func main() {
+        if CommandLine.arguments.dropFirst().first == "smoke-discord-notifications" {
+            DiscordNotificationSmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -57,6 +60,7 @@ struct HostConfig: Codable, Sendable {
     var portfolioRegistryPath: String?
     var portfolioEngagementRoots: [String] = []
     var portfolioCodeRoots: [String] = []
+    var discordWebhook: String?
     var portfolioDiscordWebhook: String?
 
     static var folder: URL {
@@ -111,10 +115,17 @@ struct HostConfig: Codable, Sendable {
             ?? portfolioCodeRoots
     }
 
-    var resolvedPortfolioDiscordWebhook: String? {
+    var resolvedDiscordWebhook: String? {
         ProcessInfo.processInfo.environment["VEQRAL_DISCORD_WEBHOOK"]?.nilIfBlank
+            ?? ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_DISCORD_WEBHOOK"]?.nilIfBlank
+            ?? KeychainStore.get(account: "discord:webhook")?.nilIfBlank
             ?? KeychainStore.get(account: "portfolio:discord-webhook")?.nilIfBlank
+            ?? discordWebhook?.nilIfBlank
             ?? portfolioDiscordWebhook?.nilIfBlank
+    }
+
+    var resolvedPortfolioDiscordWebhook: String? {
+        resolvedDiscordWebhook
     }
 
     private static func booleanValue(_ value: String?) -> Bool {
@@ -210,6 +221,291 @@ struct HostRun: Codable, Sendable, Identifiable {
 
     var engineOrDefault: AgentEngine {
         engine ?? .hermes
+    }
+}
+
+enum DiscordWebhookNotifier {
+    static func shouldNotify(event: PushEventType) -> Bool {
+        switch event {
+        case .approval, .complete, .failed:
+            true
+        case .question:
+            false
+        }
+    }
+
+    static func sendRun(config: HostConfig, run: HostRun, event: PushEventType, message: String, severity: ApprovalSeverity) async {
+        guard let webhook = config.resolvedDiscordWebhook else { return }
+        await sendRun(webhook: webhook, run: run, event: event, message: message, severity: severity)
+    }
+
+    static func sendRun(webhook: String, run: HostRun, event: PushEventType, message: String, severity: ApprovalSeverity) async {
+        guard shouldNotify(event: event) else { return }
+        let title = title(for: event)
+        let prompt = firstLine(Redactor.redact(run.prompt), fallback: "指示なし")
+        let directoryName = URL(fileURLWithPath: run.workingDirectory.expandingTilde).lastPathComponent.nilIfBlank ?? "作業場所未設定"
+        let severityLabel = severity == .high ? "高" : "通常"
+        let runID = String(run.id.prefix(8))
+        let details = Redactor.redact(message).nilIfBlank ?? "詳細なし"
+        let content = """
+        \(title)
+        指示: \(clipped(prompt, limit: 180))
+        エージェント: \(run.engineOrDefault.title)
+        作業場所: \(clipped(directoryName, limit: 80))
+        重要度: \(severityLabel)
+        Run: \(runID)
+        \(clipped(details, limit: 600))
+        """
+        await send(webhook: webhook, content: content)
+    }
+
+    static func send(config: HostConfig, content: String) async {
+        guard let webhook = config.resolvedDiscordWebhook else { return }
+        await send(webhook: webhook, content: content)
+    }
+
+    static func send(webhook: String, content: String) async {
+        guard let url = URL(string: webhook) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try? JSONEncoder().encode(["content": clipped(Redactor.redact(content), limit: 1_800)])
+        _ = try? await URLSession.shared.data(for: request)
+    }
+
+    private static func title(for event: PushEventType) -> String {
+        switch event {
+        case .approval:
+            "Veqral 承認待ち"
+        case .complete:
+            "Veqral Run 完了"
+        case .failed:
+            "Veqral Run 失敗"
+        case .question:
+            "Veqral 確認"
+        }
+    }
+
+    private static func firstLine(_ value: String, fallback: String) -> String {
+        value
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+            ?? fallback
+    }
+
+    private static func clipped(_ value: String, limit: Int) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit)) + "\n[truncated]"
+    }
+}
+
+enum DiscordNotificationSmoke {
+    static func runAndExit() -> Never {
+        Task.detached {
+            do {
+                try await run()
+                Foundation.exit(0)
+            } catch {
+                print("FAIL: Discord notification smoke failed: \(error.localizedDescription)")
+                Foundation.exit(1)
+            }
+        }
+        dispatchMain()
+    }
+
+    private static func run() async throws {
+        let receiver = try LocalWebhookReceiver()
+        let webhookURL = try receiver.start()
+        let bearerSample = "Author" + "ization: bearer veqraltestsecret"
+        let tokenSample = "tok" + "en=token-should-hide"
+        let passwordSample = "pass" + "word=password-should-hide"
+
+        let run = HostRun(
+            id: UUID().uuidString,
+            prompt: "\(bearerSample)\n余白を詰めて",
+            workingDirectory: "/Users/hiroyuki/Documents/Veqral",
+            sessionID: nil,
+            status: .waitingApproval,
+            startedAt: Date(),
+            completedAt: nil,
+            exitCode: nil,
+            pid: nil,
+            approvalReason: tokenSample,
+            engine: .codex,
+            resumeSessionID: nil,
+            projectID: nil,
+            chatID: nil,
+            provider: nil,
+            model: nil,
+            approvalSeverity: .high
+        )
+
+        await DiscordWebhookNotifier.sendRun(webhook: webhookURL.absoluteString, run: run, event: .approval, message: tokenSample, severity: .high)
+
+        var completedRun = run
+        completedRun.status = .complete
+        completedRun.exitCode = 0
+        await DiscordWebhookNotifier.sendRun(webhook: webhookURL.absoluteString, run: completedRun, event: .complete, message: "Run complete", severity: .low)
+
+        var failedRun = run
+        failedRun.status = .failed
+        failedRun.exitCode = 2
+        await DiscordWebhookNotifier.sendRun(webhook: webhookURL.absoluteString, run: failedRun, event: .failed, message: "Run failed with exit code 2", severity: .low)
+
+        await DiscordWebhookNotifier.send(webhook: webhookURL.absoluteString, content: "司令塔: Smoke Asset が停止しました。 \(passwordSample)")
+
+        let payloads = try receiver.waitForPayloads(count: 4, timeout: 5)
+        let contents = try payloads.map(contentField(from:))
+        let joined = contents.joined(separator: "\n")
+        try require(joined.contains("Veqral 承認待ち"), "承認待ち通知が届いていません。")
+        try require(joined.contains("Veqral Run 完了"), "Run 完了通知が届いていません。")
+        try require(joined.contains("Veqral Run 失敗"), "Run 失敗通知が届いていません。")
+        try require(joined.contains("司令塔: Smoke Asset が停止しました。"), "司令塔 down 通知が届いていません。")
+        try require(!joined.contains("veqraltestsecret"), "Authorization bearer が redaction されていません。")
+        try require(!joined.contains("token-should-hide"), "token が redaction されていません。")
+        try require(!joined.contains("password-should-hide"), "password が redaction されていません。")
+        print("PASS: Discord notification smoke received \(payloads.count) redacted payloads.")
+    }
+
+    private static func contentField(from payload: String) throws -> String {
+        guard let data = payload.data(using: .utf8),
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let content = object["content"] as? String else {
+            throw SmokeError("Discord payload JSON を読めませんでした。")
+        }
+        return content
+    }
+
+    private static func require(_ condition: Bool, _ message: String) throws {
+        if !condition {
+            throw SmokeError(message)
+        }
+    }
+}
+
+final class LocalWebhookReceiver: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "dev.hiroyuki.veqral.discord-smoke")
+    private let lock = NSLock()
+    private var receivedPayloads: [String] = []
+    private var ready = false
+
+    init() throws {
+        self.listener = try NWListener(using: .tcp, on: 0)
+    }
+
+    func start() throws -> URL {
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handle(connection: connection, buffer: Data())
+        }
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            if case .ready = state {
+                self.lock.lock()
+                self.ready = true
+                self.lock.unlock()
+            }
+        }
+        listener.start(queue: queue)
+        let deadline = Date().addingTimeInterval(5)
+        while (!isReady() || listener.port == nil || listener.port?.rawValue == 0) && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        guard let port = listener.port,
+              let url = URL(string: "http://127.0.0.1:\(port.rawValue)/discord") else {
+            throw SmokeError("ローカル Discord 受信口を開始できませんでした。")
+        }
+        return url
+    }
+
+    func waitForPayloads(count: Int, timeout: TimeInterval) throws -> [String] {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let snapshot = payloads()
+            if snapshot.count >= count {
+                listener.cancel()
+                return snapshot
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        let snapshot = payloads()
+        listener.cancel()
+        throw SmokeError("Discord payload が \(snapshot.count)/\(count) 件しか届きませんでした。")
+    }
+
+    private func handle(connection: NWConnection, buffer: Data) {
+        connection.start(queue: queue)
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self, weak connection] data, _, isComplete, error in
+            guard let self, let connection else { return }
+            var next = buffer
+            if let data {
+                next.append(data)
+            }
+            if let body = Self.body(from: next) {
+                self.append(payload: body)
+                let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
+                return
+            }
+            if isComplete || error != nil {
+                connection.cancel()
+                return
+            }
+            self.handle(connection: connection, buffer: next)
+        }
+    }
+
+    private func append(payload: String) {
+        lock.lock()
+        receivedPayloads.append(payload)
+        lock.unlock()
+    }
+
+    private func payloads() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return receivedPayloads
+    }
+
+    private func isReady() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ready
+    }
+
+    private static func body(from request: Data) -> String? {
+        let separator = Data("\r\n\r\n".utf8)
+        guard let headerEnd = request.range(of: separator) else { return nil }
+        let headerData = request[..<headerEnd.lowerBound]
+        guard let header = String(data: headerData, encoding: .utf8) else { return nil }
+        let contentLength = header
+            .split(separator: "\r\n")
+            .first { $0.lowercased().hasPrefix("content-length:") }?
+            .split(separator: ":", maxSplits: 1)
+            .last
+            .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            ?? 0
+        let bodyStart = headerEnd.upperBound
+        let bodyData = request[bodyStart...]
+        guard bodyData.count >= contentLength else { return nil }
+        return String(data: bodyData.prefix(contentLength), encoding: .utf8)
+    }
+}
+
+struct SmokeError: LocalizedError {
+    var message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var errorDescription: String? {
+        message
     }
 }
 
@@ -582,12 +878,18 @@ actor HostState {
     }
 
     private func notifyDevices(run: HostRun, event: PushEventType, message: String, severity: ApprovalSeverity) {
+        let redactedMessage = Redactor.redact(message)
+        let config = config
+        if DiscordWebhookNotifier.shouldNotify(event: event) {
+            Task.detached {
+                await DiscordWebhookNotifier.sendRun(config: config, run: run, event: event, message: redactedMessage, severity: severity)
+            }
+        }
         guard config.resolvedPushNotificationsEnabled else { return }
         let recipients = devices.filter { $0.pushToken?.nilIfBlank != nil }
         guard !recipients.isEmpty else { return }
-        let config = config
         Task.detached {
-            await APNsPushService.send(run: run, event: event, message: Redactor.redact(message), severity: severity, devices: recipients, config: config)
+            await APNsPushService.send(run: run, event: event, message: redactedMessage, severity: severity, devices: recipients, config: config)
         }
     }
 
@@ -3125,25 +3427,15 @@ final class PortfolioMonitor: @unchecked Sendable {
     }
 
     private func tick() async {
-        guard config.resolvedPortfolioDiscordWebhook != nil else { return }
+        guard config.resolvedDiscordWebhook != nil else { return }
         guard let assets = try? store.list() else { return }
         for asset in assets {
             guard let status = try? store.status(id: asset.id).status else { continue }
             if lastStatuses[asset.id] == .running, status == .stopped {
-                await sendDiscord("\(asset.name) が停止しました。")
+                await DiscordWebhookNotifier.send(config: config, content: "司令塔: \(asset.name) が停止しました。")
             }
             lastStatuses[asset.id] = status
         }
-    }
-
-    private func sendDiscord(_ content: String) async {
-        guard let webhook = config.resolvedPortfolioDiscordWebhook,
-              let url = URL(string: webhook) else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try? JSONEncoder().encode(["content": Redactor.redact(content)])
-        _ = try? await URLSession.shared.data(for: request)
     }
 }
 
