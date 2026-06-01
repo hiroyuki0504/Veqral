@@ -280,6 +280,32 @@ struct RemoteHostLogEvent: Codable, Sendable {
     var exitCode: Int32?
 }
 
+enum RemoteStreamPhase: String, Equatable {
+    case idle
+    case connecting
+    case connected
+    case reconnecting
+    case disconnected
+}
+
+struct RemoteStreamStatus: Equatable {
+    var phase: RemoteStreamPhase
+    var runID: UUID?
+    var runTitle: String
+    var detail: String
+    var attempt: Int
+    var nextRetrySeconds: Int?
+
+    static let idle = RemoteStreamStatus(
+        phase: .idle,
+        runID: nil,
+        runTitle: "",
+        detail: "",
+        attempt: 0,
+        nextRetrySeconds: nil
+    )
+}
+
 struct RemoteCreateRunResponse: Codable, Sendable {
     var runID: String
     var sessionID: String?
@@ -362,6 +388,13 @@ struct RemoteRunListResponse: Codable, Sendable {
 
 struct RemoteRunLogResponse: Codable, Sendable {
     var logs: [RemoteHostLogEvent]
+}
+
+struct RemoteRunSnapshotResponse: Codable, Sendable {
+    var run: RemoteRunRecord
+    var logs: [RemoteHostLogEvent]
+    var diff: [RemoteGitDiffEntry]
+    var artifacts: [RemoteArtifactRecord]
 }
 
 struct RemoteGitDiffEntry: Codable, Equatable, Sendable {
@@ -770,6 +803,7 @@ final class CommandCenterStore: ObservableObject {
     @Published var isLoadingRemoteMemory = false
     @Published var remoteHostMessage: String = ""
     @Published var remoteHostHealth: RemoteHealthResponse?
+    @Published var remoteStreamStatus: RemoteStreamStatus = .idle
     @Published var remoteDevices: [RemoteDeviceRecord] = []
     @Published var remoteAuditLines: [String] = []
     @Published var remoteGitHubStatus: RemoteGitHubStatus = .empty
@@ -876,6 +910,7 @@ final class CommandCenterStore: ObservableObject {
     }
     private var workspaceRefreshTask: Task<Void, Never>?
     private var remoteStreamTasks: [UUID: Task<Void, Never>] = [:]
+    private var remoteStreamTokens: [UUID: UUID] = [:]
     private var remoteRunIDs: [String: String]
     private var remoteNotificationToken: String?
     private var remoteNotificationEnvironment: String?
@@ -1958,6 +1993,10 @@ final class CommandCenterStore: ObservableObject {
     }
 
     func clearLocalHistory() {
+        remoteStreamTasks.values.forEach { $0.cancel() }
+        remoteStreamTasks = [:]
+        remoteStreamTokens = [:]
+        remoteStreamStatus = .idle
         runs = []
         approvals = []
         logs = []
@@ -2331,54 +2370,277 @@ final class CommandCenterStore: ObservableObject {
         }
     }
 
-    private func startRemoteStream(localRun run: CommandRun, remoteRunID: String, retryAttempts: Int = 2) {
+    private func startRemoteStream(localRun run: CommandRun, remoteRunID: String) {
         remoteStreamTasks[run.id]?.cancel()
         let configuration = remoteHost
+        let streamToken = UUID()
+        remoteStreamTokens[run.id] = streamToken
+        remoteStreamStatus = RemoteStreamStatus(
+            phase: .connecting,
+            runID: run.id,
+            runTitle: run.title,
+            detail: L10n.tr("Opening log stream."),
+            attempt: 0,
+            nextRetrySeconds: nil
+        )
         remoteStreamTasks[run.id] = Task {
-            do {
-                let client = RemoteHostClient(configuration: configuration)
-                for try await event in client.stream(remoteRunID: remoteRunID) {
-                    guard !Task.isCancelled else { break }
-                    appendLog(runID: run.id, stream: event.stream, message: event.message)
-                    if let sessionID = event.sessionID {
-                        appendLog(runID: run.id, stream: "session", message: "session_id: \(sessionID)")
-                        if let chatID = run.agentChatID {
-                            updateAgentChatSession(chatID: chatID, sessionID: sessionID)
-                        }
-                    }
-                    if event.kind == "complete" {
-                        if let index = runs.firstIndex(where: { $0.id == run.id }) {
-                            runs[index].status = event.exitCode == 0 ? .complete : .failed
-                            runs[index].progress = 1.0
-                            runs[index].completedAt = Date()
-                        }
-                        notify(
-                            title: event.exitCode == 0 ? L10n.tr("Veqral run complete") : L10n.tr("Veqral run failed"),
-                            body: run.title
+            let client = RemoteHostClient(configuration: configuration)
+            var reconnectAttempt = 0
+            defer {
+                if remoteStreamTokens[run.id] == streamToken {
+                    remoteStreamTasks[run.id] = nil
+                    remoteStreamTokens[run.id] = nil
+                    clearRemoteStreamStatus(for: run.id)
+                }
+            }
+
+            while !Task.isCancelled {
+                do {
+                    if reconnectAttempt > 0 {
+                        let shouldContinue = try await prepareRemoteStreamReconnect(
+                            localRun: run,
+                            remoteRunID: remoteRunID,
+                            client: client,
+                            attempt: reconnectAttempt
                         )
-                        persist()
-                        scheduleWorkspaceRefresh(delayNanoseconds: 0)
-                    } else if event.kind == "approval" {
-                        notify(title: L10n.tr("Veqral approval required"), body: event.message)
+                        guard shouldContinue, !Task.isCancelled else { return }
                     }
-                }
-            } catch {
-                let message = Self.remoteFailureMessage(error, context: "Remote stream")
-                remoteHostMessage = message
-                appendLog(runID: run.id, stream: "warn", message: message)
-                if !Self.isRemoteAuthenticationFailure(error), retryAttempts > 0 {
-                    appendLog(runID: run.id, stream: "info", message: "Reconnecting log stream...")
-                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+
+                    remoteStreamStatus = RemoteStreamStatus(
+                        phase: reconnectAttempt == 0 ? .connecting : .reconnecting,
+                        runID: run.id,
+                        runTitle: run.title,
+                        detail: reconnectAttempt == 0 ? L10n.tr("Opening log stream.") : L10n.tr("Resuming remote run before reconnect."),
+                        attempt: reconnectAttempt,
+                        nextRetrySeconds: nil
+                    )
+
+                    for try await event in client.stream(remoteRunID: remoteRunID) {
+                        guard !Task.isCancelled else { return }
+                        reconnectAttempt = 0
+                        remoteStreamStatus = RemoteStreamStatus(
+                            phase: .connected,
+                            runID: run.id,
+                            runTitle: run.title,
+                            detail: L10n.tr("Streaming run logs."),
+                            attempt: 0,
+                            nextRetrySeconds: nil
+                        )
+                        let didFinish = await applyRemoteStreamEvent(event, localRunID: run.id, fallbackRun: run, client: client)
+                        if didFinish {
+                            return
+                        }
+                    }
+                } catch {
                     guard !Task.isCancelled else { return }
-                    startRemoteStream(localRun: run, remoteRunID: remoteRunID, retryAttempts: retryAttempts - 1)
-                    return
+                    let message = Self.remoteFailureMessage(error, context: "Remote stream")
+                    remoteHostMessage = message
+                    if Self.isRemoteAuthenticationFailure(error) {
+                        appendLog(runID: run.id, stream: "warn", message: message)
+                        remoteStreamStatus = RemoteStreamStatus(
+                            phase: .disconnected,
+                            runID: run.id,
+                            runTitle: run.title,
+                            detail: message,
+                            attempt: reconnectAttempt,
+                            nextRetrySeconds: nil
+                        )
+                        if let index = runs.firstIndex(where: { $0.id == run.id }), runs[index].status == .running {
+                            runs[index].status = .waiting
+                        }
+                        persist()
+                        return
+                    }
+
+                    if isTerminalLocalRun(run.id) {
+                        return
+                    }
+
+                    reconnectAttempt += 1
+                    let delay = Self.remoteReconnectDelaySeconds(attempt: reconnectAttempt)
+                    remoteStreamStatus = RemoteStreamStatus(
+                        phase: .reconnecting,
+                        runID: run.id,
+                        runTitle: run.title,
+                        detail: message,
+                        attempt: reconnectAttempt,
+                        nextRetrySeconds: delay
+                    )
+                    if reconnectAttempt == 1 {
+                        appendLog(runID: run.id, stream: "warn", message: message)
+                    }
+                    if reconnectAttempt <= 3 || reconnectAttempt % 3 == 0 {
+                        appendLog(runID: run.id, stream: "info", message: "Reconnecting log stream in \(delay)s (attempt \(reconnectAttempt)).")
+                    }
+                    try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
                 }
-                if let index = runs.firstIndex(where: { $0.id == run.id }), runs[index].status == .running {
-                    runs[index].status = .waiting
-                }
-                persist()
             }
         }
+    }
+
+    private func prepareRemoteStreamReconnect(
+        localRun run: CommandRun,
+        remoteRunID: String,
+        client: RemoteHostClient,
+        attempt: Int
+    ) async throws -> Bool {
+        let snapshot = try await client.runSnapshot(remoteRunID: remoteRunID)
+        let didFinish = await applyRemoteRunSnapshot(snapshot, localRunID: run.id, remoteRunID: remoteRunID, client: client)
+        guard !didFinish else { return false }
+
+        if ["running", "queued", "needsAttention"].contains(snapshot.run.status) {
+            try await client.resume(remoteRunID: remoteRunID)
+            if attempt == 1 {
+                appendLog(runID: run.id, stream: "info", message: "Remote resume requested before reconnecting the log stream.")
+            }
+        }
+        return true
+    }
+
+    private func applyRemoteRunSnapshot(
+        _ snapshot: RemoteRunSnapshotResponse,
+        localRunID: UUID,
+        remoteRunID: String,
+        client: RemoteHostClient
+    ) async -> Bool {
+        remoteRunIDs[localRunID.uuidString] = remoteRunID
+        if let index = runs.firstIndex(where: { $0.id == localRunID }) {
+            runs[index].status = Self.localStatus(from: snapshot.run.status)
+            runs[index].progress = Self.progress(for: snapshot.run.status)
+            runs[index].completedAt = snapshot.run.completedAt
+            runs[index].resumeSessionID = snapshot.run.resumeSessionID ?? snapshot.run.sessionID
+            runs[index].agentProjectID = snapshot.run.projectID
+            runs[index].agentChatID = snapshot.run.chatID
+            runs[index].provider = snapshot.run.provider
+            runs[index].providerModel = snapshot.run.model
+            if snapshot.run.status == "waitingApproval",
+               !approvals.contains(where: { $0.runID == localRunID && $0.status == .pending }) {
+                insertRemoteApproval(
+                    for: runs[index],
+                    reason: snapshot.run.approvalReason ?? "Remote approval required",
+                    severity: snapshot.run.approvalSeverity
+                )
+            }
+        }
+        for event in snapshot.logs {
+            appendRemoteLogEvent(event, localRunID: localRunID)
+        }
+        persist()
+
+        if Self.isTerminalRemoteStatus(snapshot.run.status) {
+            await syncRemoteRunDetails(localRunID: localRunID, remoteRunID: remoteRunID, client: client)
+            scheduleWorkspaceRefresh(delayNanoseconds: 0)
+            return true
+        }
+        return false
+    }
+
+    private func applyRemoteStreamEvent(
+        _ event: RemoteHostLogEvent,
+        localRunID: UUID,
+        fallbackRun: CommandRun,
+        client: RemoteHostClient
+    ) async -> Bool {
+        appendRemoteLogEvent(event, localRunID: localRunID)
+        let currentRun = runs.first { $0.id == localRunID } ?? fallbackRun
+
+        if let sessionID = event.sessionID {
+            appendRemoteLogEvent(
+                RemoteHostLogEvent(
+                    runID: event.runID,
+                    kind: "status",
+                    stream: "session",
+                    message: "session_id: \(sessionID)",
+                    createdAt: event.createdAt,
+                    sessionID: sessionID,
+                    exitCode: nil
+                ),
+                localRunID: localRunID
+            )
+            if let chatID = currentRun.agentChatID {
+                updateAgentChatSession(chatID: chatID, sessionID: sessionID)
+            }
+        }
+
+        if event.kind == "complete" {
+            if let index = runs.firstIndex(where: { $0.id == localRunID }) {
+                runs[index].status = event.exitCode == 0 ? .complete : .failed
+                runs[index].progress = 1.0
+                runs[index].completedAt = Date()
+            }
+            notify(
+                title: event.exitCode == 0 ? L10n.tr("Veqral run complete") : L10n.tr("Veqral run failed"),
+                body: currentRun.title
+            )
+            persist()
+            await syncRemoteRunDetails(localRunID: localRunID, remoteRunID: event.runID, client: client)
+            scheduleWorkspaceRefresh(delayNanoseconds: 0)
+            return true
+        }
+
+        if event.kind == "approval" {
+            notify(title: L10n.tr("Veqral approval required"), body: event.message)
+        }
+        return false
+    }
+
+    @discardableResult
+    private func appendRemoteLogEvent(_ event: RemoteHostLogEvent, localRunID: UUID) -> Bool {
+        let lines = event.message.split(whereSeparator: \.isNewline).map(String.init)
+        let messages = lines.isEmpty ? [""] : Array(lines.prefix(160))
+        var inserted = false
+        for message in messages {
+            guard !remoteLogExists(runID: localRunID, time: event.createdAt, stream: event.stream, message: message) else {
+                continue
+            }
+            logs.append(CommandLogEntry(id: UUID(), runID: localRunID, time: event.createdAt, stream: event.stream, message: message))
+            inserted = true
+        }
+        if logs.count > 700 {
+            logs.removeFirst(logs.count - 700)
+        }
+        return inserted
+    }
+
+    private func remoteLogExists(runID: UUID, time: Date, stream: String, message: String) -> Bool {
+        logs.contains { entry in
+            entry.runID == runID &&
+            entry.stream == stream &&
+            entry.message == message &&
+            abs(entry.time.timeIntervalSince(time)) < 0.001
+        }
+    }
+
+    private func clearRemoteStreamStatus(for runID: UUID) {
+        guard remoteStreamStatus.runID == runID else { return }
+        if remoteStreamStatus.phase == .disconnected {
+            return
+        }
+        if remoteStreamTasks.keys.contains(where: { $0 != runID }) {
+            remoteStreamStatus = RemoteStreamStatus(
+                phase: .connected,
+                runID: nil,
+                runTitle: L10n.tr("Remote streams active"),
+                detail: L10n.tr("Streaming run logs."),
+                attempt: 0,
+                nextRetrySeconds: nil
+            )
+        } else {
+            remoteStreamStatus = .idle
+        }
+    }
+
+    private func isTerminalLocalRun(_ runID: UUID) -> Bool {
+        guard let status = runs.first(where: { $0.id == runID })?.status else { return false }
+        return [.complete, .failed].contains(status)
+    }
+
+    private static func isTerminalRemoteStatus(_ status: String) -> Bool {
+        ["complete", "failed", "cancelled"].contains(status)
+    }
+
+    private static func remoteReconnectDelaySeconds(attempt: Int) -> Int {
+        min(30, max(1, 1 << min(max(attempt - 1, 0), 5)))
     }
 
     private static func remoteFailureMessage(_ error: Error, context: String) -> String {
@@ -3389,6 +3651,11 @@ struct RemoteHostClient: Sendable {
     func runList() async throws -> RemoteRunListResponse {
         let data = try await request(path: "/v1/runs", method: "GET", body: Data())
         return try JSONDecoder.commandCenter.decode(RemoteRunListResponse.self, from: data)
+    }
+
+    func runSnapshot(remoteRunID: String) async throws -> RemoteRunSnapshotResponse {
+        let data = try await request(path: "/v1/runs/\(remoteRunID)", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteRunSnapshotResponse.self, from: data)
     }
 
     func runLogs(remoteRunID: String) async throws -> RemoteRunLogResponse {
