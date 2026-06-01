@@ -86,6 +86,7 @@ struct CommandCenterSidebar: View {
                             SidebarSectionTitle(group.0)
                             ForEach(group.1) { section in
                                 SidebarActionRow(
+                                    identifier: "gate2.sidebar.\(section.rawValue)",
                                     title: section.title,
                                     symbol: section.symbol,
                                     count: count(for: section),
@@ -230,6 +231,7 @@ struct CommandCenterRunView: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
+        .accessibilityIdentifier("gate2.screen.command")
     }
 }
 
@@ -477,6 +479,7 @@ private struct PhoneEmptyState: View {
 }
 
 private struct SidebarActionRow: View {
+    let identifier: String?
     let title: String
     let symbol: String
     let count: Int?
@@ -525,6 +528,7 @@ private struct SidebarActionRow: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier ?? "")
     }
 }
 
@@ -795,6 +799,19 @@ private struct CommandSubmitPanel: View {
                     .onSubmit {
                         store.submitDraft()
                     }
+                    .accessibilityIdentifier("gate2.command.input")
+
+                Button {
+                    store.saveCurrentCommandDraft()
+                } label: {
+                    Image(systemName: "bookmark")
+                        .font(.system(size: 15, weight: .bold))
+                }
+                .buttonStyle(CommandButtonStyle(tint: store.canSaveCurrentCommandDraft ? VQTheme.accent : VQTheme.ink))
+                .disabled(!store.canSaveCurrentCommandDraft)
+                .help(L10n.tr("Save current command as a reusable draft"))
+                .accessibilityLabel(L10n.tr("Save current command as a reusable draft"))
+                .accessibilityIdentifier("gate2.command.save")
 
                 Button {
                     isVoiceInputPresented = true
@@ -804,6 +821,7 @@ private struct CommandSubmitPanel: View {
                 }
                 .buttonStyle(CommandButtonStyle(tint: VQTheme.ink))
                 .help(L10n.tr("Voice input"))
+                .accessibilityIdentifier("gate2.voice.open")
 
                 Button(action: store.submitDraft) {
                     Image(systemName: "arrow.up")
@@ -811,6 +829,7 @@ private struct CommandSubmitPanel: View {
                 }
                 .buttonStyle(CommandButtonStyle(tint: VQTheme.accent))
                 .help(L10n.tr("Run"))
+                .accessibilityIdentifier("gate2.command.submit")
             }
 
             #if targetEnvironment(macCatalyst)
@@ -901,6 +920,7 @@ private struct CommandRequirementMemo: View {
             }
             .buttonStyle(.bordered)
             .buttonBorderShape(.roundedRectangle(radius: 8))
+            .accessibilityIdentifier("gate2.command.memory")
         } else {
             Button {
                 store.requestedSection = .memory
@@ -909,6 +929,7 @@ private struct CommandRequirementMemo: View {
             }
             .buttonStyle(.bordered)
             .buttonBorderShape(.roundedRectangle(radius: 8))
+            .accessibilityIdentifier("gate2.command.memory")
         }
     }
 }
@@ -1422,6 +1443,21 @@ private struct PhoneComposer: View {
                     .onSubmit {
                         store.submitDraft()
                     }
+                    .accessibilityIdentifier("gate2.command.input")
+                Button {
+                    store.saveCurrentCommandDraft()
+                } label: {
+                    Image(systemName: "bookmark")
+                        .font(.caption.weight(.bold))
+                        .frame(width: 28, height: 28)
+                        .foregroundStyle(store.canSaveCurrentCommandDraft ? VQTheme.accent : VQTheme.ink)
+                        .background(VQTheme.control)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(!store.canSaveCurrentCommandDraft)
+                .accessibilityLabel(L10n.tr("Save current command as a reusable draft"))
+                .accessibilityIdentifier("gate2.command.save")
                 Button {
                     isVoiceInputPresented = true
                 } label: {
@@ -1433,6 +1469,7 @@ private struct PhoneComposer: View {
                         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("gate2.voice.open")
                 Button(action: store.submitDraft) {
                     Image(systemName: "arrow.up")
                         .font(.caption.weight(.bold))
@@ -1442,6 +1479,7 @@ private struct PhoneComposer: View {
                         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("gate2.command.submit")
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -1518,6 +1556,7 @@ private struct VoiceCommandSheet: View {
                             .font(.caption)
                             .foregroundStyle(VQTheme.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("gate2.voice.status")
                     }
                     Spacer()
                 }
@@ -1533,6 +1572,7 @@ private struct VoiceCommandSheet: View {
                         .padding(10)
                         .background(VQTheme.control.opacity(0.38))
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .accessibilityIdentifier("gate2.voice.raw")
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -1546,6 +1586,7 @@ private struct VoiceCommandSheet: View {
                         .padding(8)
                         .background(VQTheme.control.opacity(0.38))
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .accessibilityIdentifier("gate2.voice.cleaned")
                 }
 
                 if !session.cleanupNote.isEmpty {
@@ -1575,6 +1616,7 @@ private struct VoiceCommandSheet: View {
                             Label(L10n.tr("Stop"), systemImage: "stop.fill")
                         }
                         .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("gate2.voice.stop")
                     } else {
                         Button {
                             session.startListening()
@@ -1583,6 +1625,7 @@ private struct VoiceCommandSheet: View {
                         }
                         .buttonStyle(.bordered)
                         .disabled(session.phase == .cleaning)
+                        .accessibilityIdentifier("gate2.voice.start")
                     }
 
                     Button {
@@ -1592,6 +1635,7 @@ private struct VoiceCommandSheet: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(!session.canSend)
+                    .accessibilityIdentifier("gate2.voice.send")
                 }
                 .buttonBorderShape(.roundedRectangle(radius: 8))
                 .font(.footnote.weight(.semibold))
@@ -1631,6 +1675,10 @@ private struct VoiceCommandSheet: View {
         let ruleBased = session.ruleBasedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !ruleBased.isEmpty else { return }
         session.beginCleaning()
+        if ProcessInfo.processInfo.environment["VEQRAL_UI_TESTING"] == "1" {
+            session.finishCleaning(text: ruleBased, note: "XCUITest cleanup used rule-based command.")
+            return
+        }
         guard store.remoteHost.isEnabled, store.remoteHost.isPaired else {
             session.finishCleaning(text: ruleBased, note: L10n.tr("Mac Host is not connected. Using rule-based cleanup."))
             return
@@ -1659,8 +1707,8 @@ private struct VoiceCommandSheet: View {
     private func sendCleanedCommand() {
         let cleaned = session.cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
-        store.commandDraft = cleaned
-        store.submitDraft()
+        store.commandDraft = ""
+        store.submitCommand(cleaned)
         dismiss()
     }
 }
@@ -1744,6 +1792,15 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         cleanedText = ""
         cleanupNote = ""
         statusMessage = L10n.tr("Requesting microphone and speech recognition permission.")
+
+        let injectedTranscript = ProcessInfo.processInfo.environment["VEQRAL_UI_TEST_VOICE_TRANSCRIPT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let transcript = injectedTranscript, !transcript.isEmpty {
+            rawText = transcript
+            phase = .listening
+            statusMessage = "XCUITest transcript injected."
+            return
+        }
 
         #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
         guard speechRecognizer?.isAvailable == true else {
@@ -1907,12 +1964,15 @@ private struct SavedCommandDraftBar: View {
                 } label: {
                     Image(systemName: "bookmark.badge.plus")
                         .font(.caption.weight(.semibold))
-                        .frame(width: 28, height: 24)
+                        .frame(width: 36, height: 30)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(store.canSaveCurrentCommandDraft ? VQTheme.accent : VQTheme.secondaryText)
                 .disabled(!store.canSaveCurrentCommandDraft)
                 .help(L10n.tr("Save current command as a reusable draft"))
+                .accessibilityLabel(L10n.tr("Save current command as a reusable draft"))
+                .accessibilityIdentifier("gate2.command.saveFromDraftBar")
             }
 
             if visibleDrafts.isEmpty {
@@ -1923,8 +1983,8 @@ private struct SavedCommandDraftBar: View {
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(visibleDrafts) { draft in
-                            SavedCommandDraftChip(draft: draft, compact: compact)
+                        ForEach(Array(visibleDrafts.enumerated()), id: \.element.id) { index, draft in
+                            SavedCommandDraftChip(draft: draft, compact: compact, isFirst: index == 0)
                         }
                     }
                     .padding(.vertical, 1)
@@ -1936,6 +1996,7 @@ private struct SavedCommandDraftBar: View {
                     .font(.caption2)
                     .foregroundStyle(VQTheme.secondaryText)
                     .lineLimit(1)
+                    .accessibilityIdentifier("gate2.savedCommand.message")
             }
         }
         .padding(10)
@@ -1948,6 +2009,7 @@ private struct SavedCommandDraftChip: View {
     @EnvironmentObject private var store: CommandCenterStore
     let draft: SavedCommandDraft
     let compact: Bool
+    let isFirst: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1974,6 +2036,9 @@ private struct SavedCommandDraftChip: View {
             }
             .buttonStyle(.plain)
             .help(L10n.tr("Insert saved command draft"))
+            .accessibilityLabel(draft.title)
+            .accessibilityValue(draft.command)
+            .accessibilityIdentifier(isFirst ? "gate2.savedCommand.first" : "gate2.savedCommand.\(draft.id.uuidString)")
 
             Menu {
                 Button {

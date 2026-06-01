@@ -569,6 +569,9 @@ struct DevicesView: View {
                                 title: remoteStatusTitle,
                                 tint: remoteStatusTint
                             )
+                            .accessibilityIdentifier("gate2.remote.pairedState")
+                            .accessibilityLabel(store.remoteHost.isPaired ? "paired" : "notPaired")
+                            .accessibilityValue(remoteStatusTitle)
                             StatusPill(title: "HMAC", tint: VQTheme.steel)
                             StatusPill(title: "Keychain", tint: VQTheme.green)
                             Spacer()
@@ -578,6 +581,16 @@ struct DevicesView: View {
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(remoteOnline ? VQTheme.green : VQTheme.ink)
                             .fixedSize(horizontal: false, vertical: true)
+
+                        if let telemetry = store.remoteHostTelemetry {
+                            HStack(spacing: 8) {
+                                compactTelemetryValue(compactPercent(telemetry.cpu.totalPercent), identifier: "gate2.telemetry.cpu.value")
+                                compactTelemetryValue(compactMemory(telemetry.memory), identifier: "gate2.telemetry.memory.value")
+                                compactTelemetryValue(compactDisk(telemetry.disk), identifier: "gate2.telemetry.disk.value")
+                                compactTelemetryValue(telemetry.thermal.state.isEmpty ? "—" : telemetry.thermal.state, identifier: "gate2.telemetry.thermal.value")
+                                Spacer()
+                            }
+                        }
 
                         HStack(spacing: 8) {
                             Button {
@@ -596,13 +609,14 @@ struct DevicesView: View {
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
                             .disabled(pairingURLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .accessibilityIdentifier("gate2.pairing.useLink")
                         }
                         .font(.footnote.weight(.semibold))
 
-                        RemoteConnectionField(title: L10n.tr("Pairing URL"), placeholder: "veqral://pair?endpoint=http://100.x.x.x:7878&code=ABCD1234", text: $pairingURLInput)
-                        RemoteConnectionField(title: L10n.tr("Saved endpoint"), placeholder: store.workspace.macHostEndpoint, text: $remoteEndpoint)
-                        RemoteConnectionField(title: L10n.tr("Pairing code"), placeholder: L10n.tr("8-character code from menu bar QR"), text: $remotePairingCode)
-                        RemoteConnectionField(title: L10n.tr("This device name"), placeholder: "iPhone・iPad", text: $remoteDeviceName)
+                        RemoteConnectionField(title: L10n.tr("Pairing URL"), placeholder: "veqral://pair?endpoint=http://100.x.x.x:7878&code=ABCD1234", text: $pairingURLInput, identifier: "gate2.pairing.url")
+                        RemoteConnectionField(title: L10n.tr("Saved endpoint"), placeholder: store.workspace.macHostEndpoint, text: $remoteEndpoint, identifier: "gate2.pairing.endpoint")
+                        RemoteConnectionField(title: L10n.tr("Pairing code"), placeholder: L10n.tr("8-character code from menu bar QR"), text: $remotePairingCode, identifier: "gate2.pairing.code")
+                        RemoteConnectionField(title: L10n.tr("This device name"), placeholder: "iPhone・iPad", text: $remoteDeviceName, identifier: "gate2.pairing.deviceName")
 
                         KeyValueLine(key: "Saved endpoint", value: VQDisplay.endpoint(store.remoteHost))
                         KeyValueLine(key: "Device ID", value: store.remoteHost.deviceID.isEmpty ? L10n.tr("Not Paired") : "\(store.remoteHost.deviceID.prefix(8))...")
@@ -621,6 +635,7 @@ struct DevicesView: View {
                             .buttonStyle(.borderedProminent)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
                             .disabled(isPairing || remoteEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || remotePairingCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .accessibilityIdentifier("gate2.pairing.pair")
 
                             Button {
                                 store.disableRemoteHost()
@@ -639,6 +654,7 @@ struct DevicesView: View {
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
                             .disabled(!store.remoteHost.isPaired || store.isRefreshingRemoteHost)
+                            .accessibilityIdentifier("gate2.host.refresh")
 
                             Button {
                                 store.sendDiscordTestNotification()
@@ -648,6 +664,7 @@ struct DevicesView: View {
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
                             .disabled(!store.remoteHost.isPaired)
+                            .accessibilityIdentifier("gate2.discord.test")
                         }
                         .font(.footnote.weight(.semibold))
 
@@ -663,6 +680,7 @@ struct DevicesView: View {
                                 .font(.caption)
                                 .foregroundStyle(remoteStatusMessage.contains("failed") || remoteStatusMessage.contains("失敗") ? VQTheme.amber : VQTheme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("gate2.remote.status")
                         }
 
                         if !store.discordTestMessage.isEmpty {
@@ -670,6 +688,7 @@ struct DevicesView: View {
                                 .font(.caption)
                                 .foregroundStyle(store.discordTestMessage.contains("失敗") || store.discordTestMessage.localizedCaseInsensitiveContains("failed") ? VQTheme.amber : VQTheme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("gate2.discord.message")
                         }
                     }
                 }
@@ -858,7 +877,10 @@ struct DevicesView: View {
                 }
             }
         }
-        .onAppear(perform: syncRemoteFields)
+        .onAppear {
+            syncRemoteFields()
+            applyUITestPairingURLIfNeeded()
+        }
         .onChange(of: store.remoteHost) { _, _ in
             syncRemoteFields()
         }
@@ -878,12 +900,71 @@ struct DevicesView: View {
                 }
             )
         }
+        .accessibilityIdentifier("gate2.screen.devices")
     }
 
     private func syncRemoteFields() {
         remoteEndpoint = store.remoteHost.endpoint.isEmpty ? store.workspace.macHostEndpoint : store.remoteHost.endpoint
         if remoteDeviceName.isEmpty {
             remoteDeviceName = ProcessInfo.processInfo.hostName
+        }
+    }
+
+    private func applyUITestPairingURLIfNeeded() {
+        let url = ProcessInfo.processInfo.environment["VEQRAL_UI_TEST_PAIRING_URL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard pairingURLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+        if let url, !url.isEmpty {
+            pairingURLInput = url
+            return
+        }
+        let env = ProcessInfo.processInfo.environment
+        guard CommandLine.arguments.contains("-veqral-ui-testing") || env["VEQRAL_UI_TESTING"] == "1" else {
+            return
+        }
+        Task {
+            await fetchUITestPairingURL()
+        }
+    }
+
+    @MainActor
+    private func fetchUITestPairingURL() async {
+        struct PairingStatus: Decodable {
+            var pairingURL: String
+            var pairingCode: String?
+        }
+        #if targetEnvironment(simulator)
+        let pairingStatusURLs = ["http://127.0.0.1:18778/v1/pairing", "http://100.96.40.99:18778/v1/pairing"]
+        #else
+        let pairingStatusURLs = ["http://100.96.40.99:18778/v1/pairing", "http://127.0.0.1:18778/v1/pairing"]
+        #endif
+        for value in pairingStatusURLs {
+            guard let url = URL(string: value),
+                  let (data, response) = try? await URLSession.shared.data(from: url),
+                  let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  let status = try? JSONDecoder().decode(PairingStatus.self, from: data),
+                  !status.pairingURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+            #if targetEnvironment(simulator)
+            let code = status.pairingCode?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if value.contains("127.0.0.1"), !code.isEmpty {
+                var components = URLComponents()
+                components.scheme = "veqral"
+                components.host = "pair"
+                components.queryItems = [
+                    URLQueryItem(name: "endpoint", value: "http://127.0.0.1:18778"),
+                    URLQueryItem(name: "code", value: code)
+                ]
+                pairingURLInput = components.string ?? status.pairingURL
+                return
+            }
+            #endif
+            pairingURLInput = status.pairingURL
+            return
         }
     }
 
@@ -1002,6 +1083,33 @@ struct DevicesView: View {
         return VQTheme.amber
     }
 
+    private func compactTelemetryValue(_ value: String, identifier: String) -> some View {
+        Text(value)
+            .font(.caption2.monospacedDigit().weight(.semibold))
+            .foregroundStyle(VQTheme.ink)
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(VQTheme.control.opacity(0.35))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .accessibilityIdentifier(identifier)
+    }
+
+    private func compactPercent(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return "\(Int(value.rounded()))%"
+    }
+
+    private func compactMemory(_ memory: RemoteHostTelemetryMemory) -> String {
+        guard let used = memory.usedBytes, let total = memory.totalBytes, total > 0 else { return "—" }
+        return "\(Int((Double(used) / Double(total) * 100).rounded()))%"
+    }
+
+    private func compactDisk(_ disk: RemoteHostTelemetryDisk) -> String {
+        guard let value = disk.usedPercent else { return "—" }
+        return "\(Int(value.rounded()))%"
+    }
+
     private func dateLabel(_ date: Date?) -> String {
         guard let date else { return L10n.tr("Never") }
         return Self.deviceDateFormatter.string(from: date)
@@ -1033,14 +1141,14 @@ private struct HostTelemetryPanel: View {
                 }
 
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
-                    telemetryMetric("CPU Usage", value: percent(telemetry.cpu.totalPercent), symbol: "cpu")
-                    telemetryMetric("Load", value: loadAverage(telemetry.cpu.loadAverage), symbol: "gauge.with.dots.needle.67percent")
-                    telemetryMetric("Memory", value: memorySummary(telemetry.memory), symbol: "memorychip")
-                    telemetryMetric("Disk", value: diskSummary(telemetry.disk), symbol: "internaldrive")
-                    telemetryMetric("Thermal State", value: thermalLabel(telemetry.thermal.state), symbol: "thermometer.medium")
-                    telemetryMetric("Uptime", value: uptime(telemetry.uptime.seconds), symbol: "clock.arrow.circlepath")
-                    telemetryMetric("Battery", value: powerSummary(telemetry.power), symbol: "battery.75")
-                    telemetryMetric("Network", value: networkSummary(telemetry.network), symbol: "network")
+                    telemetryMetric("CPU Usage", value: percent(telemetry.cpu.totalPercent), symbol: "cpu", identifier: "gate2.telemetry.cpu")
+                    telemetryMetric("Load", value: loadAverage(telemetry.cpu.loadAverage), symbol: "gauge.with.dots.needle.67percent", identifier: "gate2.telemetry.load")
+                    telemetryMetric("Memory", value: memorySummary(telemetry.memory), symbol: "memorychip", identifier: "gate2.telemetry.memory")
+                    telemetryMetric("Disk", value: diskSummary(telemetry.disk), symbol: "internaldrive", identifier: "gate2.telemetry.disk")
+                    telemetryMetric("Thermal State", value: thermalLabel(telemetry.thermal.state), symbol: "thermometer.medium", identifier: "gate2.telemetry.thermal")
+                    telemetryMetric("Uptime", value: uptime(telemetry.uptime.seconds), symbol: "clock.arrow.circlepath", identifier: "gate2.telemetry.uptime")
+                    telemetryMetric("Battery", value: powerSummary(telemetry.power), symbol: "battery.75", identifier: "gate2.telemetry.battery")
+                    telemetryMetric("Network", value: networkSummary(telemetry.network), symbol: "network", identifier: "gate2.telemetry.network")
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -1090,11 +1198,13 @@ private struct HostTelemetryPanel: View {
                     .font(.caption)
                     .foregroundStyle(message.contains("失敗") || message.localizedCaseInsensitiveContains("failed") ? VQTheme.amber : VQTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("gate2.telemetry.message")
             }
         }
+        .accessibilityIdentifier("gate2.telemetry.panel")
     }
 
-    private func telemetryMetric(_ title: String, value: String, symbol: String) -> some View {
+    private func telemetryMetric(_ title: String, value: String, symbol: String, identifier: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: symbol)
                 .frame(width: 22)
@@ -1107,11 +1217,13 @@ private struct HostTelemetryPanel: View {
                     .font(.caption.monospacedDigit().weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
                     .lineLimit(2)
+                    .accessibilityIdentifier("\(identifier).value")
             }
         }
         .padding(9)
         .background(VQTheme.control.opacity(0.30))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .accessibilityIdentifier(identifier)
     }
 
     private func memorySummary(_ memory: RemoteHostTelemetryMemory) -> String {
@@ -2315,6 +2427,7 @@ struct ApprovalsView: View {
                 }
             }
         }
+        .accessibilityIdentifier("gate2.screen.approvals")
     }
 }
 
@@ -2358,6 +2471,7 @@ private struct CommandApprovalQueueRow: View {
             .font(.footnote.weight(.semibold))
         }
         .padding(.vertical, 4)
+        .accessibilityIdentifier("gate2.approval.pending")
     }
 }
 
@@ -2448,6 +2562,7 @@ struct MemoryView: View {
                 store.refreshRemoteProjectMemory()
             }
         }
+        .accessibilityIdentifier("gate2.screen.memory")
     }
 }
 
@@ -2582,6 +2697,7 @@ private struct RemoteConnectionField: View {
     let title: String
     let placeholder: String
     @Binding var text: String
+    var identifier: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2601,6 +2717,7 @@ private struct RemoteConnectionField: View {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(VQTheme.hairline, lineWidth: 1)
                 }
+                .accessibilityIdentifier(identifier ?? "")
         }
     }
 }
@@ -2637,6 +2754,7 @@ private struct ProjectMemoryReadOnlyView: View {
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle(radius: 8))
                 .disabled(store.isLoadingRemoteProjectMemory || !(store.remoteHost.isEnabled && store.remoteHost.isPaired))
+                .accessibilityIdentifier("gate2.memory.refreshProject")
             }
             .font(.footnote.weight(.semibold))
 
@@ -2659,6 +2777,7 @@ private struct ProjectMemoryReadOnlyView: View {
                     .font(.caption)
                     .foregroundStyle(store.remoteProjectMemoryMessage.contains("失敗") ? VQTheme.amber : VQTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("gate2.memory.message")
             }
         }
     }
@@ -2702,6 +2821,7 @@ private struct ProjectMemoryReadOnlyView: View {
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(10)
+                        .accessibilityIdentifier("gate2.memory.content")
                 }
                 .frame(minHeight: 160, maxHeight: 280)
                 .background(VQTheme.control.opacity(0.55))

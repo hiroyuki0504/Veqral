@@ -64,15 +64,20 @@ Device(Mac)
 - #27 (`codex/backlog-10-voice-input`): Backlog #10。Command composer に mic ボタンを追加し、iPhone/iPad で Speech + AVFoundation の日本語 dictation → ローカル filler/自己修正 cleanup → Host `POST /v1/voice/cleanup` の短い LLM cleanup → raw/cleaned 確認 → `submitDraft()` 送信。Mac Catalyst は sheet で非対応表示。Host cleanup は Hermes 優先、選択中 Codex/Claude fallback、失敗時は rule cleanup。raw audio 非保存。`VeqralHost smoke-voice-cleanup` 通過。
 - #28 (`codex/backlog-12-main-integration-plan`): Backlog #12。`MAIN_INTEGRATION_PLAN_PR12.md` に #9→#29 を clean main へ統合した退避点、検証、findings を記録。force-push/deploy は未実行。
 - #29 (`codex/gates-hermes-device-acceptance`): Gate1/Gate2。`VeqralHostSmoke verify-memory-inheritance` を月額ログイン優先へ更新し、隔離 `HERMES_HOME` に `~/.hermes/auth.json` を symlink して `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4` で実走 PASS。Chat A が使い捨て code name を Hermes native `MEMORY.md` に書き、Chat B が同じ値を返した。最新 transcript は `HERMES_MEMORY_INHERITANCE_PR0.md`。Claude/Anthropic は Hermes からは未ログイン扱い、Ollama は未起動。`DEVICE_ACCEPTANCE.md` に iPhone/iPad の voice / telemetry / saved command / Discord webhook / Memory visibility 手順を追加し、Discord テスト通知ボタン、telemetry 失敗理由、Memory 最終取得時刻を追加。
+- #A0 (`codex/a0-code-audit`): clean main コード実査監査。`AUDIT.md` を追加し、smoke 緑の裏の実配線/手抜き/TODO/secret/Hermes-native/read-only 遵守を機能別 severity で記録。明確な欠陥として Discord test 2xx 実判定、Host state isolation、`HERMES_HOME` 尊重、redact 追加、Portfolio DELETE fail-closed を修正。
+- #A1 (`codex/a1-gate2-xcuitest`): Gate2 自動受け入れ。XCUITest target と `Scripts/run_gate2_xcuitests.sh` を追加し、iPhone/iPad Simulator で saved command / telemetry / Hermes memory visibility / Discord 2xx / voice transcript→approval gate を自動 PASS。実機 XCUITest は local Xcode account/provisioning 未設定（`dev.hiroyuki.veqral.ui-tests.xctrunner` profile なし、CLI から Xcode Accounts が見えない、物理デバイス offline）で BLOCKED として `GATE2_XCUITEST_ACCEPTANCE_PR_A1.md` に記録。実音声一言と実 Discord チャンネル到達は人手確認として残る。
 
 ## 未完了・次の手番
 
 1. Gate1: #0 Hermes 記憶継承は `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4` の real 2 model で PASS 済み。`HERMES_MEMORY_INHERITANCE_PR0.md` に実トランスクリプトあり。自作 memory は足していない。
    - より強いクロスベンダー証明は、Hermes から Claude/Anthropic login が使える状態になった後で再実行する。
-2. Gate2（最優先）: `DEVICE_ACCEPTANCE.md` に沿って iPhone/iPad 実機タップ確認。
-   - 対象: voice input / host telemetry / saved command / Discord 実 webhook / Hermes memory visibility。
-   - ユーザーが落ちた項目を報告したら、その項目だけ Draft PR で修正。
-3. 実機検証（継続）
+2. #A2（最優先）: 記憶の体験化（差別化の堀）。
+   - Hermes native memory の read-only 表示を拡張し、「先週 X で何してた？」のような記憶問い合わせ導線を追加。
+   - Codex/Claude 直接モードの siloed 履歴とは別に、Hermes Project 内で Codex run 文脈を Claude run へ持ち越す導線を作る。自作 memory/MCP は追加しない。
+3. Gate2（継続）: XCUITest は iPhone/iPad Simulator green。実機 XCUITest は Xcode account/provisioning と物理 device reconnect 待ち。
+   - 再実行: `VEQRAL_GATE2_ONLY=iphone-device Scripts/run_gate2_xcuitests.sh` / `VEQRAL_GATE2_ONLY=ipad-device Scripts/run_gate2_xcuitests.sh`
+   - 人手に残る確認: Discord 実チャンネル到達を一目見る、voice の実マイク音声を一言。
+4. 実機検証（継続）
    - QR ペアリング（ユーザー報告ではカメラ認識→connected 済み。#18 端末配布後に念のため再確認）
    - Hermes memory visibility。同 Project で Chat①(モデル A)に記憶→Chat②(モデル B)が継承され、Memory 画面で同じ事実が見えること（Gate1 smoke は PASS 済み）
    - 使いやすさ機能（承認ボタンは Approvals/Run detail/phone run row で見えること、Devices に自分自身が出ないこと）
@@ -86,10 +91,10 @@ Device(Mac)
    - #26 Host telemetry: Devices→ホスト状態で CPU/メモリ/ディスク/熱状態/稼働時間/バッテリー/ネットワークが表示され、画面表示中に約 5 秒間隔で更新されること。raw 温度/fan は `—` でよい。
    - #27 Voice input: iPhone/iPad で mic→権限許可→日本語発話→Stop→raw/cleaned 表示→編集→送信。Host に cleanup LLM credentials が無い場合は rule cleanup fallback 表示でよい。高リスク語は送信後に既存承認 Gate に乗ること。
    - UI 受け入れ確認: 日本語のみ、赤い 0 バッジなし、未ペアリング strip が細い、UUID/コンテナパスが主表示に出ない、Unavailable/Offline が緑でない
-4. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
-5. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
-6. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
-7. 組織化：worker → skills で精度 → PM を置く → 上に積む（段階的）
+5. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
+6. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
+7. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
+8. 組織化：worker → skills で精度 → PM を置く → 上に積む（段階的）
 
 ## 作業の型（毎回）
 
