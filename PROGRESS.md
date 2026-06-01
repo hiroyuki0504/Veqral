@@ -24,7 +24,7 @@ This file is the resume point for the clean main baseline. The former stacked Dr
 - [x] #A1 Gate2 自動受け入れ — Draft PR #31 (`codex/a1-gate2-xcuitest`)
 - [x] #A2 記憶の体験化 — Draft PR #32 (`codex/a2-memory-experience`)
 - [x] #A3 コストガバナンス — Draft PR #33 (`codex/a3-cost-governance`)
-- [x] #A4 司令塔を実データで — Draft PR pending (`codex/a4-portfolio-real-data`)
+- [x] #A4 司令塔を実データで — Draft PR #34 (`codex/a4-portfolio-real-data`)
 - [ ] #A5 認証オンボーディング・ウィザード
 - [ ] #A6 Apple Watch 承認アプリ
 - [ ] #A7 クロスベンダー #0 再実走
