@@ -4,7 +4,7 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 
 ## Status
 
-- [ ] #0 Hermes 記憶継承の自動実証 — smoke exists in PR #19, but Gate1 is not green until a real 2-model Hermes native-memory pass is recorded
+- [x] #0 Hermes 記憶継承の自動実証 — real 2-model Hermes native-memory pass recorded in PR #29 (`codex/gates-hermes-device-acceptance`)
 - [x] #1 UI/UX 洗練 — completed earlier in PR #14 (`codex/ui-japanese-polish`)
 - [x] #2 残4件の統合 — completed in PR #17 (`codex/pr1-surface-consolidation`)
 - [x] #3 WebSocket 再接続 + Run resume — completed in PR #20 (`codex/backlog-3-websocket-resume`)
@@ -20,14 +20,14 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 
 ## Current Item
 
-Gate1: #0 Hermes 記憶継承の real 2-model 実走待ち
+Gate2: `DEVICE_ACCEPTANCE.md` に沿った iPhone/iPad 実機5項目の green 待ち
 
 ## Notes
 
 - #0 report: `HERMES_MEMORY_INHERITANCE_PR0.md`.
-- #0 current result: FAIL / blocked by provider setup, not code success. The smoke test is reproducible and uses an isolated `HERMES_HOME`, but no available local route currently gives two real usable models: Copilot routes are rejected as not licensed/authorized, isolated `openai-codex` auth is unavailable, the configured Anthropic key is rejected by Anthropic, OpenRouter is not configured, and local Ollama is not reachable at `127.0.0.1:11434`. 偽 pass は作っていない。
-- #0 preferred next run: `VEQRAL_MEMTEST_PROVIDER_A=custom`, `VEQRAL_MEMTEST_MODEL_A=qwen2.5:7b`, `VEQRAL_MEMTEST_BASE_URL_A=http://127.0.0.1:11434/v1`, `VEQRAL_MEMTEST_PROVIDER_B=openrouter`, `VEQRAL_MEMTEST_MODEL_B=google/gemini-2.5-flash`.
-- #0 required receivers: set `OPENROUTER_API_KEY` in env or Keychain service `dev.hiroyuki.veqral.host` account `openrouter:api-key`; start Ollama and pull the exact local model; optional Anthropic fallback uses env `ANTHROPIC_API_KEY` or Keychain account `anthropic:api-key`. Keys themselves must never be committed or pasted into reports.
+- #0 current result: PASS. `verify-memory-inheritance` ran with isolated `HERMES_HOME`, Hermes native memory only, and `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4`; Chat A wrote `Tachibana-7-E7A3D834` to Hermes `MEMORY.md`, and Chat B returned `CODENAME:Tachibana-7-E7A3D834`.
+- #0 backend decision: Hermes can drive ChatGPT subscription login through `openai-codex` when `~/.hermes/auth.json` is available. The smoke links that auth file into the disposable `HERMES_HOME` instead of copying credentials or using API keys. Claude/Anthropic login is not currently usable on this Mac, and local Ollama is not running at `127.0.0.1:11434`.
+- #0 model rationale: same-provider model swap is weaker than cross-vendor Claude/GPT, but it satisfies the accepted A≠B route because both are real monthly-login models and the native memory fact crossed from `gpt-5.5` to `gpt-5.4`. Cross-vendor can be rerun later after Hermes-readable Claude auth is restored.
 - Gate2 device acceptance checklist is in `DEVICE_ACCEPTANCE.md`. It covers iPhone/iPad tap checks for voice input, host telemetry, saved command drafts, Discord webhook delivery, and Hermes memory visibility. Light instrumentation added in this branch: Discord test notification, telemetry failure message, and Memory last fetch time.
 - #3 reconnect/resume implementation is documented in `WEBSOCKET_RECONNECT_PR3.md`. Manual device smoke is still needed for real network interruption.
 - #4 Discord implementation is documented in `DISCORD_NOTIFICATIONS_PR4.md`. Local Host smoke passed with 4 redacted payloads; external Discord delivery still needs a real webhook URL configured on the paired Host.

@@ -52,26 +52,34 @@ The current local check passed with Hermes Agent v0.15.1. `hermes doctor` report
 
 `VeqralHostSmoke verify-memory-inheritance` proves Veqral's core promise with a disposable Hermes source and isolated `HERMES_HOME`. It must use real Hermes native memory and two real models (`A != B`); do not add a custom memory layer or hard-code the expected fact.
 
-Preferred low-cost route:
+Current passing route: monthly-login ChatGPT subscription through Hermes `openai-codex`. The smoke keeps Hermes memory isolated, then links the existing Hermes login auth from `~/.hermes/auth.json` into the disposable `HERMES_HOME`; it does not require API keys.
 
 ```sh
-export VEQRAL_MEMTEST_PROVIDER_A=custom
-export VEQRAL_MEMTEST_MODEL_A=qwen2.5:7b
-export VEQRAL_MEMTEST_BASE_URL_A=http://127.0.0.1:11434/v1
-export VEQRAL_MEMTEST_PROVIDER_B=openrouter
-export VEQRAL_MEMTEST_MODEL_B=google/gemini-2.5-flash
-export OPENROUTER_API_KEY=... # or put it in Keychain, never in code
+export VEQRAL_MEMTEST_PROVIDER_A=openai-codex
+export VEQRAL_MEMTEST_MODEL_A=gpt-5.5
+export VEQRAL_MEMTEST_PROVIDER_B=openai-codex
+export VEQRAL_MEMTEST_MODEL_B=gpt-5.4
 swift run --package-path MacHost VeqralHostSmoke verify-memory-inheritance --report HERMES_MEMORY_INHERITANCE_PR0.md
 ```
 
-For the local model, install/start Ollama and pull the exact model:
+If the Hermes login home is not `~/.hermes`, point the smoke at it with `VEQRAL_MEMTEST_AUTH_HOME`. Claude/Anthropic can be selected only when Hermes reports that Claude Code/setup-token auth is usable on the Mac.
+
+Free local fallback: install/start Ollama and choose two different pulled models. This avoids subscription/API setup while still proving Hermes native memory across A != B models.
 
 ```sh
 ollama pull qwen2.5:7b
+ollama pull llama3.1:8b
 curl http://127.0.0.1:11434/api/tags
+export VEQRAL_MEMTEST_PROVIDER_A=custom
+export VEQRAL_MEMTEST_MODEL_A=qwen2.5:7b
+export VEQRAL_MEMTEST_BASE_URL_A=http://127.0.0.1:11434/v1
+export VEQRAL_MEMTEST_PROVIDER_B=custom
+export VEQRAL_MEMTEST_MODEL_B=llama3.1:8b
+export VEQRAL_MEMTEST_BASE_URL_B=http://127.0.0.1:11434/v1
+swift run --package-path MacHost VeqralHostSmoke verify-memory-inheritance --report HERMES_MEMORY_INHERITANCE_PR0.md
 ```
 
-Keychain receivers, using the Host service name:
+API-key providers remain optional fallback only. When used, put keys in env or Keychain, never in code or reports:
 
 ```sh
 security add-generic-password -U -s dev.hiroyuki.veqral.host -a openrouter:api-key -w "$OPENROUTER_API_KEY"
