@@ -30,6 +30,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-voice-cleanup" {
             VoiceCleanupSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-cost-governance" {
+            CostGovernanceSmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -54,6 +57,56 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
     }
 }
 
+struct ProjectBudgetLimit: Codable, Sendable, Equatable {
+    var limitUSD: Double?
+    var thresholdPercent: Double = 0.8
+    var paused: Bool = false
+    var updatedAt: Date? = nil
+
+    var normalized: ProjectBudgetLimit {
+        ProjectBudgetLimit(
+            limitUSD: limitUSD.flatMap { $0 > 0 ? $0 : nil },
+            thresholdPercent: min(max(thresholdPercent, 0.1), 1.0),
+            paused: paused,
+            updatedAt: updatedAt
+        )
+    }
+}
+
+struct ProjectCostSummary: Codable, Sendable, Equatable {
+    var projectKey: String
+    var projectID: String?
+    var workingDirectory: String?
+    var displayName: String
+    var runCount: Int
+    var inputTokens: Int
+    var outputTokens: Int
+    var reasoningTokens: Int
+    var totalTokens: Int
+    var estimatedCostUSD: Double
+    var actualCostUSD: Double
+    var costUSD: Double
+    var budgetLimitUSD: Double?
+    var thresholdPercent: Double
+    var paused: Bool
+    var isNearLimit: Bool
+    var isOverLimit: Bool
+}
+
+struct ProjectBudgetListResponse: Codable {
+    var summaries: [ProjectCostSummary]
+}
+
+struct ProjectBudgetUpdateRequest: Codable {
+    var projectKey: String?
+    var projectID: String?
+    var workingDirectory: String?
+    var displayName: String?
+    var limitUSD: Double?
+    var thresholdPercent: Double?
+    var paused: Bool?
+}
+
 struct HostConfig: Codable, Sendable {
     var port: UInt16 = 7878
     var defaultWorkingDirectory: String = NSHomeDirectory()
@@ -74,6 +127,7 @@ struct HostConfig: Codable, Sendable {
     var portfolioCodeRoots: [String] = []
     var discordWebhook: String?
     var portfolioDiscordWebhook: String?
+    var projectBudgets: [String: ProjectBudgetLimit]? = nil
 
     static var folder: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -95,6 +149,12 @@ struct HostConfig: Codable, Sendable {
             try? data.write(to: configURL, options: .atomic)
         }
         return config
+    }
+
+    func save() throws {
+        try FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+        let data = try JSONEncoder.pretty.encode(self)
+        try data.write(to: Self.configURL, options: .atomic)
     }
 
     var resolvedPushNotificationsEnabled: Bool {
@@ -138,6 +198,10 @@ struct HostConfig: Codable, Sendable {
 
     var resolvedPortfolioDiscordWebhook: String? {
         resolvedDiscordWebhook
+    }
+
+    var resolvedProjectBudgets: [String: ProjectBudgetLimit] {
+        projectBudgets ?? [:]
     }
 
     private static func booleanValue(_ value: String?) -> Bool {
@@ -298,6 +362,122 @@ struct RunUsage: Codable, Sendable, Equatable {
             rhs
         case (.none, .none):
             nil
+        }
+    }
+}
+
+enum RunBudgetCalculator {
+    static func projectKey(projectID: String?, workingDirectory: String) -> String {
+        if let projectID = projectID?.nilIfBlank {
+            return "project:\(projectID)"
+        }
+        return "path:\(workingDirectory.expandingTilde)"
+    }
+
+    static func summaries(runs: [HostRun], budgets: [String: ProjectBudgetLimit]) -> [ProjectCostSummary] {
+        var buckets: [String: ProjectCostAccumulator] = [:]
+        for run in runs {
+            let key = projectKey(projectID: run.projectID, workingDirectory: run.workingDirectory)
+            var bucket = buckets[key] ?? ProjectCostAccumulator(
+                projectKey: key,
+                projectID: run.projectID?.nilIfBlank,
+                workingDirectory: run.workingDirectory.nilIfBlank,
+                displayName: displayName(projectID: run.projectID, workingDirectory: run.workingDirectory)
+            )
+            bucket.add(run)
+            buckets[key] = bucket
+        }
+        for (key, _) in budgets where buckets[key] == nil {
+            buckets[key] = ProjectCostAccumulator(
+                projectKey: key,
+                projectID: key.hasPrefix("project:") ? String(key.dropFirst("project:".count)) : nil,
+                workingDirectory: key.hasPrefix("path:") ? String(key.dropFirst("path:".count)) : nil,
+                displayName: displayName(projectID: key.hasPrefix("project:") ? String(key.dropFirst("project:".count)) : nil, workingDirectory: key)
+            )
+        }
+        return buckets.values
+            .map { $0.summary(budget: budgets[$0.projectKey]?.normalized) }
+            .sorted { lhs, rhs in
+                if lhs.isOverLimit != rhs.isOverLimit { return lhs.isOverLimit && !rhs.isOverLimit }
+                if lhs.isNearLimit != rhs.isNearLimit { return lhs.isNearLimit && !rhs.isNearLimit }
+                return lhs.costUSD > rhs.costUSD
+            }
+    }
+
+    static func summary(for key: String, runs: [HostRun], budgets: [String: ProjectBudgetLimit]) -> ProjectCostSummary {
+        summaries(runs: runs, budgets: budgets).first { $0.projectKey == key }
+            ?? ProjectCostAccumulator(projectKey: key, projectID: nil, workingDirectory: nil, displayName: key)
+                .summary(budget: budgets[key]?.normalized)
+    }
+
+    static func approvalReason(for key: String, runs: [HostRun], budgets: [String: ProjectBudgetLimit]) -> String? {
+        guard let budget = budgets[key]?.normalized else { return nil }
+        let summary = summary(for: key, runs: runs, budgets: budgets)
+        if budget.paused {
+            return "Cost budget paused for \(summary.displayName)"
+        }
+        if summary.isOverLimit, let limit = summary.budgetLimitUSD {
+            return String(format: "Cost budget exceeded for %@: $%.4f / $%.4f", summary.displayName, summary.costUSD, limit)
+        }
+        return nil
+    }
+
+    private static func displayName(projectID: String?, workingDirectory: String) -> String {
+        if let projectID = projectID?.nilIfBlank {
+            return projectID
+        }
+        return URL(fileURLWithPath: workingDirectory.expandingTilde).lastPathComponent.nilIfBlank ?? workingDirectory
+    }
+
+    private struct ProjectCostAccumulator {
+        var projectKey: String
+        var projectID: String?
+        var workingDirectory: String?
+        var displayName: String
+        var runCount = 0
+        var inputTokens = 0
+        var outputTokens = 0
+        var reasoningTokens = 0
+        var totalTokens = 0
+        var estimatedCostUSD = 0.0
+        var actualCostUSD = 0.0
+
+        mutating func add(_ run: HostRun) {
+            runCount += 1
+            guard let usage = run.usage?.normalized else { return }
+            inputTokens += usage.inputTokens ?? 0
+            outputTokens += usage.outputTokens ?? 0
+            reasoningTokens += usage.reasoningTokens ?? 0
+            totalTokens += usage.totalTokens ?? 0
+            estimatedCostUSD += usage.estimatedCostUSD ?? 0
+            actualCostUSD += usage.actualCostUSD ?? 0
+        }
+
+        func summary(budget: ProjectBudgetLimit?) -> ProjectCostSummary {
+            let threshold = budget?.thresholdPercent ?? 0.8
+            let cost = actualCostUSD > 0 ? actualCostUSD : estimatedCostUSD
+            let limit = budget?.limitUSD
+            let over = limit.map { $0 > 0 && cost >= $0 } ?? false
+            let near = limit.map { $0 > 0 && cost >= $0 * threshold } ?? false
+            return ProjectCostSummary(
+                projectKey: projectKey,
+                projectID: projectID,
+                workingDirectory: workingDirectory,
+                displayName: displayName,
+                runCount: runCount,
+                inputTokens: inputTokens,
+                outputTokens: outputTokens,
+                reasoningTokens: reasoningTokens,
+                totalTokens: totalTokens,
+                estimatedCostUSD: estimatedCostUSD,
+                actualCostUSD: actualCostUSD,
+                costUSD: cost,
+                budgetLimitUSD: limit,
+                thresholdPercent: threshold,
+                paused: budget?.paused ?? false,
+                isNearLimit: near,
+                isOverLimit: over
+            )
         }
     }
 }
@@ -603,6 +783,61 @@ enum ProjectMemorySmoke {
             print("FAIL: Project memory smoke failed: \(error.localizedDescription)")
             Foundation.exit(1)
         }
+    }
+}
+
+enum CostGovernanceSmoke {
+    static func runAndExit() -> Never {
+        let projectID = "cost-smoke"
+        let key = RunBudgetCalculator.projectKey(projectID: projectID, workingDirectory: "/tmp/cost-smoke")
+        let runs = [
+            HostRun(
+                id: "run-cost-smoke-1",
+                prompt: "usage smoke",
+                workingDirectory: "/tmp/cost-smoke",
+                sessionID: nil,
+                status: .complete,
+                startedAt: Date(),
+                completedAt: Date(),
+                exitCode: 0,
+                pid: nil,
+                approvalReason: nil,
+                engine: .hermes,
+                resumeSessionID: nil,
+                projectID: projectID,
+                chatID: nil,
+                provider: "openai-codex",
+                model: "gpt-5.5",
+                approvalSeverity: nil,
+                usage: RunUsage(
+                    inputTokens: 100,
+                    outputTokens: 40,
+                    cacheReadTokens: nil,
+                    cacheWriteTokens: nil,
+                    reasoningTokens: 10,
+                    totalTokens: nil,
+                    estimatedCostUSD: 0.015,
+                    actualCostUSD: nil,
+                    source: "smoke",
+                    model: "gpt-5.5"
+                )
+            )
+        ]
+        let budgets = [key: ProjectBudgetLimit(limitUSD: 0.01, thresholdPercent: 0.8, paused: false, updatedAt: Date())]
+        let summary = RunBudgetCalculator.summary(for: key, runs: runs, budgets: budgets)
+        guard summary.totalTokens == 150,
+              summary.costUSD == 0.015,
+              summary.isNearLimit,
+              summary.isOverLimit else {
+            print("FAIL: Cost governance summary did not aggregate or flag budget correctly.")
+            Foundation.exit(1)
+        }
+        guard RunBudgetCalculator.approvalReason(for: key, runs: runs, budgets: budgets)?.contains("Cost budget exceeded") == true else {
+            print("FAIL: Cost governance approval reason was not produced.")
+            Foundation.exit(1)
+        }
+        print("PASS: Cost governance smoke tokens=\(summary.totalTokens) cost=\(summary.costUSD) over=\(summary.isOverLimit)")
+        Foundation.exit(0)
     }
 }
 
@@ -1311,6 +1546,39 @@ actor HostState {
             && activeRuns < config.maxActiveRuns
     }
 
+    func budgetSummaries() -> ProjectBudgetListResponse {
+        ProjectBudgetListResponse(
+            summaries: RunBudgetCalculator.summaries(
+                runs: Array(runs.values),
+                budgets: config.resolvedProjectBudgets
+            )
+        )
+    }
+
+    func updateBudget(_ request: ProjectBudgetUpdateRequest) throws -> ProjectCostSummary {
+        let key = request.projectKey?.nilIfBlank
+            ?? request.projectID?.nilIfBlank.map { "project:\($0)" }
+            ?? request.workingDirectory?.nilIfBlank.map { "path:\($0.expandingTilde)" }
+        guard let key else {
+            throw HostError.badRequest("Project key is required.")
+        }
+        var budgets = config.resolvedProjectBudgets
+        var current = budgets[key] ?? ProjectBudgetLimit()
+        current.limitUSD = request.limitUSD.flatMap { $0 > 0 ? $0 : nil }
+        if let threshold = request.thresholdPercent {
+            current.thresholdPercent = threshold
+        }
+        if let paused = request.paused {
+            current.paused = paused
+        }
+        current.updatedAt = Date()
+        budgets[key] = current.normalized
+        config.projectBudgets = budgets
+        try persistConfig()
+        appendAudit("updated cost budget key=\(key) limit=\(current.limitUSD.map { String(format: "%.4f", $0) } ?? "none") paused=\(current.paused)")
+        return RunBudgetCalculator.summary(for: key, runs: Array(runs.values), budgets: config.resolvedProjectBudgets)
+    }
+
     func createRun(
         prompt: String,
         workingDirectory: String,
@@ -1329,8 +1597,16 @@ actor HostState {
             throw HostError.badRequest("Working directory does not exist")
         }
         let risk = RiskClassifier.classify(prompt)
+        let projectKey = RunBudgetCalculator.projectKey(projectID: projectID?.nilIfBlank, workingDirectory: directory)
+        let costBudgetReason = RunBudgetCalculator.approvalReason(
+            for: projectKey,
+            runs: Array(runs.values),
+            budgets: config.resolvedProjectBudgets
+        )
         let approvalReason: String? = if let forceApprovalReason = forceApprovalReason?.nilIfBlank {
             forceApprovalReason
+        } else if let costBudgetReason {
+            costBudgetReason
         } else if !budgetAllows(project: directory) {
             "Budget guard exceeded"
         } else if risk.requiresApproval {
@@ -1342,6 +1618,8 @@ actor HostState {
             nil
         } else if forceApprovalReason?.nilIfBlank != nil {
             forceApprovalSeverity
+        } else if costBudgetReason != nil {
+            .high
         } else if approvalReason == "Budget guard exceeded" {
             .high
         } else {
@@ -1437,6 +1715,7 @@ actor HostState {
         runs[runID] = run
         processes[runID] = nil
         persistRuns()
+        pauseBudgetIfNeeded(after: run)
         appendAudit("finished run id=\(runID) exit=\(exitCode)")
         publish(HostLogEvent(runID: runID, kind: .complete, stream: "host", message: "Exit code: \(exitCode)", createdAt: Date(), sessionID: run.sessionID, exitCode: exitCode))
         notifyDevices(
@@ -1479,6 +1758,25 @@ actor HostState {
         persistRuns()
         appendAudit("resume requested run id=\(runID)")
         return run
+    }
+
+    private func pauseBudgetIfNeeded(after run: HostRun) {
+        let key = RunBudgetCalculator.projectKey(projectID: run.projectID, workingDirectory: run.workingDirectory)
+        var budgets = config.resolvedProjectBudgets
+        guard var budget = budgets[key]?.normalized,
+              budget.paused == false else {
+            return
+        }
+        let summary = RunBudgetCalculator.summary(for: key, runs: Array(runs.values), budgets: budgets)
+        guard summary.isOverLimit else { return }
+        budget.paused = true
+        budget.updatedAt = Date()
+        budgets[key] = budget
+        config.projectBudgets = budgets
+        try? persistConfig()
+        appendAudit("paused cost budget key=\(key) cost=\(String(format: "%.4f", summary.costUSD)) limit=\(summary.budgetLimitUSD.map { String(format: "%.4f", $0) } ?? "none")")
+        publish(HostLogEvent(runID: run.id, kind: .status, stream: "host", message: "Cost budget paused for \(summary.displayName)", createdAt: Date(), sessionID: run.sessionID))
+        notifyDevices(run: run, event: .question, message: "Cost budget paused for \(summary.displayName)", severity: .high)
     }
 
     func approve(runID: String) throws -> HostRun {
@@ -1579,6 +1877,10 @@ actor HostState {
         if let data = try? JSONEncoder.pretty.encode(sortedRuns) {
             try? data.write(to: Self.runsURL, options: .atomic)
         }
+    }
+
+    private func persistConfig() throws {
+        try config.save()
     }
 
     private func appendLogFile(_ event: HostLogEvent) {
@@ -1889,6 +2191,17 @@ final class HostServer: @unchecked Sendable {
                 )
                 await state.recordAudit("github draft-pr url=\(response.url)")
                 sendJSON(response, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/budgets", request.method == "GET" {
+                sendJSON(await state.budgetSummaries(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/budgets", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(ProjectBudgetUpdateRequest.self, from: request.body)
+                sendJSON(try await state.updateBudget(body), connection: connection)
                 return
             }
 
