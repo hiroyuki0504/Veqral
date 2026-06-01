@@ -18,12 +18,25 @@ This file is the resume point for the clean main baseline. The former stacked Dr
 - [x] #11 司令塔（ポートフォリオ層）フル実装 — completed in PR #18 (`codex/pr2-portfolio-command-center`)
 - [x] #12 スタック→clean main 統合（ユーザー承認制） — completed after explicit GO via `codex/main-stack-integration-20260601`
 
+## Differentiation Backlog A
+
+- [x] #A0 コード実査監査 — Draft PR #30 (`codex/a0-code-audit`)
+- [x] #A1 Gate2 自動受け入れ — Draft PR #31 (`codex/a1-gate2-xcuitest`)
+- [x] #A2 記憶の体験化 — Draft PR #32 (`codex/a2-memory-experience`)
+- [x] #A3 コストガバナンス — Draft PR #33 (`codex/a3-cost-governance`)
+- [x] #A4 司令塔を実データで — Draft PR pending (`codex/a4-portfolio-real-data`)
+- [ ] #A5 認証オンボーディング・ウィザード
+- [ ] #A6 Apple Watch 承認アプリ
+- [ ] #A7 クロスベンダー #0 再実走
+- [ ] Final main 統合 — ユーザー GO 待ち
+
 ## Current Item
 
-Gate2: clean `main` 上で `DEVICE_ACCEPTANCE.md` に沿った iPhone/iPad 実機5項目の green 待ち
+#A5 認証オンボーディング・ウィザード
 
 ## Notes
 
+- #A4 report: `PORTFOLIO_REAL_DATA_PR_A4.md`. Shell env did not provide portfolio roots or explicit registry settings, so A4 used an isolated sample asset and did not claim live-asset acceptance. `smoke-portfolio-real-data` passed discover -> registry -> status -> logs -> log-summary -> approval-gated control.
 - #0 report: `HERMES_MEMORY_INHERITANCE_PR0.md`.
 - #0 current result: PASS. `verify-memory-inheritance` ran with isolated `HERMES_HOME`, Hermes native memory only, and `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4`; Chat A wrote a disposable code name to Hermes `MEMORY.md`, and Chat B returned the same value. The latest transcript is in `HERMES_MEMORY_INHERITANCE_PR0.md`.
 - Main integration: #9〜#29 landed into clean `main` in one union integration after user GO. Backup branch: `pre-portfolio-main-20260601-061622`. Integration branch: `codex/main-stack-integration-20260601`.
