@@ -2,14 +2,9 @@ import SwiftUI
 
 enum AppSection: String, CaseIterable, Identifiable {
     case home
-    case chat
-    case requirements
     case projects
     case devices
-    case agents
-    case models
     case runs
-    case terminal
     case diff
     case artifacts
     case history
@@ -22,14 +17,9 @@ enum AppSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .home: L10n.tr("Command")
-        case .chat: L10n.tr("Intent")
-        case .requirements: L10n.tr("Requirements")
         case .projects: L10n.tr("Projects")
         case .devices: L10n.tr("Devices")
-        case .agents: L10n.tr("Agents")
-        case .models: L10n.tr("Models")
         case .runs: L10n.tr("Runs")
-        case .terminal: L10n.tr("Terminal")
         case .diff: L10n.tr("Diff")
         case .artifacts: L10n.tr("Artifacts")
         case .history: L10n.tr("History")
@@ -42,14 +32,9 @@ enum AppSection: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .home: "command"
-        case .chat: "text.bubble"
-        case .requirements: "checklist"
         case .projects: "folder"
         case .devices: "macbook.and.iphone"
-        case .agents: "person.3.sequence"
-        case .models: "cpu"
         case .runs: "play.rectangle.on.rectangle"
-        case .terminal: "terminal"
         case .diff: "plus.forwardslash.minus"
         case .artifacts: "shippingbox"
         case .history: "clock.arrow.circlepath"
@@ -60,10 +45,9 @@ enum AppSection: String, CaseIterable, Identifiable {
     }
 
     static let primaryTabs: [AppSection] = [.home, .approvals, .projects, .devices]
-    static let commandGroup: [AppSection] = [.home, .chat, .requirements]
-    static let operationGroup: [AppSection] = [.projects, .agents, .models, .runs, .terminal, .diff, .artifacts, .history]
+    static let commandGroup: [AppSection] = [.home]
+    static let operationGroup: [AppSection] = [.projects, .runs, .diff, .artifacts, .history]
     static let systemGroup: [AppSection] = [.devices, .approvals, .memory, .github]
-    static let compactMore: [AppSection] = allCases.filter { !primaryTabs.contains($0) }
 }
 
 enum RunPhase: String, CaseIterable, Identifiable, Codable {

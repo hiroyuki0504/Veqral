@@ -423,6 +423,11 @@
 "changed files" = "変更ファイル";
 "gh auth OK" = "gh 認証 OK";
 "gh auth needed" = "gh 認証が必要";
+"Codex and Claude direct modes keep their own CLI model settings." = "Codex と Claude の直接モードは、それぞれの CLI 側のモデル設定を使います。";
+"Hermes Model" = "Hermes モデル";
+"No run selected" = "選択中の実行はありません";
+"Requirement Memo" = "要件メモ";
+"Summarize requirements, acceptance criteria, and risks for this work before implementing." = "実装前に、この作業の要件・受け入れ条件・リスクを整理して。";
 "iOS Remote Only" = "iOS はリモートのみ";
 "turns" = "ターン";
 "~/.claude sessions, resumable from History" = "~/.claude セッション。履歴から再開できます";

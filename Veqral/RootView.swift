@@ -139,14 +139,6 @@ private struct MoreView: View {
 
     var body: some View {
         List {
-            Section(L10n.tr("Command")) {
-                ForEach(AppSection.commandGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
-                    NavigationLink(value: section) {
-                        Label(section.title, systemImage: section.symbol)
-                    }
-                }
-            }
-
             Section(L10n.tr("Operations")) {
                 ForEach(AppSection.operationGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
                     NavigationLink(value: section) {
@@ -239,22 +231,12 @@ private func sectionDestination(_ section: AppSection) -> some View {
     switch section {
     case .home:
         CommandCenterRunView()
-    case .chat:
-        IntentCaptureView()
-    case .requirements:
-        RequirementsView()
     case .projects:
         ProjectsView()
     case .devices:
         DevicesView()
-    case .agents:
-        AgentsView()
-    case .models:
-        ModelAssignmentView()
     case .runs:
         RunsView()
-    case .terminal:
-        TerminalView()
     case .diff:
         DiffView()
     case .artifacts:

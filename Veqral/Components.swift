@@ -472,53 +472,6 @@ struct RunApprovalCallout: View {
     }
 }
 
-struct CommandComposer: View {
-    @EnvironmentObject private var store: CommandCenterStore
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            RuntimeSegmentedControl()
-
-            HStack(spacing: 10) {
-                Image(systemName: "sparkle.magnifyingglass")
-                    .foregroundStyle(VQTheme.accent)
-                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...3)
-                    .font(.body)
-                    .onSubmit {
-                        store.submitDraft()
-                    }
-                Button(action: store.submitDraft) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(VQTheme.accent)
-                .help(L10n.tr("Send"))
-            }
-            .padding(12)
-            .background(VQTheme.control.opacity(0.74))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(VQTheme.hairline, lineWidth: 1)
-            }
-
-            HStack(spacing: 8) {
-                QuickCommandButton(title: L10n.tr("Status"), symbol: "checklist", command: "git status --short")
-                QuickCommandButton(title: L10n.tr("Diff"), symbol: "plus.forwardslash.minus", command: "git diff --stat")
-                QuickCommandButton(title: L10n.tr("Build"), symbol: "hammer", command: "xcodebuild -project Veqral.xcodeproj -scheme Veqral -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' CODE_SIGNING_ALLOWED=NO build")
-                QuickCommandButton(title: L10n.tr("Remote"), symbol: "arrow.triangle.pull", command: "git remote -v")
-            }
-
-            CommandAttachmentControls()
-        }
-        .padding(14)
-        .commandComposerBackground()
-    }
-}
-
 struct CommandAttachmentControls: View {
     @EnvironmentObject private var store: CommandCenterStore
     @State private var showCamera = false
@@ -881,48 +834,6 @@ struct RuntimeSegmentedControl: View {
     }
 }
 
-struct QuickCommandButton: View {
-    @EnvironmentObject private var store: CommandCenterStore
-    let title: String
-    let symbol: String
-    let command: String
-
-    var body: some View {
-        Button {
-            store.submitCommand(command, runtime: .localShell)
-        } label: {
-            Label(title, systemImage: symbol)
-                .font(.footnote.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
-        .buttonStyle(.bordered)
-        .buttonBorderShape(.roundedRectangle(radius: 8))
-        .tint(VQTheme.steel)
-    }
-}
-
-private extension View {
-    func commandComposerBackground() -> some View {
-        background {
-            ZStack {
-                VQTheme.elevated
-                LinearGradient(
-                    colors: [Color.white.opacity(0.060), Color.clear],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(VQTheme.hairline.opacity(0.95), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 10)
-    }
-}
-
 struct CommandRunListRow: View {
     let run: CommandRun
     var isSelected: Bool = false
@@ -1009,54 +920,6 @@ struct RemoteDeviceSummaryRow: View {
             StatusPill(title: device.lastSeenAt == nil ? "Paired" : "Seen", tint: device.lastSeenAt == nil ? VQTheme.unavailable : VQTheme.green)
         }
         .padding(.vertical, 4)
-    }
-}
-
-struct ContextPackageIndicator: View {
-    let title: String
-    let subtitle: String
-    let items: [String]
-
-    init(
-        title: String = "Shared Context Package",
-        subtitle: String = "Same memory, requirements, policies, repo context, and output contract are passed to every role.",
-        items: [String] = ContextPackage.items
-    ) {
-        self.title = title
-        self.subtitle = subtitle
-        self.items = items
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "archivebox")
-                    .frame(width: 28, height: 28)
-                    .foregroundStyle(VQTheme.green)
-                    .background(VQTheme.green.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(L10n.tr(title))
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(VQTheme.ink)
-                    Text(L10n.tr(subtitle))
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
-                StatusPill(title: "Unified", tint: VQTheme.green)
-            }
-
-            FlowLayout(items: items)
-        }
-        .padding(12)
-        .background(VQTheme.green.opacity(0.055))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(VQTheme.green.opacity(0.18), lineWidth: 1)
-        }
     }
 }
 
