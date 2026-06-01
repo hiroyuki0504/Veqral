@@ -2,6 +2,29 @@
 
 This file is the resume point for the clean main baseline. The former stacked Draft PR backlog is now integrated into `main`.
 
+## Differentiation Backlog A
+
+- [x] #A0 コード実査監査 — Draft PR #30 (`codex/a0-code-audit`)
+- [x] #A1 Gate2 自動受け入れ — Draft PR #31 (`codex/a1-gate2-xcuitest`)
+- [x] #A2 記憶の体験化 — Draft PR #32 (`codex/a2-memory-experience`)
+- [x] #A3 コストガバナンス — Draft PR pending (`codex/a3-cost-governance`)
+- [ ] #A4 司令塔を実データで
+- [ ] #A5 認証オンボーディング・ウィザード
+- [ ] #A6 Apple Watch 承認アプリ
+- [ ] #A7 クロスベンダー #0 再実走
+- [ ] Final main 統合（ユーザー GO 待ち）
+
+## Differentiation Current Item
+
+#A4 司令塔を実データで。
+
+## Differentiation Notes
+
+- #A0 report: `AUDIT.md` in PR #30.
+- #A1 report: `GATE2_XCUITEST_ACCEPTANCE_PR_A1.md` in PR #31.
+- #A2 report: `MEMORY_EXPERIENCE_PR_A2.md` in PR #32.
+- #A3 report: `COST_GOVERNANCE_PR_A3.md`. Mac Host now exposes project cost summaries and project budget settings, pauses/approval-gates over-budget runs, and shows cost guard panels in Run detail and Portfolio asset detail.
+
 ## Status
 
 - [x] #0 Hermes 記憶継承の自動実証 — real 2-model Hermes native-memory pass recorded in PR #29 (`codex/gates-hermes-device-acceptance`)

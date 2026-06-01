@@ -28,6 +28,7 @@ struct PortfolioView: View {
             if store.portfolioAssets.isEmpty {
                 store.refreshPortfolio()
             }
+            store.refreshCostGovernance()
         }
         .sheet(isPresented: $isShowingAddAsset) {
             PortfolioAssetEditor(asset: $draftAsset, title: editorTitle) {
@@ -171,6 +172,10 @@ struct PortfolioView: View {
                         if let memory = store.selectedPortfolioStatus?.memoryMB {
                             KeyValueLine(key: "Memory", value: String(format: "%.1f MB", memory))
                         }
+                    }
+
+                    if let summary = store.costSummary(for: asset) {
+                        CostGovernancePanel(summary: summary)
                     }
 
                     if asset.kind == .engagement {

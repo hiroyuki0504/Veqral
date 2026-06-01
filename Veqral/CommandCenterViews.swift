@@ -629,6 +629,11 @@ private struct RunHeader: View {
                 RunUsageSummary(usage: usage)
             }
 
+            CostGovernancePanel(summary: store.costSummary(for: run), compact: true)
+                .onAppear {
+                    store.refreshCostGovernance()
+                }
+
             if let approval = store.pendingApproval(for: run.id) {
                 RunApprovalCallout(approval: approval)
             }
@@ -714,6 +719,154 @@ private struct RunUsageChip: View {
                 .stroke(VQTheme.hairline, lineWidth: 1)
         }
     }
+}
+
+struct CostGovernancePanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let summary: RemoteProjectCostSummary
+    var compact: Bool = false
+    @State private var budgetText = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("コストガード", systemImage: "gauge.with.dots.needle.67percent")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                StatusPill(title: statusTitle, tint: statusTint)
+                Spacer()
+                Text(summary.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 8) {
+                RunUsageChip(title: "累積 token", value: tokenString(summary.totalTokens), symbol: "sum")
+                RunUsageChip(title: "累積費用", value: costString(summary.costUSD), symbol: "dollarsign.circle")
+                if let limit = summary.budgetLimitUSD {
+                    RunUsageChip(title: "上限", value: costString(limit), symbol: "lock")
+                }
+            }
+
+            if let limit = summary.budgetLimitUSD, limit > 0 {
+                ProgressView(value: min(max(summary.costUSD / limit, 0), 1))
+                    .tint(statusTint)
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    budgetInput
+                    actionButtons
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    budgetInput
+                    actionButtons
+                }
+            }
+
+            if !store.costGovernanceMessage.isEmpty, !compact {
+                Text(store.costGovernanceMessage)
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+            }
+        }
+        .padding(10)
+        .background(VQTheme.control.opacity(0.38))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
+        }
+        .onAppear(perform: syncBudgetText)
+        .onChange(of: summary.budgetLimitUSD) { _, _ in
+            syncBudgetText()
+        }
+    }
+
+    private var budgetInput: some View {
+        TextField("上限 USD", text: $budgetText)
+            .textFieldStyle(.plain)
+            .font(.caption.monospacedDigit())
+            .frame(width: 110)
+            .padding(.horizontal, 9)
+            .frame(height: 30)
+            .background(VQTheme.elevated.opacity(0.72))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(VQTheme.hairline, lineWidth: 1)
+            }
+    }
+
+    private var actionButtons: some View {
+        HStack(spacing: 8) {
+            Button {
+                store.saveCostBudget(summary: summary, limitUSD: parsedBudget, paused: false)
+            } label: {
+                Label("保存", systemImage: "checkmark")
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+            .controlSize(.small)
+
+            if summary.paused {
+                Button {
+                    store.saveCostBudget(summary: summary, limitUSD: summary.budgetLimitUSD, paused: false)
+                } label: {
+                    Label("再開", systemImage: "play")
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .controlSize(.small)
+            }
+        }
+        .font(.caption.weight(.semibold))
+    }
+
+    private var parsedBudget: Double? {
+        let clean = budgetText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return nil }
+        return Double(clean.replacingOccurrences(of: ",", with: ""))
+    }
+
+    private var statusTitle: String {
+        if summary.paused { return "停止中" }
+        if summary.isOverLimit { return "上限超過" }
+        if summary.isNearLimit { return "しきい値超過" }
+        if summary.budgetLimitUSD != nil { return "監視中" }
+        return "未設定"
+    }
+
+    private var statusTint: Color {
+        if summary.paused || summary.isOverLimit { return VQTheme.red }
+        if summary.isNearLimit { return VQTheme.amber }
+        if summary.budgetLimitUSD != nil { return VQTheme.green }
+        return VQTheme.steel
+    }
+
+    private func syncBudgetText() {
+        if let limit = summary.budgetLimitUSD {
+            budgetText = String(format: "%.4f", limit)
+        } else {
+            budgetText = ""
+        }
+    }
+
+    private func tokenString(_ value: Int) -> String {
+        Self.tokenFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+
+    private func costString(_ value: Double) -> String {
+        value < 0.0001 ? String(format: "$%.6f", value) : String(format: "$%.4f", value)
+    }
+
+    private static let tokenFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        return formatter
+    }()
 }
 
 private struct RunPhaseTracker: View {
