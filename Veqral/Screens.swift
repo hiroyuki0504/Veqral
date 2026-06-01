@@ -674,6 +674,14 @@ struct DevicesView: View {
                     }
                 }
 
+                AuthOnboardingPanel(
+                    status: store.authOnboardingStatus,
+                    message: store.authOnboardingMessage,
+                    isPaired: store.remoteHost.isPaired,
+                    refresh: { store.refreshAuthOnboarding() },
+                    persist: { store.refreshAuthOnboarding(persistReadyMarkers: true) }
+                )
+
                 VQPanel("CLI Diagnostics", systemImage: "stethoscope") {
                     VStack(alignment: .leading, spacing: 10) {
                         if let toolStatuses = store.remoteHostHealth?.toolStatuses, !toolStatuses.isEmpty {
@@ -858,7 +866,12 @@ struct DevicesView: View {
                 }
             }
         }
-        .onAppear(perform: syncRemoteFields)
+        .onAppear {
+            syncRemoteFields()
+            if store.remoteHost.isPaired {
+                store.refreshAuthOnboarding()
+            }
+        }
         .onChange(of: store.remoteHost) { _, _ in
             syncRemoteFields()
         }
@@ -1251,6 +1264,148 @@ private struct PairingQRScannerSheet: View {
                     }
                 }
             }
+        }
+    }
+}
+
+private struct AuthOnboardingPanel: View {
+    let status: RemoteAuthOnboardingStatus?
+    let message: String
+    let isPaired: Bool
+    let refresh: () -> Void
+    let persist: () -> Void
+
+    var body: some View {
+        VQPanel("認証オンボーディング", systemImage: "person.badge.key") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    StatusPill(title: status?.allRequiredReady == true ? "準備完了" : "確認が必要", tint: status?.allRequiredReady == true ? VQTheme.green : VQTheme.amber)
+                    if let status {
+                        StatusPill(title: "\(status.readyCount)/\(status.providers.count)", tint: VQTheme.steel)
+                    }
+                    Spacer()
+                    Button(action: refresh) {
+                        Label(L10n.tr("Refresh"), systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                    .disabled(!isPaired)
+
+                    Button(action: persist) {
+                        Label("ログイン確認", systemImage: "key.viewfinder")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                    .disabled(!isPaired)
+                }
+                .font(.footnote.weight(.semibold))
+
+                Text(isPaired ? (message.isEmpty ? "Mac 側で login した後、この画面で確認します。" : message) : L10n.tr("Mac Host pairing is required."))
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let status {
+                    ForEach(status.providers) { provider in
+                        AuthProviderRow(provider: provider)
+                        if provider.id != status.providers.last?.id {
+                            EmptyDivider()
+                        }
+                    }
+                } else {
+                    Text("Codex / Claude / Hermes のログイン状態は Host 接続後に表示されます。")
+                        .font(.subheadline)
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+            }
+        }
+    }
+}
+
+private struct AuthProviderRow: View {
+    let provider: RemoteAuthProviderStatus
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: iconName)
+                    .frame(width: 28, height: 28)
+                    .foregroundStyle(tint)
+                    .background(tint.opacity(0.10))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                Text(provider.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                StatusPill(title: provider.isInstalled ? "CLI" : "未インストール", tint: provider.isInstalled ? VQTheme.green : VQTheme.amber)
+                StatusPill(title: provider.isLoggedIn ? "login 済み" : "login 未確認", tint: provider.isLoggedIn ? VQTheme.green : VQTheme.amber)
+                StatusPill(title: provider.hermesProviderReady ? "Hermes OK" : "Hermes 未確認", tint: provider.hermesProviderReady ? VQTheme.green : VQTheme.amber)
+                if provider.keychainMarkerPresent {
+                    StatusPill(title: "Keychain", tint: VQTheme.green)
+                }
+                Spacer(minLength: 0)
+            }
+
+            Text(provider.summary)
+                .font(.caption)
+                .foregroundStyle(provider.isReady ? VQTheme.secondaryText : VQTheme.amber)
+                .fixedSize(horizontal: false, vertical: true)
+
+            commandLine(provider.loginCommand)
+            if let alternate = provider.alternateLoginCommand, !alternate.isEmpty {
+                commandLine(alternate)
+            }
+
+            if !provider.credentialHints.isEmpty {
+                Text(provider.credentialHints.joined(separator: " / "))
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+
+            ForEach(provider.warnings, id: \.self) { warning in
+                Text(warning)
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func commandLine(_ command: String) -> some View {
+        HStack(spacing: 8) {
+            Text(command)
+                .font(.caption.monospaced())
+                .foregroundStyle(VQTheme.ink)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+            Button {
+                UIPasteboard.general.string = command
+            } label: {
+                Image(systemName: "doc.on.doc")
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(VQTheme.control.opacity(0.42))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var tint: Color {
+        provider.isReady ? VQTheme.green : VQTheme.amber
+    }
+
+    private var iconName: String {
+        switch provider.id {
+        case "codex":
+            return "terminal"
+        case "claude":
+            return "bubble.left.and.text.bubble.right"
+        default:
+            return "point.3.connected.trianglepath.dotted"
         }
     }
 }

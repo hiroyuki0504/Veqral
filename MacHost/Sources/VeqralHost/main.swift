@@ -30,6 +30,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-voice-cleanup" {
             VoiceCleanupSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-auth-onboarding" {
+            AuthOnboardingSmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -1023,6 +1026,162 @@ enum VoiceCleanupSmoke {
     }
 }
 
+struct AuthOnboardingStatus: Codable {
+    var checkedAt: Date
+    var providers: [AuthProviderStatus]
+    var readyCount: Int
+    var allRequiredReady: Bool
+    var message: String
+}
+
+struct AuthProviderStatus: Codable {
+    var id: String
+    var title: String
+    var cliCommand: String
+    var loginCommand: String
+    var alternateLoginCommand: String?
+    var isInstalled: Bool
+    var isLoggedIn: Bool
+    var hermesProviderReady: Bool
+    var keychainMarkerPresent: Bool
+    var isReady: Bool
+    var summary: String
+    var credentialHints: [String]
+    var warnings: [String]
+}
+
+enum AuthOnboardingManager {
+    static func status(persistReadyMarkers: Bool) -> AuthOnboardingStatus {
+        let providers = [
+            provider(
+                id: "codex",
+                title: "Codex",
+                engine: .codex,
+                loginCommand: "codex login",
+                alternateLoginCommand: nil,
+                credentialHints: ["~/.codex/auth.json"],
+                hermesProviderHint: "~/.hermes/auth.json"
+            ),
+            provider(
+                id: "claude",
+                title: "Claude",
+                engine: .claude,
+                loginCommand: "claude login",
+                alternateLoginCommand: "claude setup-token",
+                credentialHints: ["~/.claude/.credentials.json", "~/.claude.json"],
+                hermesProviderHint: nil
+            ),
+            provider(
+                id: "hermes",
+                title: "Hermes",
+                engine: .hermes,
+                loginCommand: "hermes chat -Q --provider openai-codex --model gpt-5.4 --max-turns 1 -q 'ping'",
+                alternateLoginCommand: "hermes chat -Q --provider claude --max-turns 1 -q 'ping'",
+                credentialHints: ["~/.hermes/auth.json"],
+                hermesProviderHint: nil
+            )
+        ]
+
+        if persistReadyMarkers {
+            for provider in providers where provider.isReady {
+                try? KeychainStore.set("ready:\(Int(Date().timeIntervalSince1970))", account: markerAccount(provider.id))
+            }
+        }
+
+        let refreshed = providers.map { provider -> AuthProviderStatus in
+            var provider = provider
+            provider.keychainMarkerPresent = KeychainStore.get(account: markerAccount(provider.id))?.nilIfBlank != nil || provider.keychainMarkerPresent
+            return provider
+        }
+        let readyCount = refreshed.filter(\.isReady).count
+        let allRequiredReady = refreshed.filter { $0.id == "codex" || $0.id == "claude" || $0.id == "hermes" }.allSatisfy(\.isReady)
+        return AuthOnboardingStatus(
+            checkedAt: Date(),
+            providers: refreshed,
+            readyCount: readyCount,
+            allRequiredReady: allRequiredReady,
+            message: allRequiredReady ? "Codex / Claude / Hermes are ready." : "Run the listed login commands on the Mac, then refresh."
+        )
+    }
+
+    private static func provider(
+        id: String,
+        title: String,
+        engine: AgentEngine,
+        loginCommand: String,
+        alternateLoginCommand: String?,
+        credentialHints: [String],
+        hermesProviderHint: String?
+    ) -> AuthProviderStatus {
+        let cli = CLIAdapterRegistry.status(for: engine)
+        let loginDetected = credentialHints.contains { FileManager.default.fileExists(atPath: $0.expandingTilde) }
+        let hermesProviderReady = hermesProviderHint.map { FileManager.default.fileExists(atPath: $0.expandingTilde) } ?? loginDetected
+        let markerPresent = KeychainStore.get(account: markerAccount(id))?.nilIfBlank != nil
+        let ready = cli.isInstalled && loginDetected && hermesProviderReady
+        var warnings: [String] = []
+        if !cli.isInstalled {
+            warnings.append("\(title) CLI is not installed.")
+        }
+        if !loginDetected {
+            warnings.append("\(title) login is not detected.")
+        }
+        if !hermesProviderReady {
+            warnings.append("Hermes provider readiness is not detected for \(title).")
+        }
+        if markerPresent && !ready {
+            warnings.append("Keychain readiness marker exists, but current login check is not ready.")
+        }
+
+        return AuthProviderStatus(
+            id: id,
+            title: title,
+            cliCommand: cli.executablePath == nil ? engine.rawValue : cli.executablePath!,
+            loginCommand: loginCommand,
+            alternateLoginCommand: alternateLoginCommand,
+            isInstalled: cli.isInstalled,
+            isLoggedIn: loginDetected,
+            hermesProviderReady: hermesProviderReady,
+            keychainMarkerPresent: markerPresent,
+            isReady: ready,
+            summary: ready ? "\(title) is ready." : "\(title) needs login or provider setup.",
+            credentialHints: credentialHints,
+            warnings: warnings
+        )
+    }
+
+    private static func markerAccount(_ providerID: String) -> String {
+        "auth-onboarding:\(providerID):ready"
+    }
+}
+
+enum AuthOnboardingSmoke {
+    static func runAndExit() -> Never {
+        do {
+            let status = AuthOnboardingManager.status(persistReadyMarkers: false)
+            let ids = Set(status.providers.map(\.id))
+            guard ids == Set(["codex", "claude", "hermes"]) else {
+                throw SmokeError("auth onboarding providers are incomplete")
+            }
+            guard status.providers.allSatisfy({ !$0.loginCommand.isEmpty && !$0.cliCommand.isEmpty }) else {
+                throw SmokeError("auth onboarding commands are incomplete")
+            }
+            let data = try JSONEncoder.pretty.encode(status)
+            let text = String(data: data, encoding: .utf8) ?? ""
+            guard !text.contains(NSHomeDirectory()) else {
+                throw SmokeError("auth onboarding leaked an absolute home path")
+            }
+            guard !text.localizedCaseInsensitiveContains("bearer ") else {
+                throw SmokeError("auth onboarding leaked a bearer value")
+            }
+            print("PASS: Auth onboarding smoke providers=\(status.providers.count) ready=\(status.readyCount) allReady=\(status.allRequiredReady)")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Auth onboarding smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+}
+
 enum VoiceCleanupRunner {
     static func cleanup(_ request: VoiceCleanupRequest) throws -> VoiceCleanupResponse {
         let ruleBased = request.ruleBasedText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1761,6 +1920,18 @@ final class HostServer: @unchecked Sendable {
 
             if request.path == "/v1/telemetry", request.method == "GET" {
                 sendJSON(await telemetryCollector.snapshot(tailscaleIP: tailscaleIP()), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/auth/onboarding", request.method == "GET" {
+                sendJSON(AuthOnboardingManager.status(persistReadyMarkers: false), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/auth/onboarding/refresh", request.method == "POST" {
+                let status = AuthOnboardingManager.status(persistReadyMarkers: true)
+                await state.recordAudit("auth onboarding refreshed device=\(authenticatedDeviceID) ready=\(status.readyCount)/\(status.providers.count)")
+                sendJSON(status, connection: connection)
                 return
             }
 
