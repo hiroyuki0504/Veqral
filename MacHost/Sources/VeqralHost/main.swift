@@ -39,6 +39,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-auth-onboarding" {
             AuthOnboardingSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-swarm-runner" {
+            SwarmRunnerSmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -134,6 +137,8 @@ struct HostConfig: Codable, Sendable {
     var discordWebhook: String?
     var portfolioDiscordWebhook: String?
     var projectBudgets: [String: ProjectBudgetLimit]? = nil
+    var swarmMaxSlots: Int? = nil
+    var swarmXcodeMaxSlots: Int? = nil
 
     static var folder: URL {
         if let path = ProcessInfo.processInfo.environment["VEQRAL_HOST_HOME"]?.nilIfBlank {
@@ -228,6 +233,24 @@ struct HostConfig: Codable, Sendable {
 
     var resolvedProjectBudgets: [String: ProjectBudgetLimit] {
         projectBudgets ?? [:]
+    }
+
+    var resolvedSwarmMaxSlots: Int {
+        let env = ProcessInfo.processInfo.environment
+        if let value = env["VEQRAL_SWARM_MAX_SLOTS"]?.nilIfBlank,
+           let slots = Int(value) {
+            return min(max(slots, 1), 8)
+        }
+        return min(max(swarmMaxSlots ?? 2, 1), 8)
+    }
+
+    var resolvedSwarmXcodeMaxSlots: Int {
+        let env = ProcessInfo.processInfo.environment
+        if let value = env["VEQRAL_SWARM_XCODE_MAX_SLOTS"]?.nilIfBlank,
+           let slots = Int(value) {
+            return min(max(slots, 1), 2)
+        }
+        return min(max(swarmXcodeMaxSlots ?? 1, 1), 2)
     }
 
     private static func booleanValue(_ value: String?) -> Bool {
@@ -797,7 +820,7 @@ final class LocalWebhookReceiver: @unchecked Sendable {
     }
 }
 
-struct SmokeError: LocalizedError {
+struct SmokeError: LocalizedError, Sendable {
     var message: String
 
     init(_ message: String) {
@@ -806,6 +829,28 @@ struct SmokeError: LocalizedError {
 
     var errorDescription: String? {
         message
+    }
+}
+
+final class SmokeResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Result<String, Error>
+
+    init(_ storage: Result<String, Error>) {
+        self.storage = storage
+    }
+
+    var result: Result<String, Error> {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+        set {
+            lock.lock()
+            storage = newValue
+            lock.unlock()
+        }
     }
 }
 
@@ -1609,6 +1654,756 @@ enum AuthOnboardingSmoke {
     }
 }
 
+enum SwarmTaskStatus: String, Codable, Sendable, CaseIterable {
+    case queued
+    case preparing
+    case running
+    case verifying
+    case committing
+    case creatingDraftPR
+    case complete
+    case failed
+    case cancelled
+
+    var isTerminal: Bool {
+        switch self {
+        case .complete, .failed, .cancelled:
+            true
+        default:
+            false
+        }
+    }
+}
+
+enum SwarmAgentKind: String, Codable, Sendable, CaseIterable {
+    case codex
+    case claude
+    case hermes
+    case shell
+}
+
+struct SwarmTaskRequest: Codable, Sendable {
+    var title: String?
+    var repoPath: String?
+    var baseBranch: String?
+    var instruction: String
+    var scopeHints: [String]?
+    var agent: SwarmAgentKind?
+    var branchName: String?
+    var verifyCommands: [String]?
+    var createDraftPR: Bool?
+    var cleanupWorktree: Bool?
+}
+
+struct SwarmTaskRecord: Codable, Identifiable, Sendable, Equatable {
+    var id: String
+    var title: String
+    var repoPath: String
+    var baseBranch: String
+    var branchName: String
+    var worktreePath: String
+    var instruction: String
+    var scopeHints: [String]
+    var agent: SwarmAgentKind
+    var verifyCommands: [String]
+    var createDraftPR: Bool
+    var cleanupWorktree: Bool
+    var status: SwarmTaskStatus
+    var queuedAt: Date
+    var startedAt: Date?
+    var completedAt: Date?
+    var prURL: String?
+    var errorMessage: String?
+    var cancelRequested: Bool
+    var logs: [String]
+}
+
+struct SwarmTaskListResponse: Codable, Sendable {
+    var status: SwarmCoordinatorStatus
+    var tasks: [SwarmTaskRecord]
+}
+
+struct SwarmCoordinatorStatus: Codable, Sendable {
+    var maxSlots: Int
+    var xcodeMaxSlots: Int
+    var activeSlots: Int
+    var queuedCount: Int
+    var runningCount: Int
+    var thermalState: String
+    var killSwitchActive: Bool
+}
+
+struct SwarmTaskResponse: Codable, Sendable {
+    var task: SwarmTaskRecord
+}
+
+actor SwarmCoordinator {
+    private var config: HostConfig
+    private var tasks: [String: SwarmTaskRecord]
+    private var activeTaskIDs: Set<String> = []
+    private var activePIDs: [String: pid_t] = [:]
+    private var killSwitchActive = false
+
+    init(config: HostConfig) {
+        self.config = config
+        self.tasks = Self.loadTasks()
+        for id in tasks.keys {
+            guard var task = tasks[id], !task.status.isTerminal else { continue }
+            task.status = .failed
+            task.errorMessage = "Mac Host restarted before the swarm task finished."
+            task.completedAt = Date()
+            task.logs.append(Self.timestamped("Host restarted; task marked failed for an honest resumable ledger."))
+            tasks[id] = task
+        }
+        Self.persist(Array(tasks.values))
+    }
+
+    nonisolated static var folder: URL {
+        HostConfig.folder.appendingPathComponent("swarm", isDirectory: true)
+    }
+
+    nonisolated static var worktreesFolder: URL {
+        folder.appendingPathComponent("worktrees", isDirectory: true)
+    }
+
+    nonisolated static var tasksURL: URL {
+        folder.appendingPathComponent("tasks.json")
+    }
+
+    func list() -> SwarmTaskListResponse {
+        SwarmTaskListResponse(status: status(), tasks: sortedTasks())
+    }
+
+    func enqueue(_ request: SwarmTaskRequest) throws -> SwarmTaskRecord {
+        guard !killSwitchActive else {
+            throw HostError.badRequest("Swarm kill switch is active. Clear it by restarting the Host before queueing more tasks.")
+        }
+        let repoPath = (request.repoPath?.nilIfBlank ?? config.defaultWorkingDirectory).expandingTilde
+        guard FileManager.default.fileExists(atPath: repoPath) else {
+            throw HostError.badRequest("Repository path does not exist.")
+        }
+        let gitCheck = ProcessRunner.run("/usr/bin/git", ["-C", repoPath, "rev-parse", "--show-toplevel"], timeout: 10)
+        guard gitCheck.exitCode == 0 else {
+            throw HostError.badRequest("Repository path is not a git repository.")
+        }
+
+        let id = UUID().uuidString
+        let shortID = String(id.prefix(8)).lowercased()
+        let title = request.title?.nilIfBlank ?? "Swarm task \(shortID)"
+        let baseBranch = request.baseBranch?.nilIfBlank ?? "main"
+        let branchName = request.branchName?.nilIfBlank ?? "codex/swarm/\(Self.slug(title))-\(shortID)"
+        let worktreePath = Self.worktreesFolder.appendingPathComponent(shortID, isDirectory: true).path
+        let task = SwarmTaskRecord(
+            id: id,
+            title: title,
+            repoPath: repoPath,
+            baseBranch: baseBranch,
+            branchName: branchName,
+            worktreePath: worktreePath,
+            instruction: request.instruction,
+            scopeHints: request.scopeHints ?? [],
+            agent: request.agent ?? .codex,
+            verifyCommands: request.verifyCommands?.filter { $0.nilIfBlank != nil } ?? ["git diff --check"],
+            createDraftPR: request.createDraftPR ?? true,
+            cleanupWorktree: request.cleanupWorktree ?? true,
+            status: .queued,
+            queuedAt: Date(),
+            startedAt: nil,
+            completedAt: nil,
+            prURL: nil,
+            errorMessage: nil,
+            cancelRequested: false,
+            logs: [Self.timestamped("Queued on \(localHostName()) with branch \(branchName).")]
+        )
+        tasks[id] = task
+        persist()
+        pump()
+        return task
+    }
+
+    func cancel(taskID: String) throws -> SwarmTaskRecord {
+        guard var task = tasks[taskID] else { throw HostError.notFound("Swarm task not found.") }
+        task.cancelRequested = true
+        task.logs.append(Self.timestamped("Cancellation requested."))
+        if task.status == .queued {
+            task.status = .cancelled
+            task.completedAt = Date()
+        }
+        tasks[taskID] = task
+        if let pid = activePIDs[taskID] {
+            kill(pid, SIGTERM)
+        }
+        persist()
+        pump()
+        return task
+    }
+
+    func killAll() -> SwarmTaskListResponse {
+        killSwitchActive = true
+        for pid in activePIDs.values {
+            kill(pid, SIGTERM)
+        }
+        for id in tasks.keys {
+            guard var task = tasks[id], !task.status.isTerminal else { continue }
+            task.cancelRequested = true
+            task.logs.append(Self.timestamped("Kill switch requested."))
+            task.status = .cancelled
+            task.completedAt = Date()
+            tasks[id] = task
+        }
+        persist()
+        return list()
+    }
+
+    private func pump() {
+        let available = max(0, effectiveMaxSlots() - activeTaskIDs.count)
+        guard available > 0, !killSwitchActive else { return }
+        let queued = sortedTasks()
+            .filter { $0.status == .queued && !$0.cancelRequested }
+            .prefix(available)
+        for task in queued {
+            activeTaskIDs.insert(task.id)
+            Task.detached(priority: .utility) { [weak self] in
+                await self?.execute(taskID: task.id)
+            }
+        }
+    }
+
+    private func execute(taskID: String) async {
+        defer {
+            finishExecution(taskID: taskID)
+        }
+        do {
+            try await update(taskID, status: .preparing, log: "Preparing isolated git worktree.")
+            try await failIfCancelled(taskID)
+            let task = try requireTask(taskID)
+            try FileManager.default.createDirectory(at: Self.worktreesFolder, withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: task.worktreePath) {
+                _ = await runProcess("/usr/bin/git", ["-C", task.repoPath, "worktree", "remove", "--force", task.worktreePath], taskID: taskID, label: "remove stale worktree", timeout: 60)
+            }
+            _ = try await runRequired("/usr/bin/git", ["-C", task.repoPath, "worktree", "add", "-B", task.branchName, task.worktreePath, task.baseBranch], taskID: taskID, label: "git worktree add", timeout: 120)
+
+            try await update(taskID, status: .running, log: "Running \(task.agent.rawValue) in \(task.worktreePath).")
+            try await failIfCancelled(taskID)
+            let agentCommand = try command(for: task)
+            _ = try await runRequired(agentCommand.executable, agentCommand.arguments, taskID: taskID, label: "\(task.agent.rawValue) agent", timeout: 60 * 30, workingDirectory: task.worktreePath)
+
+            try await update(taskID, status: .verifying, log: "Running task verification.")
+            for command in task.verifyCommands {
+                try await failIfCancelled(taskID)
+                _ = try await runRequired("/bin/zsh", ["-lc", command], taskID: taskID, label: "verify: \(command)", timeout: 60 * 20, workingDirectory: task.worktreePath)
+            }
+
+            try await update(taskID, status: .committing, log: "Checking worktree changes.")
+            let statusOutput = await runProcess("/usr/bin/git", ["-C", task.worktreePath, "status", "--porcelain"], taskID: taskID, label: "git status", timeout: 30)
+            let hasChanges = statusOutput.stdout.nilIfBlank != nil
+            if hasChanges {
+                _ = try await runRequired("/usr/bin/git", ["-C", task.worktreePath, "add", "-A"], taskID: taskID, label: "git add", timeout: 60)
+                _ = try await runRequired("/usr/bin/git", ["-C", task.worktreePath, "commit", "-m", "Swarm task: \(task.title)"], taskID: taskID, label: "git commit", timeout: 120)
+            } else {
+                append(taskID, log: "No file changes to commit.")
+            }
+
+            var prURL: String?
+            let refreshed = try requireTask(taskID)
+            if refreshed.createDraftPR && hasChanges {
+                try await update(taskID, status: .creatingDraftPR, log: "Creating draft PR.")
+                _ = try await runRequired("/usr/bin/git", ["-C", refreshed.worktreePath, "push", "-u", "origin", refreshed.branchName], taskID: taskID, label: "git push", timeout: 60 * 10)
+                let body = """
+                Swarm task generated by Veqral.
+
+                Task:
+                \(refreshed.instruction)
+
+                Scope:
+                \(refreshed.scopeHints.joined(separator: ", "))
+                """
+                let prOutput = try await runRequired(
+                    "/usr/bin/gh",
+                    ["pr", "create", "--draft", "--base", refreshed.baseBranch, "--head", refreshed.branchName, "--title", refreshed.title, "--body", body],
+                    taskID: taskID,
+                    label: "gh pr create",
+                    timeout: 120,
+                    workingDirectory: refreshed.worktreePath
+                )
+                prURL = prOutput.stdout
+                    .split(whereSeparator: \.isNewline)
+                    .map(String.init)
+                    .first { $0.hasPrefix("http") }
+                if let prURL {
+                    setPRURL(taskID, prURL: prURL)
+                }
+            }
+
+            if let current = tasks[taskID], current.cleanupWorktree && current.status != .failed {
+                _ = await runProcess("/usr/bin/git", ["-C", current.repoPath, "worktree", "remove", "--force", current.worktreePath], taskID: taskID, label: "git worktree remove", timeout: 120)
+            }
+            try await complete(taskID, prURL: prURL)
+        } catch is CancellationError {
+            markCancelled(taskID)
+        } catch {
+            markFailed(taskID, error: error)
+        }
+    }
+
+    private func finishExecution(taskID: String) {
+        activeTaskIDs.remove(taskID)
+        activePIDs[taskID] = nil
+        persist()
+        pump()
+    }
+
+    private func status() -> SwarmCoordinatorStatus {
+        let all = Array(tasks.values)
+        return SwarmCoordinatorStatus(
+            maxSlots: effectiveMaxSlots(),
+            xcodeMaxSlots: config.resolvedSwarmXcodeMaxSlots,
+            activeSlots: activeTaskIDs.count,
+            queuedCount: all.filter { $0.status == .queued }.count,
+            runningCount: all.filter { [.preparing, .running, .verifying, .committing, .creatingDraftPR].contains($0.status) }.count,
+            thermalState: thermalStateLabel(),
+            killSwitchActive: killSwitchActive
+        )
+    }
+
+    private func effectiveMaxSlots() -> Int {
+        switch ProcessInfo.processInfo.thermalState {
+        case .serious, .critical:
+            return 1
+        default:
+            return config.resolvedSwarmMaxSlots
+        }
+    }
+
+    private func sortedTasks() -> [SwarmTaskRecord] {
+        tasks.values.sorted { $0.queuedAt > $1.queuedAt }
+    }
+
+    private func requireTask(_ id: String) throws -> SwarmTaskRecord {
+        guard let task = tasks[id] else { throw HostError.notFound("Swarm task not found.") }
+        return task
+    }
+
+    private func update(_ id: String, status: SwarmTaskStatus, log: String) async throws {
+        var task = try requireTask(id)
+        if task.cancelRequested { throw CancellationError() }
+        task.status = status
+        if task.startedAt == nil { task.startedAt = Date() }
+        task.logs.append(Self.timestamped(log))
+        tasks[id] = task
+        persist()
+    }
+
+    private func append(_ id: String, log: String) {
+        guard var task = tasks[id] else { return }
+        task.logs.append(Self.timestamped(log))
+        task.logs = Array(task.logs.suffix(200))
+        tasks[id] = task
+        persist()
+    }
+
+    private func setPRURL(_ id: String, prURL: String) {
+        guard var task = tasks[id] else { return }
+        task.prURL = prURL
+        tasks[id] = task
+        persist()
+    }
+
+    private func complete(_ id: String, prURL: String?) async throws {
+        var task = try requireTask(id)
+        if task.cancelRequested { throw CancellationError() }
+        task.status = .complete
+        task.completedAt = Date()
+        if let prURL { task.prURL = prURL }
+        task.logs.append(Self.timestamped("Task complete."))
+        tasks[id] = task
+        persist()
+    }
+
+    private func markCancelled(_ id: String) {
+        guard var task = tasks[id] else { return }
+        let wasAlreadyCancelled = task.status == .cancelled
+        task.status = .cancelled
+        task.completedAt = task.completedAt ?? Date()
+        if !wasAlreadyCancelled {
+            task.logs.append(Self.timestamped("Task cancelled."))
+        }
+        if FileManager.default.fileExists(atPath: task.worktreePath) {
+            _ = ProcessRunner.run("/usr/bin/git", ["-C", task.repoPath, "worktree", "remove", "--force", task.worktreePath], timeout: 30)
+        }
+        tasks[id] = task
+        persist()
+    }
+
+    private func markFailed(_ id: String, error: Error) {
+        guard var task = tasks[id] else { return }
+        if task.cancelRequested || killSwitchActive || task.status == .cancelled {
+            markCancelled(id)
+            return
+        }
+        task.status = .failed
+        task.completedAt = Date()
+        task.errorMessage = error.localizedDescription
+        task.logs.append(Self.timestamped("Failed: \(error.localizedDescription)"))
+        tasks[id] = task
+        persist()
+    }
+
+    private func failIfCancelled(_ id: String) async throws {
+        if tasks[id]?.cancelRequested == true || killSwitchActive {
+            throw CancellationError()
+        }
+    }
+
+    private func isCancelRequested(_ id: String) -> Bool {
+        tasks[id]?.cancelRequested == true || killSwitchActive
+    }
+
+    private func registerPID(_ pid: pid_t, taskID: String) {
+        activePIDs[taskID] = pid
+    }
+
+    private func clearPID(taskID: String) {
+        activePIDs[taskID] = nil
+    }
+
+    private func runRequired(
+        _ executable: String,
+        _ arguments: [String],
+        taskID: String,
+        label: String,
+        timeout: TimeInterval,
+        workingDirectory: String? = nil
+    ) async throws -> ProcessOutput {
+        let output = await runProcess(executable, arguments, taskID: taskID, label: label, timeout: timeout, workingDirectory: workingDirectory)
+        guard output.exitCode == 0 else {
+            let message = output.combinedTrimmed.nilIfBlank ?? "exit \(output.exitCode)"
+            throw HostError.badRequest("\(label) failed: \(message)")
+        }
+        return output
+    }
+
+    private func runProcess(
+        _ executable: String,
+        _ arguments: [String],
+        taskID: String,
+        label: String,
+        timeout: TimeInterval,
+        workingDirectory: String? = nil
+    ) async -> ProcessOutput {
+        append(taskID, log: "$ \(label)")
+        let output = await SwarmProcessRunner.run(
+            executable,
+            arguments,
+            workingDirectory: workingDirectory ?? "/",
+            timeout: timeout,
+            onStart: { pid in
+                Task { await self.registerPID(pid, taskID: taskID) }
+            },
+            shouldCancel: {
+                await self.isCancelRequested(taskID)
+            }
+        )
+        clearPID(taskID: taskID)
+        let combined = output.combinedTrimmed
+        if let text = combined.nilIfBlank {
+            append(taskID, log: String(text.prefix(1_200)))
+        }
+        return output
+    }
+
+    private func command(for task: SwarmTaskRecord) throws -> (executable: String, arguments: [String]) {
+        switch task.agent {
+        case .shell:
+            return ("/bin/zsh", ["-lc", task.instruction])
+        case .codex:
+            guard let executable = CLIAdapterRegistry.status(for: .codex).executablePath else {
+                throw HostError.badRequest("Codex CLI is not installed.")
+            }
+            return (executable, ["exec", "--sandbox", "workspace-write", task.instruction])
+        case .claude:
+            guard let executable = CLIAdapterRegistry.status(for: .claude).executablePath else {
+                throw HostError.badRequest("Claude CLI is not installed.")
+            }
+            return (executable, ["--print", task.instruction])
+        case .hermes:
+            guard let executable = CLIAdapterRegistry.status(for: .hermes).executablePath else {
+                throw HostError.badRequest("Hermes CLI is not installed.")
+            }
+            return (executable, ["chat", "-Q", "--source", "veqral-swarm-\(task.id)", "-q", task.instruction])
+        }
+    }
+
+    private func persist() {
+        Self.persist(Array(tasks.values))
+    }
+
+    nonisolated private static func persist(_ records: [SwarmTaskRecord]) {
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder.pretty.encode(records) {
+            try? data.write(to: tasksURL, options: .atomic)
+        }
+    }
+
+    nonisolated private static func loadTasks() -> [String: SwarmTaskRecord] {
+        guard let data = try? Data(contentsOf: tasksURL),
+              let records = try? JSONDecoder.dates.decode([SwarmTaskRecord].self, from: data) else {
+            return [:]
+        }
+        return Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+    }
+
+    nonisolated private static func timestamped(_ message: String) -> String {
+        let redacted = Redactor.redact(message)
+        return "[\(ISO8601DateFormatter().string(from: Date()))] \(redacted)"
+    }
+
+    nonisolated private static func slug(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-"))
+        let lowered = value.lowercased()
+        let mapped = lowered.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        let collapsed = String(mapped).split(separator: "-").joined(separator: "-")
+        return String(collapsed.prefix(36)).nilIfBlank ?? "task"
+    }
+
+    private func thermalStateLabel() -> String {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: "nominal"
+        case .fair: "fair"
+        case .serious: "serious"
+        case .critical: "critical"
+        @unknown default: "unknown"
+        }
+    }
+}
+
+enum SwarmProcessRunner {
+    static func run(
+        _ executable: String,
+        _ arguments: [String],
+        workingDirectory: String,
+        timeout: TimeInterval,
+        onStart: @escaping @Sendable (pid_t) -> Void,
+        shouldCancel: @escaping @Sendable () async -> Bool
+    ) async -> ProcessOutput {
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory.expandingTilde)
+        process.arguments = arguments
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            return ProcessOutput(exitCode: 127, stdout: "", stderr: error.localizedDescription)
+        }
+
+        onStart(process.processIdentifier)
+        let stdoutFD = stdout.fileHandleForReading.fileDescriptor
+        let stderrFD = stderr.fileHandleForReading.fileDescriptor
+        setNonBlocking(stdoutFD)
+        setNonBlocking(stderrFD)
+        var stdoutData = Data()
+        var stderrData = Data()
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning {
+            readAvailable(from: stdoutFD, into: &stdoutData)
+            readAvailable(from: stderrFD, into: &stderrData)
+            if await shouldCancel() {
+                process.terminate()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
+                break
+            }
+            if Date() >= deadline {
+                process.terminate()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
+                break
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        process.waitUntilExit()
+        readAvailable(from: stdoutFD, into: &stdoutData)
+        readAvailable(from: stderrFD, into: &stderrData)
+        return ProcessOutput(
+            exitCode: process.terminationStatus,
+            stdout: String(data: stdoutData, encoding: .utf8) ?? "",
+            stderr: String(data: stderrData, encoding: .utf8) ?? ""
+        )
+    }
+
+    private static func setNonBlocking(_ fd: Int32) {
+        let flags = fcntl(fd, F_GETFL, 0)
+        if flags >= 0 {
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        }
+    }
+
+    private static func readAvailable(from fd: Int32, into data: inout Data) {
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let readCount = Darwin.read(fd, &buffer, buffer.count)
+            if readCount > 0 {
+                data.append(buffer, count: readCount)
+            } else {
+                break
+            }
+        }
+    }
+}
+
+enum SwarmRunnerSmoke {
+    static func runAndExit() -> Never {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = SmokeResultBox(.failure(SmokeError("Swarm smoke did not start.")))
+        Task {
+            do {
+                let message = try await run()
+                box.result = .success(message)
+            } catch {
+                box.result = .failure(error)
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        switch box.result {
+        case .success(let message):
+            print("PASS: \(message)")
+            Foundation.exit(0)
+        case .failure(let error):
+            print("FAIL: Swarm runner smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+
+    private static func run() async throws -> String {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("veqral-swarm-smoke-\(UUID().uuidString)", isDirectory: true)
+        let hostHome = root.appendingPathComponent("host", isDirectory: true)
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        setenv("VEQRAL_HOST_HOME", hostHome.path, 1)
+        setenv("VEQRAL_SWARM_MAX_SLOTS", "2", 1)
+
+        try require(ProcessRunner.run("/usr/bin/git", ["init", "-b", "main"], workingDirectory: repo.path, timeout: 20), "git init")
+        try require(ProcessRunner.run("/usr/bin/git", ["config", "user.email", "veqral-smoke@example.invalid"], workingDirectory: repo.path, timeout: 20), "git config email")
+        try require(ProcessRunner.run("/usr/bin/git", ["config", "user.name", "Veqral Smoke"], workingDirectory: repo.path, timeout: 20), "git config name")
+        try "baseline\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try require(ProcessRunner.run("/usr/bin/git", ["add", "README.md"], workingDirectory: repo.path, timeout: 20), "git add baseline")
+        try require(ProcessRunner.run("/usr/bin/git", ["commit", "-m", "baseline"], workingDirectory: repo.path, timeout: 20), "git commit baseline")
+
+        let coordinator = SwarmCoordinator(config: HostConfig.load())
+        let startedAt = Date()
+        _ = try await coordinator.enqueue(
+            SwarmTaskRequest(
+                title: "Alpha file",
+                repoPath: repo.path,
+                baseBranch: "main",
+                instruction: "sleep 1; printf alpha > alpha.txt",
+                scopeHints: ["alpha.txt"],
+                agent: .shell,
+                branchName: nil,
+                verifyCommands: ["test -f alpha.txt"],
+                createDraftPR: false,
+                cleanupWorktree: true
+            )
+        )
+        _ = try await coordinator.enqueue(
+            SwarmTaskRequest(
+                title: "Beta file",
+                repoPath: repo.path,
+                baseBranch: "main",
+                instruction: "sleep 1; printf beta > beta.txt",
+                scopeHints: ["beta.txt"],
+                agent: .shell,
+                branchName: nil,
+                verifyCommands: ["test -f beta.txt"],
+                createDraftPR: false,
+                cleanupWorktree: true
+            )
+        )
+        try await waitForTasks(coordinator, count: 2, terminal: [.complete], timeout: 20)
+        let elapsed = Date().timeIntervalSince(startedAt)
+        guard elapsed < 3.5 else {
+            throw SmokeError("parallel tasks took \(String(format: "%.2f", elapsed))s; expected overlapping execution")
+        }
+
+        let repoStatus = ProcessRunner.run("/usr/bin/git", ["status", "--porcelain"], workingDirectory: repo.path, timeout: 20)
+        guard repoStatus.stdout.nilIfBlank == nil else {
+            throw SmokeError("base repository was dirtied: \(repoStatus.stdout)")
+        }
+
+        let longTask = try await coordinator.enqueue(
+            SwarmTaskRequest(
+                title: "Kill switch",
+                repoPath: repo.path,
+                baseBranch: "main",
+                instruction: "sleep 20; printf late > late.txt",
+                scopeHints: ["late.txt"],
+                agent: .shell,
+                branchName: nil,
+                verifyCommands: ["true"],
+                createDraftPR: false,
+                cleanupWorktree: true
+            )
+        )
+        try await waitForStatus(coordinator, taskID: longTask.id, statuses: [.preparing, .running], timeout: 10)
+        _ = await coordinator.killAll()
+        try await waitForStatus(coordinator, taskID: longTask.id, statuses: [.cancelled], timeout: 10)
+
+        return "Swarm runner isolated 2 worktrees in \(String(format: "%.2f", elapsed))s, kept base clean, and kill switch cancelled active work."
+    }
+
+    private static func waitForTasks(
+        _ coordinator: SwarmCoordinator,
+        count: Int,
+        terminal: Set<SwarmTaskStatus>,
+        timeout: TimeInterval
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let tasks = await coordinator.list().tasks
+            if tasks.count >= count && tasks.prefix(count).allSatisfy({ terminal.contains($0.status) }) {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        let statuses = await coordinator.list().tasks.map { "\($0.title)=\($0.status.rawValue)" }.joined(separator: ", ")
+        throw SmokeError("timed out waiting for tasks: \(statuses)")
+    }
+
+    private static func waitForStatus(
+        _ coordinator: SwarmCoordinator,
+        taskID: String,
+        statuses: Set<SwarmTaskStatus>,
+        timeout: TimeInterval
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let task = await coordinator.list().tasks.first(where: { $0.id == taskID }),
+               statuses.contains(task.status) {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        throw SmokeError("timed out waiting for task \(taskID)")
+    }
+
+    private static func require(_ output: ProcessOutput, _ label: String) throws {
+        guard output.exitCode == 0 else {
+            throw SmokeError("\(label) failed: \(output.combinedTrimmed)")
+        }
+    }
+}
+
 enum VoiceCleanupRunner {
     static func cleanup(_ request: VoiceCleanupRequest) throws -> VoiceCleanupResponse {
         let ruleBased = request.ruleBasedText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2301,6 +3096,7 @@ final class HostServer: @unchecked Sendable {
     private let telemetryCollector = HostTelemetryCollector()
     private let portfolioStore: PortfolioRegistryStore
     private let portfolioMonitor: PortfolioMonitor
+    private let swarmCoordinator: SwarmCoordinator
     private let connectionLock = NSLock()
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
 
@@ -2311,6 +3107,7 @@ final class HostServer: @unchecked Sendable {
         self.runner = AgentRunner(state: state)
         self.portfolioStore = PortfolioRegistryStore(config: config)
         self.portfolioMonitor = PortfolioMonitor(store: portfolioStore, config: config)
+        self.swarmCoordinator = SwarmCoordinator(config: config)
     }
 
     func start() throws {
@@ -2567,6 +3364,35 @@ final class HostServer: @unchecked Sendable {
             if request.path == "/v1/budgets", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(ProjectBudgetUpdateRequest.self, from: request.body)
                 sendJSON(try await state.updateBudget(body), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/swarm/tasks", request.method == "GET" {
+                sendJSON(await swarmCoordinator.list(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/swarm/tasks", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(SwarmTaskRequest.self, from: request.body)
+                let task = try await swarmCoordinator.enqueue(body)
+                await state.recordAudit("swarm queued task id=\(task.id) branch=\(task.branchName)")
+                sendJSON(SwarmTaskResponse(task: task), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/swarm/kill", request.method == "POST" {
+                let response = await swarmCoordinator.killAll()
+                await state.recordAudit("swarm kill switch requested device=\(authenticatedDeviceID)")
+                sendJSON(response, connection: connection)
+                return
+            }
+
+            if request.path.hasPrefix("/v1/swarm/tasks/"), request.path.hasSuffix("/cancel"), request.method == "POST" {
+                let parts = request.path.split(separator: "/").map(String.init)
+                guard parts.count == 5 else { throw HostError.notFound("Invalid swarm task path") }
+                let task = try await swarmCoordinator.cancel(taskID: parts[3])
+                await state.recordAudit("swarm cancelled task id=\(task.id)")
+                sendJSON(SwarmTaskResponse(task: task), connection: connection)
                 return
             }
 
