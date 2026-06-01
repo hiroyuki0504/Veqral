@@ -42,6 +42,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-swarm-runner" {
             SwarmRunnerSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-swarm-integration" {
+            SwarmIntegrationSmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -1737,6 +1740,35 @@ struct SwarmTaskResponse: Codable, Sendable {
     var task: SwarmTaskRecord
 }
 
+struct SwarmIntegrationRequest: Codable, Sendable {
+    var repoPath: String?
+    var baseBranch: String?
+    var branches: [String]
+    var verifyCommands: [String]?
+    var pushDraftPR: Bool?
+    var title: String?
+    var body: String?
+}
+
+struct SwarmIntegrationRecord: Codable, Sendable {
+    var id: String
+    var repoPath: String
+    var baseBranch: String
+    var integrationBranch: String
+    var worktreePath: String
+    var branches: [String]
+    var status: String
+    var logs: [String]
+    var prURL: String?
+    var createdAt: Date
+    var completedAt: Date?
+    var errorMessage: String?
+}
+
+struct SwarmIntegrationResponse: Codable, Sendable {
+    var integration: SwarmIntegrationRecord
+}
+
 actor SwarmCoordinator {
     private var config: HostConfig
     private var tasks: [String: SwarmTaskRecord]
@@ -1764,6 +1796,10 @@ actor SwarmCoordinator {
 
     nonisolated static var worktreesFolder: URL {
         folder.appendingPathComponent("worktrees", isDirectory: true)
+    }
+
+    nonisolated static var integrationsFolder: URL {
+        folder.appendingPathComponent("integrations", isDirectory: true)
     }
 
     nonisolated static var tasksURL: URL {
@@ -1853,6 +1889,82 @@ actor SwarmCoordinator {
         }
         persist()
         return list()
+    }
+
+    func prepareIntegration(_ request: SwarmIntegrationRequest) throws -> SwarmIntegrationResponse {
+        let repoPath = (request.repoPath?.nilIfBlank ?? config.defaultWorkingDirectory).expandingTilde
+        guard FileManager.default.fileExists(atPath: repoPath) else {
+            throw HostError.badRequest("Repository path does not exist.")
+        }
+        let gitCheck = ProcessRunner.run("/usr/bin/git", ["-C", repoPath, "rev-parse", "--show-toplevel"], timeout: 10)
+        guard gitCheck.exitCode == 0 else {
+            throw HostError.badRequest("Repository path is not a git repository.")
+        }
+        let branches = request.branches.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !branches.isEmpty else {
+            throw HostError.badRequest("At least one branch is required.")
+        }
+
+        let id = UUID().uuidString
+        let shortID = String(id.prefix(8)).lowercased()
+        let baseBranch = request.baseBranch?.nilIfBlank ?? "main"
+        let integrationBranch = "codex/swarm-integration/\(shortID)"
+        let worktreePath = Self.integrationsFolder.appendingPathComponent(shortID, isDirectory: true).path
+        var record = SwarmIntegrationRecord(
+            id: id,
+            repoPath: repoPath,
+            baseBranch: baseBranch,
+            integrationBranch: integrationBranch,
+            worktreePath: worktreePath,
+            branches: branches,
+            status: "running",
+            logs: [Self.timestamped("Preparing serial integration branch \(integrationBranch).")],
+            prURL: nil,
+            createdAt: Date(),
+            completedAt: nil,
+            errorMessage: nil
+        )
+
+        do {
+            try FileManager.default.createDirectory(at: Self.integrationsFolder, withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: worktreePath) {
+                try Self.requireIntegration(ProcessRunner.run("/usr/bin/git", ["-C", repoPath, "worktree", "remove", "--force", worktreePath], timeout: 60), "remove stale integration worktree", record: &record)
+            }
+            try Self.requireIntegration(ProcessRunner.run("/usr/bin/git", ["-C", repoPath, "worktree", "add", "-B", integrationBranch, worktreePath, baseBranch], timeout: 120), "git worktree add", record: &record)
+            for branch in branches {
+                record.logs.append(Self.timestamped("Merging \(branch)."))
+                try Self.requireIntegration(ProcessRunner.run("/usr/bin/git", ["-C", worktreePath, "merge", "--no-edit", branch], timeout: 120), "git merge \(branch)", record: &record)
+            }
+            let verifyCommands = request.verifyCommands?.filter { $0.nilIfBlank != nil } ?? ["git diff --check"]
+            for command in verifyCommands {
+                record.logs.append(Self.timestamped("Verifying: \(command)"))
+                try Self.requireIntegration(ProcessRunner.run("/bin/zsh", ["-lc", command], workingDirectory: worktreePath, timeout: 60 * 20), "verify \(command)", record: &record)
+            }
+            if request.pushDraftPR == true {
+                try Self.requireIntegration(ProcessRunner.run("/usr/bin/git", ["-C", worktreePath, "push", "-u", "origin", integrationBranch], timeout: 60 * 10), "git push integration", record: &record)
+                let prTitle = request.title?.nilIfBlank ?? "Swarm integration \(shortID)"
+                let prBody = request.body?.nilIfBlank ?? "Serial integration prepared by Veqral swarm orchestration."
+                let prOutput = try Self.requireIntegration(
+                    ProcessRunner.run("/usr/bin/gh", ["pr", "create", "--draft", "--base", baseBranch, "--head", integrationBranch, "--title", prTitle, "--body", prBody], workingDirectory: worktreePath, timeout: 120),
+                    "gh pr create",
+                    record: &record
+                )
+                record.prURL = prOutput.stdout
+                    .split(whereSeparator: \.isNewline)
+                    .map(String.init)
+                    .first { $0.hasPrefix("http") }
+            }
+            record.status = "ready"
+            record.completedAt = Date()
+            record.logs.append(Self.timestamped("Integration candidate ready. Main merge still requires explicit user GO."))
+            return SwarmIntegrationResponse(integration: record)
+        } catch {
+            record.status = "failed"
+            record.completedAt = Date()
+            record.errorMessage = error.localizedDescription
+            record.logs.append(Self.timestamped("Integration failed: \(error.localizedDescription)"))
+            return SwarmIntegrationResponse(integration: record)
+        }
     }
 
     private func pump() {
@@ -2237,6 +2349,20 @@ actor SwarmCoordinator {
         return "[\(ISO8601DateFormatter().string(from: Date()))] \(redacted)"
     }
 
+    @discardableResult
+    nonisolated private static func requireIntegration(_ output: ProcessOutput, _ label: String, record: inout SwarmIntegrationRecord) throws -> ProcessOutput {
+        if let text = output.combinedTrimmed.nilIfBlank {
+            record.logs.append(timestamped("$ \(label)\n\(String(text.prefix(1_200)))"))
+        } else {
+            record.logs.append(timestamped("$ \(label)"))
+        }
+        guard output.exitCode == 0 else {
+            let message = output.combinedTrimmed.nilIfBlank ?? "exit \(output.exitCode)"
+            throw HostError.badRequest("\(label) failed: \(message)")
+        }
+        return output
+    }
+
     nonisolated private static func slug(_ value: String) -> String {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-"))
         let lowered = value.lowercased()
@@ -2592,6 +2718,116 @@ enum SwarmRunnerSmoke {
     private static func require(_ output: ProcessOutput, _ label: String) throws {
         guard output.exitCode == 0 else {
             throw SmokeError("\(label) failed: \(output.combinedTrimmed)")
+        }
+    }
+}
+
+enum SwarmIntegrationSmoke {
+    static func runAndExit() -> Never {
+        do {
+            let message = try run()
+            print("PASS: \(message)")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Swarm integration smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+
+    private static func run() throws -> String {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("veqral-swarm-integration-smoke-\(UUID().uuidString)", isDirectory: true)
+        let hostHome = root.appendingPathComponent("host", isDirectory: true)
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        setenv("VEQRAL_HOST_HOME", hostHome.path, 1)
+
+        try require(ProcessRunner.run("/usr/bin/git", ["init", "-b", "main"], workingDirectory: repo.path, timeout: 20), "git init")
+        try require(ProcessRunner.run("/usr/bin/git", ["config", "user.email", "veqral-smoke@example.invalid"], workingDirectory: repo.path, timeout: 20), "git config email")
+        try require(ProcessRunner.run("/usr/bin/git", ["config", "user.name", "Veqral Smoke"], workingDirectory: repo.path, timeout: 20), "git config name")
+        try "baseline\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try require(ProcessRunner.run("/usr/bin/git", ["add", "README.md"], workingDirectory: repo.path, timeout: 20), "git add baseline")
+        try require(ProcessRunner.run("/usr/bin/git", ["commit", "-m", "baseline"], workingDirectory: repo.path, timeout: 20), "git commit baseline")
+
+        try require(ProcessRunner.run("/usr/bin/git", ["checkout", "-b", "feature/one"], workingDirectory: repo.path, timeout: 20), "checkout one")
+        try "one\n".write(to: repo.appendingPathComponent("one.txt"), atomically: true, encoding: .utf8)
+        try require(ProcessRunner.run("/usr/bin/git", ["add", "one.txt"], workingDirectory: repo.path, timeout: 20), "git add one")
+        try require(ProcessRunner.run("/usr/bin/git", ["commit", "-m", "one"], workingDirectory: repo.path, timeout: 20), "git commit one")
+        try require(ProcessRunner.run("/usr/bin/git", ["checkout", "main"], workingDirectory: repo.path, timeout: 20), "checkout main")
+
+        try require(ProcessRunner.run("/usr/bin/git", ["checkout", "-b", "feature/two"], workingDirectory: repo.path, timeout: 20), "checkout two")
+        try "two\n".write(to: repo.appendingPathComponent("two.txt"), atomically: true, encoding: .utf8)
+        try require(ProcessRunner.run("/usr/bin/git", ["add", "two.txt"], workingDirectory: repo.path, timeout: 20), "git add two")
+        try require(ProcessRunner.run("/usr/bin/git", ["commit", "-m", "two"], workingDirectory: repo.path, timeout: 20), "git commit two")
+        try require(ProcessRunner.run("/usr/bin/git", ["checkout", "main"], workingDirectory: repo.path, timeout: 20), "checkout main again")
+
+        let coordinator = SwarmCoordinator(config: HostConfig.load())
+        let response = try awaitless {
+            try await coordinator.prepareIntegration(SwarmIntegrationRequest(
+                repoPath: repo.path,
+                baseBranch: "main",
+                branches: ["feature/one", "feature/two"],
+                verifyCommands: ["test -f one.txt", "test -f two.txt", "git diff --check"],
+                pushDraftPR: false,
+                title: nil,
+                body: nil
+            ))
+        }
+        guard response.integration.status == "ready" else {
+            throw SmokeError("integration did not become ready: \(response.integration.status) \(response.integration.errorMessage ?? "")")
+        }
+        let oneExists = FileManager.default.fileExists(atPath: URL(fileURLWithPath: response.integration.worktreePath).appendingPathComponent("one.txt").path)
+        let twoExists = FileManager.default.fileExists(atPath: URL(fileURLWithPath: response.integration.worktreePath).appendingPathComponent("two.txt").path)
+        guard oneExists && twoExists else {
+            throw SmokeError("integration worktree does not contain both merged files")
+        }
+        let mainClean = ProcessRunner.run("/usr/bin/git", ["status", "--porcelain"], workingDirectory: repo.path, timeout: 20)
+        guard mainClean.stdout.nilIfBlank == nil else {
+            throw SmokeError("main worktree was dirtied: \(mainClean.stdout)")
+        }
+        guard !FileManager.default.fileExists(atPath: repo.appendingPathComponent("one.txt").path),
+              !FileManager.default.fileExists(atPath: repo.appendingPathComponent("two.txt").path) else {
+            throw SmokeError("integration wrote files into main worktree")
+        }
+        return "Serial integration branch \(response.integration.integrationBranch) contains both feature branches and left main clean."
+    }
+
+    private static func awaitless<T: Sendable>(_ operation: @escaping @Sendable () async throws -> T) throws -> T {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = SmokeValueBox<T>()
+        Task {
+            do {
+                box.result = .success(try await operation())
+            } catch {
+                box.result = .failure(error)
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return try box.result.get()
+    }
+
+    private static func require(_ output: ProcessOutput, _ label: String) throws {
+        guard output.exitCode == 0 else {
+            throw SmokeError("\(label) failed: \(output.combinedTrimmed)")
+        }
+    }
+}
+
+final class SmokeValueBox<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Result<Value, Error> = .failure(SmokeError("Operation did not start."))
+
+    var result: Result<Value, Error> {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+        set {
+            lock.lock()
+            storage = newValue
+            lock.unlock()
         }
     }
 }
@@ -3575,6 +3811,14 @@ final class HostServer: @unchecked Sendable {
             if request.path == "/v1/swarm/kill", request.method == "POST" {
                 let response = await swarmCoordinator.killAll()
                 await state.recordAudit("swarm kill switch requested device=\(authenticatedDeviceID)")
+                sendJSON(response, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/swarm/integration/prepare", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(SwarmIntegrationRequest.self, from: request.body)
+                let response = try await swarmCoordinator.prepareIntegration(body)
+                await state.recordAudit("swarm integration prepared branch=\(response.integration.integrationBranch) status=\(response.integration.status)")
                 sendJSON(response, connection: connection)
                 return
             }
