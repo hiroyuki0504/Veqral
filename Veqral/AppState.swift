@@ -382,6 +382,21 @@ struct RemotePushTokenResponse: Codable, Sendable {
     var ok: Bool
 }
 
+struct RemoteVoiceCleanupRequest: Codable, Sendable {
+    var rawText: String
+    var ruleBasedText: String
+    var preferredEngine: String?
+    var workingDirectory: String?
+    var provider: String?
+    var model: String?
+}
+
+struct RemoteVoiceCleanupResponse: Codable, Sendable {
+    var cleanedText: String
+    var engine: String?
+    var fallbackUsed: Bool
+}
+
 struct RemoteHealthResponse: Codable, Sendable {
     var status: String
     var host: String
@@ -3941,6 +3956,12 @@ struct RemoteHostClient: Sendable {
     func telemetry() async throws -> RemoteHostTelemetry {
         let data = try await request(path: "/v1/telemetry", method: "GET", body: Data())
         return try JSONDecoder.commandCenter.decode(RemoteHostTelemetry.self, from: data)
+    }
+
+    func cleanupVoiceCommand(_ requestBody: RemoteVoiceCleanupRequest) async throws -> RemoteVoiceCleanupResponse {
+        let body = try JSONEncoder.commandCenter.encode(requestBody)
+        let data = try await request(path: "/v1/voice/cleanup", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteVoiceCleanupResponse.self, from: data)
     }
 
     func createRun(
