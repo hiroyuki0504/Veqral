@@ -27,6 +27,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-host-telemetry" {
             HostTelemetrySmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-voice-cleanup" {
+            VoiceCleanupSmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -1000,6 +1003,141 @@ actor HostTelemetryCollector {
     }
 }
 
+enum VoiceCleanupSmoke {
+    static func runAndExit() -> Never {
+        do {
+            let prompt = VoiceCleanupRunner.prompt(rawText: "えっと テストして いや違う ビルドして", ruleBasedText: "ビルドして")
+            guard prompt.contains("ビルドして"), prompt.contains("整形済み本文だけ") else {
+                throw SmokeError("cleanup prompt が想定と違います。")
+            }
+            let cleaned = VoiceCleanupRunner.cleanedOutput(from: "\"ビルドして。\"")
+            guard cleaned == "ビルドして。" else {
+                throw SmokeError("cleanup output の整形が想定と違います。")
+            }
+            print("PASS: Voice cleanup smoke validated prompt and output sanitizing.")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Voice cleanup smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+}
+
+enum VoiceCleanupRunner {
+    static func cleanup(_ request: VoiceCleanupRequest) throws -> VoiceCleanupResponse {
+        let ruleBased = request.ruleBasedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ruleBased.isEmpty else {
+            return VoiceCleanupResponse(cleanedText: "", engine: nil, fallbackUsed: true)
+        }
+
+        let engines = cleanupEngineOrder(preferred: request.preferredEngine)
+        let prompt = prompt(rawText: request.rawText, ruleBasedText: ruleBased)
+        let workingDirectory = request.workingDirectory?.nilIfBlank ?? NSHomeDirectory()
+
+        for engine in engines {
+            guard let executable = CLIAdapterRegistry.status(for: engine).executablePath else { continue }
+            let output = ProcessRunner.run(
+                executable,
+                arguments(for: engine, prompt: prompt, provider: request.provider, model: request.model),
+                workingDirectory: workingDirectory,
+                timeout: 45
+            )
+            guard output.exitCode == 0 else { continue }
+            let cleaned = cleanedOutput(from: output.stdout.nilIfBlank ?? output.combinedTrimmed)
+            if !cleaned.isEmpty {
+                return VoiceCleanupResponse(cleanedText: cleaned, engine: engine, fallbackUsed: false)
+            }
+        }
+
+        return VoiceCleanupResponse(cleanedText: ruleBased, engine: nil, fallbackUsed: true)
+    }
+
+    static func prompt(rawText: String, ruleBasedText: String) -> String {
+        """
+        日本語の音声文字起こしを、Veqral に送る短い実行指令へ整形してください。
+        制約:
+        - フィラーと自己修正を反映する
+        - 意味を追加しない
+        - 削除、本番、課金、token、.env、main merge、force push、deploy、Computer Use などの高リスク語を弱めない
+        - 箇条書き、説明、引用符、前置きは禁止
+        - 整形済み本文だけを出力する
+
+        聞き取り:
+        \(rawText)
+
+        ルール整形後:
+        \(ruleBasedText)
+        """
+    }
+
+    static func cleanedOutput(from text: String) -> String {
+        var cleaned = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "```text", with: "")
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.hasPrefix("\""), cleaned.hasSuffix("\""), cleaned.count >= 2 {
+            cleaned.removeFirst()
+            cleaned.removeLast()
+        }
+        let markerPrefixes = ["整形済み本文:", "指令:", "Command:", "Cleaned:"]
+        for marker in markerPrefixes where cleaned.localizedCaseInsensitiveContains(marker) {
+            cleaned = cleaned.components(separatedBy: marker).last ?? cleaned
+        }
+        return String(cleaned.trimmingCharacters(in: .whitespacesAndNewlines).prefix(2_000))
+    }
+
+    private static func cleanupEngineOrder(preferred: AgentEngine?) -> [AgentEngine] {
+        var order: [AgentEngine] = [.hermes]
+        if let preferred, preferred != .shell, preferred != .hermes {
+            order.append(preferred)
+        }
+        order.append(contentsOf: [.codex, .claude])
+        var seen: Set<AgentEngine> = []
+        return order.filter { seen.insert($0).inserted }
+    }
+
+    private static func arguments(for engine: AgentEngine, prompt: String, provider: String?, model: String?) -> [String] {
+        switch engine {
+        case .hermes:
+            var args = [
+                "chat",
+                "-Q",
+                "--source", "veqral-voice-cleanup",
+                "--max-turns", "1"
+            ]
+            if let provider = provider?.nilIfBlank, provider != "auto" {
+                args.append(contentsOf: ["--provider", provider])
+            }
+            if let model = model?.nilIfBlank {
+                args.append(contentsOf: ["--model", model])
+            }
+            args.append(contentsOf: ["-q", prompt])
+            return args
+        case .codex:
+            var args = ["exec", "--sandbox", "read-only"]
+            if let model = model?.nilIfBlank {
+                args.append(contentsOf: ["--model", model])
+            }
+            args.append(prompt)
+            return args
+        case .claude:
+            var args = ["--print"]
+            if let model = model?.nilIfBlank {
+                args.append(contentsOf: ["--model", model])
+            }
+            args.append(prompt)
+            return args
+        case .shell:
+            return ["-lc", "printf %s \(shellQuoted(prompt))"]
+        }
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+}
+
 struct HostLogEvent: Codable, Sendable {
     enum Kind: String, Codable, Sendable {
         case log
@@ -1623,6 +1761,12 @@ final class HostServer: @unchecked Sendable {
 
             if request.path == "/v1/telemetry", request.method == "GET" {
                 sendJSON(await telemetryCollector.snapshot(tailscaleIP: tailscaleIP()), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/voice/cleanup", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(VoiceCleanupRequest.self, from: request.body)
+                sendJSON(try VoiceCleanupRunner.cleanup(body), connection: connection)
                 return
             }
 
@@ -5897,6 +6041,21 @@ struct RunAttachmentUpload: Codable {
     var fileName: String
     var mimeType: String
     var data: Data
+}
+
+struct VoiceCleanupRequest: Codable {
+    var rawText: String
+    var ruleBasedText: String
+    var preferredEngine: AgentEngine?
+    var workingDirectory: String?
+    var provider: String?
+    var model: String?
+}
+
+struct VoiceCleanupResponse: Codable {
+    var cleanedText: String
+    var engine: AgentEngine?
+    var fallbackUsed: Bool
 }
 
 struct CreateRunResponse: Codable {

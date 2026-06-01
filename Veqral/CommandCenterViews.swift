@@ -1,5 +1,11 @@
 import Foundation
 import SwiftUI
+#if canImport(AVFoundation)
+import AVFoundation
+#endif
+#if canImport(Speech)
+import Speech
+#endif
 
 struct AppearanceToggleButton: View {
     @EnvironmentObject private var store: CommandCenterStore
@@ -772,6 +778,7 @@ private struct RunPhaseTracker: View {
 
 private struct CommandSubmitPanel: View {
     @EnvironmentObject private var store: CommandCenterStore
+    @State private var isVoiceInputPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -788,6 +795,15 @@ private struct CommandSubmitPanel: View {
                     .onSubmit {
                         store.submitDraft()
                     }
+
+                Button {
+                    isVoiceInputPresented = true
+                } label: {
+                    Image(systemName: "mic")
+                        .font(.system(size: 15, weight: .bold))
+                }
+                .buttonStyle(CommandButtonStyle(tint: VQTheme.ink))
+                .help(L10n.tr("Voice input"))
 
                 Button(action: store.submitDraft) {
                     Image(systemName: "arrow.up")
@@ -824,6 +840,10 @@ private struct CommandSubmitPanel: View {
         }
         .padding(12)
         .commandPanel()
+        .sheet(isPresented: $isVoiceInputPresented) {
+            VoiceCommandSheet()
+                .environmentObject(store)
+        }
     }
 }
 
@@ -1389,6 +1409,7 @@ private struct PhoneRunRow: View {
 
 private struct PhoneComposer: View {
     @EnvironmentObject private var store: CommandCenterStore
+    @State private var isVoiceInputPresented = false
 
     var body: some View {
         VStack(spacing: 8) {
@@ -1401,6 +1422,17 @@ private struct PhoneComposer: View {
                     .onSubmit {
                         store.submitDraft()
                     }
+                Button {
+                    isVoiceInputPresented = true
+                } label: {
+                    Image(systemName: "mic")
+                        .font(.caption.weight(.bold))
+                        .frame(width: 28, height: 28)
+                        .foregroundStyle(VQTheme.ink)
+                        .background(VQTheme.control)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(.plain)
                 Button(action: store.submitDraft) {
                     Image(systemName: "arrow.up")
                         .font(.caption.weight(.bold))
@@ -1429,6 +1461,10 @@ private struct PhoneComposer: View {
         }
         .padding(8)
         .commandPanel()
+        .sheet(isPresented: $isVoiceInputPresented) {
+            VoiceCommandSheet()
+                .environmentObject(store)
+        }
     }
 }
 
@@ -1456,6 +1492,398 @@ private struct CommandChip: View {
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct VoiceCommandSheet: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var session = VoiceCommandSession()
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: session.phase.symbol)
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(session.phase.tint)
+                        .frame(width: 40, height: 40)
+                        .background(session.phase.tint.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(session.phase.title)
+                            .font(.headline)
+                            .foregroundStyle(VQTheme.ink)
+                        Text(session.statusMessage)
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(L10n.tr("Raw Dictation"), systemImage: "waveform")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    Text(session.rawText.isEmpty ? L10n.tr("Listening text appears here.") : session.rawText)
+                        .font(.subheadline)
+                        .foregroundStyle(session.rawText.isEmpty ? VQTheme.secondaryText : VQTheme.ink)
+                        .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
+                        .padding(10)
+                        .background(VQTheme.control.opacity(0.38))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(L10n.tr("Cleaned Command"), systemImage: "text.badge.checkmark")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    TextEditor(text: $session.cleanedText)
+                        .font(.subheadline)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 96)
+                        .padding(8)
+                        .background(VQTheme.control.opacity(0.38))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
+                if !session.cleanupNote.isEmpty {
+                    Text(session.cleanupNote)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 10) {
+                    Button(role: .cancel) {
+                        session.cancel()
+                        dismiss()
+                    } label: {
+                        Label(L10n.tr("Discard"), systemImage: "xmark")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Spacer()
+
+                    if session.phase == .listening {
+                        Button {
+                            stopAndClean()
+                        } label: {
+                            Label(L10n.tr("Stop"), systemImage: "stop.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    } else {
+                        Button {
+                            session.startListening()
+                        } label: {
+                            Label(L10n.tr(session.phase == .ready ? "Record Again" : "Start Recording"), systemImage: "mic.fill")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(session.phase == .cleaning)
+                    }
+
+                    Button {
+                        sendCleanedCommand()
+                    } label: {
+                        Label(L10n.tr("Send"), systemImage: "arrow.up")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!session.canSend)
+                }
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .font(.footnote.weight(.semibold))
+            }
+            .padding(18)
+            .frame(minWidth: 360, minHeight: 520)
+            .background(VQTheme.canvas.ignoresSafeArea())
+            .navigationTitle(L10n.tr("Voice Command"))
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(L10n.tr("Cancel")) {
+                        session.cancel()
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear {
+                if session.phase == .idle {
+                    session.startListening()
+                }
+            }
+            .onDisappear {
+                session.cancel()
+            }
+        }
+    }
+
+    private func stopAndClean() {
+        session.stopListening()
+        Task {
+            await cleanupWithAgent()
+        }
+    }
+
+    @MainActor
+    private func cleanupWithAgent() async {
+        let ruleBased = session.ruleBasedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ruleBased.isEmpty else { return }
+        session.beginCleaning()
+        guard store.remoteHost.isEnabled, store.remoteHost.isPaired else {
+            session.finishCleaning(text: ruleBased, note: L10n.tr("Mac Host is not connected. Using rule-based cleanup."))
+            return
+        }
+
+        do {
+            let response = try await RemoteHostClient(configuration: store.remoteHost).cleanupVoiceCommand(
+                RemoteVoiceCleanupRequest(
+                    rawText: session.rawText,
+                    ruleBasedText: ruleBased,
+                    preferredEngine: store.selectedRuntime.remoteEngine,
+                    workingDirectory: store.workingDirectory,
+                    provider: store.selectedRuntime == .hermesAgent ? store.selectedHermesProvider : nil,
+                    model: store.selectedRuntime == .hermesAgent ? store.selectedHermesModel : nil
+                )
+            )
+            let responseText = response.cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleaned = responseText.isEmpty ? ruleBased : responseText
+            let note = response.fallbackUsed ? L10n.tr("LLM cleanup was unavailable. Using rule-based cleanup.") : L10n.tr("LLM cleanup finished. Review before sending.")
+            session.finishCleaning(text: cleaned, note: note)
+        } catch {
+            session.finishCleaning(text: ruleBased, note: "\(L10n.tr("LLM cleanup failed. Using rule-based cleanup.")) \(error.localizedDescription)")
+        }
+    }
+
+    private func sendCleanedCommand() {
+        let cleaned = session.cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        store.commandDraft = cleaned
+        store.submitDraft()
+        dismiss()
+    }
+}
+
+@MainActor
+private final class VoiceCommandSession: NSObject, ObservableObject {
+    enum Phase: Equatable {
+        case idle
+        case listening
+        case cleaning
+        case ready
+        case error(String)
+
+        var title: String {
+            switch self {
+            case .idle:
+                L10n.tr("Voice Command")
+            case .listening:
+                L10n.tr("Listening")
+            case .cleaning:
+                L10n.tr("Cleaning")
+            case .ready:
+                L10n.tr("Ready")
+            case .error:
+                L10n.tr("Voice Error")
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .idle:
+                "mic"
+            case .listening:
+                "waveform"
+            case .cleaning:
+                "sparkles"
+            case .ready:
+                "checkmark.circle"
+            case .error:
+                "exclamationmark.triangle"
+            }
+        }
+
+        var tint: Color {
+            switch self {
+            case .idle:
+                VQTheme.steel
+            case .listening:
+                VQTheme.accent
+            case .cleaning:
+                VQTheme.amber
+            case .ready:
+                VQTheme.green
+            case .error:
+                VQTheme.red
+            }
+        }
+    }
+
+    @Published var phase: Phase = .idle
+    @Published var rawText: String = ""
+    @Published var ruleBasedText: String = ""
+    @Published var cleanedText: String = ""
+    @Published var cleanupNote: String = ""
+    @Published var statusMessage: String = L10n.tr("Tap stop when you finish speaking.")
+
+    var canSend: Bool {
+        phase == .ready && !cleanedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "ja-JP"))
+    private let audioEngine = AVAudioEngine()
+    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    #endif
+
+    func startListening() {
+        rawText = ""
+        ruleBasedText = ""
+        cleanedText = ""
+        cleanupNote = ""
+        statusMessage = L10n.tr("Requesting microphone and speech recognition permission.")
+
+        #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+        guard speechRecognizer?.isAvailable == true else {
+            fail(L10n.tr("Speech recognition is unavailable."))
+            return
+        }
+        SFSpeechRecognizer.requestAuthorization { [weak self] status in
+            Task { @MainActor in
+                guard let self else { return }
+                switch status {
+                case .authorized:
+                    do {
+                        try self.startAudioRecognition()
+                    } catch {
+                        self.fail(error.localizedDescription)
+                    }
+                case .denied:
+                    self.fail(L10n.tr("Speech recognition permission was denied."))
+                case .restricted:
+                    self.fail(L10n.tr("Speech recognition is restricted on this device."))
+                case .notDetermined:
+                    self.fail(L10n.tr("Speech recognition permission is not decided."))
+                @unknown default:
+                    self.fail(L10n.tr("Speech recognition is unavailable."))
+                }
+            }
+        }
+        #else
+        fail(L10n.tr("Voice input is available on iPhone and iPad."))
+        #endif
+    }
+
+    func stopListening() {
+        #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        recognitionRequest?.endAudio()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
+        ruleBasedText = VoiceCommandRuleCleaner.clean(rawText)
+        cleanedText = ruleBasedText
+        if ruleBasedText.isEmpty {
+            fail(L10n.tr("Dictation was too short."))
+        } else {
+            phase = .ready
+            statusMessage = L10n.tr("Review the command before sending.")
+        }
+    }
+
+    func beginCleaning() {
+        phase = .cleaning
+        statusMessage = L10n.tr("Cleaning dictated text with the selected agent.")
+    }
+
+    func finishCleaning(text: String, note: String) {
+        cleanedText = text
+        cleanupNote = note
+        phase = .ready
+        statusMessage = L10n.tr("Review the command before sending.")
+    }
+
+    func cancel() {
+        #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+        if audioEngine.isRunning {
+            audioEngine.stop()
+            audioEngine.inputNode.removeTap(onBus: 0)
+        }
+        recognitionRequest?.endAudio()
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        recognitionRequest = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
+    }
+
+    private func fail(_ message: String) {
+        cancel()
+        phase = .error(message)
+        statusMessage = message
+    }
+
+    #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+    private func startAudioRecognition() throws {
+        cancel()
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
+        try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        recognitionRequest = request
+
+        let inputNode = audioEngine.inputNode
+        let format = inputNode.outputFormat(forBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            request.append(buffer)
+        }
+
+        audioEngine.prepare()
+        try audioEngine.start()
+        phase = .listening
+        statusMessage = L10n.tr("Listening. Speak your command in Japanese.")
+
+        recognitionTask = speechRecognizer?.recognitionTask(with: request) { [weak self] result, error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let result {
+                    self.rawText = result.bestTranscription.formattedString
+                }
+                if let error {
+                    self.fail(error.localizedDescription)
+                }
+            }
+        }
+    }
+    #endif
+}
+
+private enum VoiceCommandRuleCleaner {
+    static func clean(_ rawText: String) -> String {
+        var text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "" }
+
+        let cancellationMarkers = ["やっぱなし", "今のなし", "さっきのなし", "いや違う", "じゃなくて", "取り消し", "戻して"]
+        if let range = latestRange(of: cancellationMarkers, in: text) {
+            text = String(text[range.upperBound...])
+        }
+
+        let fillerPattern = #"(えー|あー|えっと|うーん|なんか|まあ|その)[、。,\s　]*"#
+        text = text.replacingOccurrences(of: fillerPattern, with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"[\s　]+"#, with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: " 。", with: "。")
+        text = text.replacingOccurrences(of: " 、", with: "、")
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func latestRange(of markers: [String], in text: String) -> Range<String.Index>? {
+        markers
+            .compactMap { text.range(of: $0, options: .backwards) }
+            .max { lhs, rhs in lhs.lowerBound < rhs.lowerBound }
     }
 }
 
