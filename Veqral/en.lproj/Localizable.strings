@@ -407,6 +407,15 @@
 "Review Notes" = "Review Notes";
 "Review mode" = "Review mode";
 "Run ID" = "Run ID";
+"Run Usage" = "Run Usage";
+"Input Tokens" = "Input";
+"Output Tokens" = "Output";
+"Reasoning Tokens" = "Reasoning";
+"Total Tokens" = "Total";
+"Cache Read" = "Cache Read";
+"Cache Write" = "Cache Write";
+"Estimated Cost" = "Estimated Cost";
+"Actual Cost" = "Actual Cost";
 "Runs local shell commands only where local command execution is available." = "Runs local shell commands only where local command execution is available.";
 "Same memory, requirements, policies, repo context, and output contract are passed to every role." = "Same memory, requirements, policies, repo context, and output contract are passed to every role.";
 "Security Policy" = "Security Policy";

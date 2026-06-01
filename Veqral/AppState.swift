@@ -72,6 +72,39 @@ enum CommandRuntime: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+struct CommandRunUsage: Codable, Equatable, Sendable {
+    var inputTokens: Int? = nil
+    var outputTokens: Int? = nil
+    var cacheReadTokens: Int? = nil
+    var cacheWriteTokens: Int? = nil
+    var reasoningTokens: Int? = nil
+    var totalTokens: Int? = nil
+    var estimatedCostUSD: Double? = nil
+    var actualCostUSD: Double? = nil
+    var source: String? = nil
+    var model: String? = nil
+
+    var totalTokensOrDerived: Int? {
+        if let totalTokens { return totalTokens }
+        let total = [inputTokens, outputTokens, reasoningTokens].compactMap { $0 }.reduce(0, +)
+        return total > 0 ? total : nil
+    }
+
+    var costUSD: Double? {
+        actualCostUSD ?? estimatedCostUSD
+    }
+
+    var hasDisplayValues: Bool {
+        inputTokens != nil
+            || outputTokens != nil
+            || cacheReadTokens != nil
+            || cacheWriteTokens != nil
+            || reasoningTokens != nil
+            || totalTokensOrDerived != nil
+            || costUSD != nil
+    }
+}
+
 struct CommandRun: Identifiable, Codable, Equatable {
     var id: UUID
     var title: String
@@ -91,6 +124,7 @@ struct CommandRun: Identifiable, Codable, Equatable {
     var agentChatID: String? = nil
     var provider: String? = nil
     var providerModel: String? = nil
+    var usage: CommandRunUsage? = nil
 
     var elapsedLabel: String {
         let end = completedAt ?? Date()
@@ -380,6 +414,7 @@ struct RemoteRunRecord: Codable, Identifiable, Equatable, Sendable {
     var chatID: String?
     var provider: String?
     var model: String?
+    var usage: CommandRunUsage?
 }
 
 struct RemoteRunListResponse: Codable, Sendable {
@@ -2170,6 +2205,7 @@ final class CommandCenterStore: ObservableObject {
                 runs[index].agentChatID = remoteRun.chatID
                 runs[index].provider = remoteRun.provider
                 runs[index].providerModel = remoteRun.model
+                runs[index].usage = remoteRun.usage
                 if remoteRun.status == "waitingApproval", !approvals.contains(where: { $0.runID == localID && $0.status == .pending }) {
                     insertRemoteApproval(
                         for: runs[index],
@@ -2199,7 +2235,8 @@ final class CommandCenterStore: ObservableObject {
                 agentProjectID: remoteRun.projectID,
                 agentChatID: remoteRun.chatID,
                 provider: remoteRun.provider,
-                providerModel: remoteRun.model
+                providerModel: remoteRun.model,
+                usage: remoteRun.usage
             )
             runs.append(localRun)
             remoteRunIDs[localRun.id.uuidString] = remoteRun.id
@@ -2570,6 +2607,7 @@ final class CommandCenterStore: ObservableObject {
             runs[index].agentChatID = snapshot.run.chatID
             runs[index].provider = snapshot.run.provider
             runs[index].providerModel = snapshot.run.model
+            runs[index].usage = snapshot.run.usage
             if snapshot.run.status == "waitingApproval",
                !approvals.contains(where: { $0.runID == localRunID && $0.status == .pending }) {
                 insertRemoteApproval(
@@ -2620,18 +2658,23 @@ final class CommandCenterStore: ObservableObject {
         }
 
         if event.kind == "complete" {
-            if let index = runs.firstIndex(where: { $0.id == localRunID }) {
-                runs[index].status = event.exitCode == 0 ? .complete : .failed
-                runs[index].progress = 1.0
-                runs[index].completedAt = Date()
+            do {
+                let snapshot = try await client.runSnapshot(remoteRunID: event.runID)
+                _ = await applyRemoteRunSnapshot(snapshot, localRunID: localRunID, remoteRunID: event.runID, client: client)
+            } catch {
+                if let index = runs.firstIndex(where: { $0.id == localRunID }) {
+                    runs[index].status = event.exitCode == 0 ? .complete : .failed
+                    runs[index].progress = 1.0
+                    runs[index].completedAt = Date()
+                }
+                persist()
+                await syncRemoteRunDetails(localRunID: localRunID, remoteRunID: event.runID, client: client)
+                scheduleWorkspaceRefresh(delayNanoseconds: 0)
             }
             notify(
                 title: event.exitCode == 0 ? L10n.tr("Veqral run complete") : L10n.tr("Veqral run failed"),
                 body: currentRun.title
             )
-            persist()
-            await syncRemoteRunDetails(localRunID: localRunID, remoteRunID: event.runID, client: client)
-            scheduleWorkspaceRefresh(delayNanoseconds: 0)
             return true
         }
 
