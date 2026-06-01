@@ -6,7 +6,7 @@ This file is the resume point for the clean main baseline. The former stacked Dr
 
 - [x] #A0 コード実査監査 — Draft PR #30 (`codex/a0-code-audit`)
 - [x] #A1 Gate2 自動受け入れ — Draft PR #31 (`codex/a1-gate2-xcuitest`)
-- [x] #A2 記憶の体験化 — Draft PR pending (`codex/a2-memory-experience`)
+- [x] #A2 記憶の体験化 — Draft PR #32 (`codex/a2-memory-experience`)
 - [ ] #A3 コストガバナンス
 - [ ] #A4 司令塔を実データで
 - [ ] #A5 認証オンボーディング・ウィザード
