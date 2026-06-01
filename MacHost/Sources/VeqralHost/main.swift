@@ -1770,6 +1770,18 @@ final class HostServer: @unchecked Sendable {
                 return
             }
 
+            if request.path == "/v1/notifications/discord/test", request.method == "POST" {
+                guard let webhook = config.resolvedDiscordWebhook else {
+                    throw HostError.badRequest("Discord webhook is not configured.")
+                }
+                let host = localHostName()
+                let content = "Veqral Discord テスト通知: \(host) の Mac Host から送信しました。"
+                await DiscordWebhookNotifier.send(webhook: webhook, content: content)
+                await state.recordAudit("discord test notification requested device=\(authenticatedDeviceID)")
+                sendJSON(NotificationTestResponse(ok: true, message: "Discord test notification sent."), connection: connection)
+                return
+            }
+
             if request.path == "/v1/push/token", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(PushTokenRequest.self, from: request.body)
                 await state.registerPushToken(deviceID: authenticatedDeviceID, request: body)
@@ -5927,6 +5939,11 @@ struct HealthResponse: Codable {
     var hermesVersion: String
     var toolStatuses: [CLIToolStatus]
     var telemetry: HostTelemetryResponse?
+}
+
+struct NotificationTestResponse: Codable {
+    var ok: Bool
+    var message: String
 }
 
 struct HostTelemetryResponse: Codable {

@@ -397,6 +397,11 @@ struct RemoteVoiceCleanupResponse: Codable, Sendable {
     var fallbackUsed: Bool
 }
 
+struct RemoteNotificationTestResponse: Codable, Sendable {
+    var ok: Bool
+    var message: String
+}
+
 struct RemoteHealthResponse: Codable, Sendable {
     var status: String
     var host: String
@@ -963,10 +968,13 @@ final class CommandCenterStore: ObservableObject {
     @Published var isLoadingRemoteMemory = false
     @Published var remoteProjectMemory: RemoteProjectMemoryResponse?
     @Published var remoteProjectMemoryMessage: String = ""
+    @Published var remoteProjectMemoryLastFetchedAt: Date?
     @Published var isLoadingRemoteProjectMemory = false
     @Published var remoteHostMessage: String = ""
     @Published var remoteHostHealth: RemoteHealthResponse?
     @Published var remoteHostTelemetry: RemoteHostTelemetry?
+    @Published var remoteHostTelemetryMessage: String = ""
+    @Published var discordTestMessage: String = ""
     @Published var remoteStreamStatus: RemoteStreamStatus = .idle
     @Published var remoteDevices: [RemoteDeviceRecord] = []
     @Published var remoteAuditLines: [String] = []
@@ -1576,6 +1584,7 @@ final class CommandCenterStore: ObservableObject {
                 let githubResponse = try await github
                 remoteHostHealth = healthResponse
                 remoteHostTelemetry = healthResponse.telemetry
+                remoteHostTelemetryMessage = healthResponse.telemetry == nil ? "Host health にテレメトリが含まれていません。手動更新で再取得してください。" : "Host health からテレメトリを取得しました。"
                 await mergeRemoteRuns(runListResponse.runs, client: client)
                 remoteDevices = deviceResponse.devices
                 remoteAuditLines = auditResponse.lines
@@ -1584,6 +1593,7 @@ final class CommandCenterStore: ObservableObject {
             } catch {
                 remoteHostHealth = nil
                 remoteHostTelemetry = nil
+                remoteHostTelemetryMessage = Self.remoteFailureMessage(error, context: "Mac Host telemetry")
                 remoteHostMessage = Self.remoteFailureMessage(error, context: "Mac Host")
             }
             isRefreshingRemoteHost = false
@@ -1596,10 +1606,29 @@ final class CommandCenterStore: ObservableObject {
         Task { @MainActor in
             do {
                 remoteHostTelemetry = try await RemoteHostClient(configuration: configuration).telemetry()
+                remoteHostTelemetryMessage = "ホスト状態を更新しました。"
             } catch {
+                remoteHostTelemetryMessage = Self.remoteFailureMessage(error, context: "Mac Host telemetry")
                 if remoteHostTelemetry == nil {
                     remoteHostMessage = Self.remoteFailureMessage(error, context: "Mac Host telemetry")
                 }
+            }
+        }
+    }
+
+    func sendDiscordTestNotification() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            discordTestMessage = "Mac Host とペアリングすると Discord テスト通知を送れます。"
+            return
+        }
+        discordTestMessage = "Discord テスト通知を送信中..."
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).testDiscordNotification()
+                discordTestMessage = response.ok ? "Discord テスト通知を送信しました。届いたか Discord 側で確認してください。" : response.message
+            } catch {
+                discordTestMessage = Self.remoteFailureMessage(error, context: "Discord test")
             }
         }
     }
@@ -1854,6 +1883,7 @@ final class CommandCenterStore: ObservableObject {
             do {
                 let response = try await RemoteHostClient(configuration: configuration).projectMemory(request)
                 remoteProjectMemory = response
+                remoteProjectMemoryLastFetchedAt = Date()
                 let memoryState = response.memoryContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "記憶ファイルは空です" : "記憶ファイルを読み込みました"
                 remoteProjectMemoryMessage = "\(memoryState)。\(response.sessions.count) 件の Hermes セッション。"
             } catch {
@@ -3962,6 +3992,11 @@ struct RemoteHostClient: Sendable {
         let body = try JSONEncoder.commandCenter.encode(requestBody)
         let data = try await request(path: "/v1/voice/cleanup", method: "POST", body: body)
         return try JSONDecoder.commandCenter.decode(RemoteVoiceCleanupResponse.self, from: data)
+    }
+
+    func testDiscordNotification() async throws -> RemoteNotificationTestResponse {
+        let data = try await request(path: "/v1/notifications/discord/test", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteNotificationTestResponse.self, from: data)
     }
 
     func createRun(

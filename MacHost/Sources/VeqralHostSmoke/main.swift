@@ -11,8 +11,15 @@ struct VeqralHostSmoke {
 
             Environment overrides:
               VEQRAL_MEMTEST_PROVIDER_A, VEQRAL_MEMTEST_MODEL_A
+              VEQRAL_MEMTEST_BASE_URL_A, VEQRAL_MEMTEST_API_MODE_A
+              VEQRAL_MEMTEST_API_KEY_A, VEQRAL_MEMTEST_API_KEY_ACCOUNT_A
               VEQRAL_MEMTEST_PROVIDER_B, VEQRAL_MEMTEST_MODEL_B
+              VEQRAL_MEMTEST_BASE_URL_B, VEQRAL_MEMTEST_API_MODE_B
+              VEQRAL_MEMTEST_API_KEY_B, VEQRAL_MEMTEST_API_KEY_ACCOUNT_B
               VEQRAL_MEMTEST_SOURCE
+              VEQRAL_MEMTEST_KEYCHAIN_SERVICE
+              VEQRAL_MEMTEST_OPENROUTER_KEY_ACCOUNT
+              VEQRAL_MEMTEST_ANTHROPIC_KEY_ACCOUNT
               HERMES_EXECUTABLE
             """)
             Foundation.exit(64)
@@ -41,9 +48,21 @@ struct MemoryInheritanceVerifier {
     struct ModelSelection: Equatable {
         var provider: String
         var model: String
+        var baseURL: String?
+        var apiMode: String?
+        var apiKey: String?
+        var apiKeyEnvironmentName: String?
+        var credentialDescription: String
 
         var label: String {
             "\(provider)/\(model)"
+        }
+
+        static func == (lhs: ModelSelection, rhs: ModelSelection) -> Bool {
+            lhs.provider == rhs.provider
+                && lhs.model == rhs.model
+                && lhs.baseURL == rhs.baseURL
+                && lhs.apiMode == rhs.apiMode
         }
     }
 
@@ -59,9 +78,11 @@ struct MemoryInheritanceVerifier {
     func run(reportPath: String) throws -> VerificationResult {
         let hermes = try hermesExecutable()
         let config = HermesConfig.load()
-        let modelA = ModelSelection(
-            provider: environment["VEQRAL_MEMTEST_PROVIDER_A"]?.nilIfBlank ?? config.provider ?? "openai-codex",
-            model: environment["VEQRAL_MEMTEST_MODEL_A"]?.nilIfBlank ?? config.model ?? "gpt-5.5"
+        let modelA = modelSelection(
+            suffix: "A",
+            fallbackProvider: config.provider ?? "openai-codex",
+            fallbackModel: config.model ?? "gpt-5.5",
+            fallbackBaseURL: config.baseURL
         )
         let modelB = selectModelB(modelA: modelA)
         let source = environment["VEQRAL_MEMTEST_SOURCE"]?.nilIfBlank ?? "veqral-memtest-\(Self.timestamp())-\(UUID().uuidString.prefix(8).lowercased())"
@@ -79,9 +100,11 @@ struct MemoryInheritanceVerifier {
         transcript.append("# Hermes Memory Inheritance PR0")
         transcript.append("")
         transcript.append("- Source: `\(source)`")
-        transcript.append("- Hermes home: `\(hermesHome.path)`")
+        transcript.append("- Hermes home: isolated temporary home (`\(hermesHome.lastPathComponent)`)")
         transcript.append("- Chat A: `\(modelA.label)`")
         transcript.append("- Chat B: `\(modelB?.label ?? "not configured")`")
+        transcript.append("- Chat A credential source: \(modelA.credentialDescription)")
+        transcript.append("- Chat B credential source: \(modelB?.credentialDescription ?? "not configured")")
         transcript.append("- Code name: `\(codeName)`")
         transcript.append("")
 
@@ -89,6 +112,8 @@ struct MemoryInheritanceVerifier {
             transcript.append("## Result")
             transcript.append("")
             transcript.append("FAIL: model swap test impossible because only one configured real model was detected. Set `VEQRAL_MEMTEST_PROVIDER_B` and `VEQRAL_MEMTEST_MODEL_B`, or configure a second Hermes provider/model, then rerun.")
+            transcript.append("")
+            transcript.append("Required credential receivers are documented in `PROGRESS.md` and `README.md`. 偽 pass は作っていません。")
             try writeReport(transcript, to: reportPath)
             return VerificationResult(
                 passed: false,
@@ -103,6 +128,25 @@ struct MemoryInheritanceVerifier {
             transcript.append("FAIL: model A and model B resolve to the same provider/model.")
             try writeReport(transcript, to: reportPath)
             return VerificationResult(passed: false, exitCode: 2, summary: "FAIL: model A and model B are identical.")
+        }
+
+        let preflightFindings = preflightFindings(modelA: modelA, modelB: modelB)
+        if !preflightFindings.isEmpty {
+            transcript.append("## Credential / Provider Preflight")
+            transcript.append("")
+            for finding in preflightFindings {
+                transcript.append("- \(finding)")
+            }
+            transcript.append("")
+            transcript.append("## Result")
+            transcript.append("")
+            transcript.append("FAIL: Hermes memory inheritance was not run because at least one real provider/model route is not ready. 偽 pass は作っていません。")
+            try writeReport(transcript, to: reportPath)
+            return VerificationResult(
+                passed: false,
+                exitCode: 2,
+                summary: "FAIL: Hermes memory inheritance preflight is missing real provider credentials or a reachable local model. See \(reportPath)."
+            )
         }
 
         let writePrompt = """
@@ -123,7 +167,7 @@ struct MemoryInheritanceVerifier {
         )
         transcript.append("## Chat A Transcript")
         transcript.append("")
-        transcript.append(fenced(redacted(write.combinedTrimmed)))
+        transcript.append(fenced(redacted(write.combinedTrimmed, extraSecrets: [modelA.apiKey, modelB.apiKey].compactMap { $0 })))
         transcript.append("")
 
         let memoryURL = hermesHome.appendingPathComponent("memories/MEMORY.md")
@@ -163,7 +207,7 @@ struct MemoryInheritanceVerifier {
         )
         transcript.append("## Chat B Transcript")
         transcript.append("")
-        transcript.append(fenced(redacted(read.combinedTrimmed)))
+        transcript.append(fenced(redacted(read.combinedTrimmed, extraSecrets: [modelA.apiKey, modelB.apiKey].compactMap { $0 })))
         transcript.append("")
 
         let responseContainsFact = read.combinedTrimmed.localizedCaseInsensitiveContains(codeName)
@@ -215,12 +259,47 @@ struct MemoryInheritanceVerifier {
     private func selectModelB(modelA: ModelSelection) -> ModelSelection? {
         if let provider = environment["VEQRAL_MEMTEST_PROVIDER_B"]?.nilIfBlank,
            let model = environment["VEQRAL_MEMTEST_MODEL_B"]?.nilIfBlank {
-            return ModelSelection(provider: provider, model: model)
+            return modelSelection(suffix: "B", fallbackProvider: provider, fallbackModel: model, fallbackBaseURL: nil)
         }
-        if environment["ANTHROPIC_API_KEY"]?.nilIfBlank != nil {
-            return ModelSelection(provider: "anthropic", model: "claude-sonnet-4-6")
+        if hasCredential(environmentName: "OPENROUTER_API_KEY", keychainAccount: openRouterKeychainAccount()) {
+            return modelSelection(
+                suffix: "B",
+                fallbackProvider: "openrouter",
+                fallbackModel: "google/gemini-2.5-flash",
+                fallbackBaseURL: nil
+            )
+        }
+        if hasCredential(environmentName: "ANTHROPIC_API_KEY", keychainAccount: anthropicKeychainAccount()) {
+            return modelSelection(
+                suffix: "B",
+                fallbackProvider: "anthropic",
+                fallbackModel: "claude-haiku-4-5",
+                fallbackBaseURL: nil
+            )
         }
         return nil
+    }
+
+    private func modelSelection(
+        suffix: String,
+        fallbackProvider: String,
+        fallbackModel: String,
+        fallbackBaseURL: String?
+    ) -> ModelSelection {
+        let provider = environment["VEQRAL_MEMTEST_PROVIDER_\(suffix)"]?.nilIfBlank ?? fallbackProvider
+        let model = environment["VEQRAL_MEMTEST_MODEL_\(suffix)"]?.nilIfBlank ?? fallbackModel
+        let baseURL = environment["VEQRAL_MEMTEST_BASE_URL_\(suffix)"]?.nilIfBlank ?? fallbackBaseURL
+        let apiMode = environment["VEQRAL_MEMTEST_API_MODE_\(suffix)"]?.nilIfBlank
+        let credential = credential(forProvider: provider, suffix: suffix, baseURL: baseURL)
+        return ModelSelection(
+            provider: provider,
+            model: model,
+            baseURL: baseURL,
+            apiMode: apiMode,
+            apiKey: credential.value,
+            apiKeyEnvironmentName: credential.environmentName,
+            credentialDescription: credential.description
+        )
     }
 
     private func hermesExecutable() throws -> String {
@@ -268,7 +347,145 @@ struct MemoryInheritanceVerifier {
         env["PATH"] = "\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         env["LANG"] = env["LANG"]?.nilIfBlank ?? "en_US.UTF-8"
         env["TERM"] = env["TERM"]?.nilIfBlank ?? "xterm-256color"
+        if let apiKey = selection.apiKey?.nilIfBlank,
+           let apiKeyEnvironmentName = selection.apiKeyEnvironmentName?.nilIfBlank {
+            env[apiKeyEnvironmentName] = apiKey
+        }
         return ProcessRunner.run(hermes, args, workingDirectory: cwd.path, environment: env, timeout: timeout)
+    }
+
+    private func preflightFindings(modelA: ModelSelection, modelB: ModelSelection) -> [String] {
+        [("Chat A", modelA), ("Chat B", modelB)].flatMap { pair in
+            preflightFindings(label: pair.0, selection: pair.1)
+        }
+    }
+
+    private func preflightFindings(label: String, selection: ModelSelection) -> [String] {
+        var findings: [String] = []
+        switch selection.provider {
+        case "openrouter":
+            if selection.apiKey?.nilIfBlank == nil {
+                findings.append("\(label) uses `openrouter`, but `OPENROUTER_API_KEY` is not set and Keychain account `\(openRouterKeychainAccount())` is empty.")
+            }
+        case "anthropic":
+            if selection.apiKey?.nilIfBlank == nil {
+                findings.append("\(label) uses `anthropic`, but `ANTHROPIC_API_KEY` is not set and Keychain account `\(anthropicKeychainAccount())` is empty.")
+            }
+        case "custom":
+            guard let baseURL = selection.baseURL?.nilIfBlank else {
+                findings.append("\(label) uses `custom`, but `VEQRAL_MEMTEST_BASE_URL_\(labelSuffix(label))` is not set.")
+                return findings
+            }
+            if isLocalOllamaBaseURL(baseURL) {
+                let tags = ProcessRunner.run(
+                    "/usr/bin/curl",
+                    ["--silent", "--show-error", "--max-time", "2", "http://127.0.0.1:11434/api/tags"],
+                    environment: environment,
+                    timeout: 3
+                )
+                if tags.exitCode != 0 {
+                    findings.append("\(label) points at local Ollama, but `http://127.0.0.1:11434/api/tags` is not reachable. Start Ollama and pull the configured model before rerunning.")
+                } else if !tags.combinedTrimmed.contains("\"\(selection.model)\"") {
+                    findings.append("\(label) points at local Ollama, but model `\(selection.model)` was not listed by `/api/tags`. Pull it with `ollama pull \(selection.model)` or set `VEQRAL_MEMTEST_MODEL_\(labelSuffix(label))` to an installed model.")
+                }
+            } else if selection.apiKey?.nilIfBlank == nil {
+                findings.append("\(label) uses a non-local custom endpoint, but no `VEQRAL_MEMTEST_API_KEY_\(labelSuffix(label))` or Keychain account was provided.")
+            }
+        default:
+            break
+        }
+        return findings
+    }
+
+    private func labelSuffix(_ label: String) -> String {
+        label.hasSuffix("A") ? "A" : "B"
+    }
+
+    private func credential(forProvider provider: String, suffix: String, baseURL: String?) -> (value: String?, environmentName: String?, description: String) {
+        switch provider {
+        case "openrouter":
+            return credential(
+                environmentName: "OPENROUTER_API_KEY",
+                explicitValueName: nil,
+                explicitAccountName: nil,
+                defaultAccount: openRouterKeychainAccount()
+            )
+        case "anthropic":
+            return credential(
+                environmentName: "ANTHROPIC_API_KEY",
+                explicitValueName: nil,
+                explicitAccountName: nil,
+                defaultAccount: anthropicKeychainAccount()
+            )
+        case "custom":
+            let explicitValueName = "VEQRAL_MEMTEST_API_KEY_\(suffix)"
+            let explicitAccountName = "VEQRAL_MEMTEST_API_KEY_ACCOUNT_\(suffix)"
+            if let baseURL, isLocalOllamaBaseURL(baseURL), environment[explicitValueName]?.nilIfBlank == nil, environment[explicitAccountName]?.nilIfBlank == nil {
+                return (value: "ollama", environmentName: "OPENAI_API_KEY", description: "local Ollama placeholder (`OPENAI_API_KEY=ollama`)")
+            }
+            return credential(
+                environmentName: "OPENAI_API_KEY",
+                explicitValueName: explicitValueName,
+                explicitAccountName: explicitAccountName,
+                defaultAccount: nil
+            )
+        default:
+            return (value: nil, environmentName: nil, description: "provider-managed auth")
+        }
+    }
+
+    private func credential(
+        environmentName: String,
+        explicitValueName: String?,
+        explicitAccountName: String?,
+        defaultAccount: String?
+    ) -> (value: String?, environmentName: String?, description: String) {
+        if let explicitValueName,
+           let value = environment[explicitValueName]?.nilIfBlank {
+            return (value: value, environmentName: environmentName, description: "env `\(explicitValueName)`")
+        }
+        if let value = environment[environmentName]?.nilIfBlank {
+            return (value: value, environmentName: environmentName, description: "env `\(environmentName)`")
+        }
+        let account = explicitAccountName.flatMap { environment[$0]?.nilIfBlank } ?? defaultAccount
+        if let account,
+           let value = keychainValue(account: account)?.nilIfBlank {
+            return (value: value, environmentName: environmentName, description: "Keychain account `\(account)`")
+        }
+        if let account {
+            return (value: nil, environmentName: environmentName, description: "missing env `\(environmentName)` / Keychain account `\(account)`")
+        }
+        return (value: nil, environmentName: environmentName, description: "missing env `\(environmentName)`")
+    }
+
+    private func hasCredential(environmentName: String, keychainAccount: String) -> Bool {
+        environment[environmentName]?.nilIfBlank != nil || keychainValue(account: keychainAccount)?.nilIfBlank != nil
+    }
+
+    private func keychainValue(account: String) -> String? {
+        let service = environment["VEQRAL_MEMTEST_KEYCHAIN_SERVICE"]?.nilIfBlank ?? "dev.hiroyuki.veqral.host"
+        let result = ProcessRunner.run(
+            "/usr/bin/security",
+            ["find-generic-password", "-s", service, "-a", account, "-w"],
+            environment: environment,
+            timeout: 5
+        )
+        guard result.exitCode == 0 else {
+            return nil
+        }
+        return result.stdout.nilIfBlank
+    }
+
+    private func openRouterKeychainAccount() -> String {
+        environment["VEQRAL_MEMTEST_OPENROUTER_KEY_ACCOUNT"]?.nilIfBlank ?? "openrouter:api-key"
+    }
+
+    private func anthropicKeychainAccount() -> String {
+        environment["VEQRAL_MEMTEST_ANTHROPIC_KEY_ACCOUNT"]?.nilIfBlank ?? "anthropic:api-key"
+    }
+
+    private func isLocalOllamaBaseURL(_ baseURL: String) -> Bool {
+        baseURL.contains("127.0.0.1:11434") || baseURL.contains("localhost:11434")
     }
 
     private func stateDBSummary(hermesHome: URL, source: String) -> String {
@@ -284,7 +501,7 @@ struct MemoryInheritanceVerifier {
         return "\(db.lastPathComponent), query unavailable"
     }
 
-    private func redacted(_ text: String) -> String {
+    private func redacted(_ text: String, extraSecrets: [String] = []) -> String {
         var output = text
         for (key, value) in environment {
             let lowered = key.lowercased()
@@ -294,6 +511,9 @@ struct MemoryInheritanceVerifier {
             if value.count >= 8 {
                 output = output.replacingOccurrences(of: value, with: "[REDACTED]")
             }
+        }
+        for secret in extraSecrets where secret.count >= 8 {
+            output = output.replacingOccurrences(of: secret, with: "[REDACTED]")
         }
         let patterns = [
             #"(?i)bearer\s+[A-Za-z0-9._~+/=-]+"#,
@@ -315,18 +535,27 @@ struct MemoryInheritanceVerifier {
     }
 
     private static func writeIsolatedConfig(home: URL, model: ModelSelection) throws {
-        let config = """
-        model:
-          provider: \(model.provider)
-          default: \(model.model)
-        toolsets:
-        - memory
-        agent:
-          max_turns: 12
-          verbose: false
-        checkpoints:
-          enabled: false
-        """
+        var lines = [
+            "model:",
+            "  provider: \(model.provider)",
+            "  default: \(model.model)"
+        ]
+        if let baseURL = model.baseURL?.nilIfBlank {
+            lines.append("  base_url: \(baseURL)")
+        }
+        if let apiMode = model.apiMode?.nilIfBlank {
+            lines.append("  api_mode: \(apiMode)")
+        }
+        lines.append(contentsOf: [
+            "toolsets:",
+            "- memory",
+            "agent:",
+            "  max_turns: 12",
+            "  verbose: false",
+            "checkpoints:",
+            "  enabled: false"
+        ])
+        let config = lines.joined(separator: "\n") + "\n"
         try config.write(to: home.appendingPathComponent("config.yaml"), atomically: true, encoding: .utf8)
     }
 
@@ -341,6 +570,7 @@ struct MemoryInheritanceVerifier {
 struct HermesConfig {
     var provider: String?
     var model: String?
+    var baseURL: String?
 
     static func load() -> HermesConfig {
         let url = FileManager.default.homeDirectoryForCurrentUser
@@ -351,6 +581,7 @@ struct HermesConfig {
         var inModel = false
         var provider: String?
         var model: String?
+        var baseURL: String?
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = String(rawLine)
             if line.hasPrefix("model:") {
@@ -366,9 +597,11 @@ struct HermesConfig {
                 provider = String(trimmed.dropFirst("provider:".count)).trimmingCharacters(in: .whitespacesAndNewlines).unquoted.nilIfBlank
             } else if trimmed.hasPrefix("default:") {
                 model = String(trimmed.dropFirst("default:".count)).trimmingCharacters(in: .whitespacesAndNewlines).unquoted.nilIfBlank
+            } else if trimmed.hasPrefix("base_url:") {
+                baseURL = String(trimmed.dropFirst("base_url:".count)).trimmingCharacters(in: .whitespacesAndNewlines).unquoted.nilIfBlank
             }
         }
-        return HermesConfig(provider: provider, model: model)
+        return HermesConfig(provider: provider, model: model, baseURL: baseURL)
     }
 }
 

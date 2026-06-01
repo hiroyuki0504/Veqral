@@ -48,6 +48,38 @@ hermes doctor
 
 The current local check passed with Hermes Agent v0.15.1. `hermes doctor` reports that OpenAI Codex auth is logged in, while some optional providers and tools are not configured.
 
+### Hermes memory inheritance smoke
+
+`VeqralHostSmoke verify-memory-inheritance` proves Veqral's core promise with a disposable Hermes source and isolated `HERMES_HOME`. It must use real Hermes native memory and two real models (`A != B`); do not add a custom memory layer or hard-code the expected fact.
+
+Preferred low-cost route:
+
+```sh
+export VEQRAL_MEMTEST_PROVIDER_A=custom
+export VEQRAL_MEMTEST_MODEL_A=qwen2.5:7b
+export VEQRAL_MEMTEST_BASE_URL_A=http://127.0.0.1:11434/v1
+export VEQRAL_MEMTEST_PROVIDER_B=openrouter
+export VEQRAL_MEMTEST_MODEL_B=google/gemini-2.5-flash
+export OPENROUTER_API_KEY=... # or put it in Keychain, never in code
+swift run --package-path MacHost VeqralHostSmoke verify-memory-inheritance --report HERMES_MEMORY_INHERITANCE_PR0.md
+```
+
+For the local model, install/start Ollama and pull the exact model:
+
+```sh
+ollama pull qwen2.5:7b
+curl http://127.0.0.1:11434/api/tags
+```
+
+Keychain receivers, using the Host service name:
+
+```sh
+security add-generic-password -U -s dev.hiroyuki.veqral.host -a openrouter:api-key -w "$OPENROUTER_API_KEY"
+security add-generic-password -U -s dev.hiroyuki.veqral.host -a anthropic:api-key -w "$ANTHROPIC_API_KEY"
+```
+
+Override the account/service names if needed with `VEQRAL_MEMTEST_KEYCHAIN_SERVICE`, `VEQRAL_MEMTEST_OPENROUTER_KEY_ACCOUNT`, `VEQRAL_MEMTEST_ANTHROPIC_KEY_ACCOUNT`, or per-custom-endpoint `VEQRAL_MEMTEST_API_KEY_ACCOUNT_A/B`.
+
 ## Operational Gaps
 
 P1 after this Host:

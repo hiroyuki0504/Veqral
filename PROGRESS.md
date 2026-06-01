@@ -4,7 +4,7 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 
 ## Status
 
-- [x] #0 Hermes 記憶継承の自動実証 — completed in PR #19 (`codex/backlog-0-hermes-memory-inheritance`) with an honest FAIL result
+- [ ] #0 Hermes 記憶継承の自動実証 — smoke exists in PR #19, but Gate1 is not green until a real 2-model Hermes native-memory pass is recorded
 - [x] #1 UI/UX 洗練 — completed earlier in PR #14 (`codex/ui-japanese-polish`)
 - [x] #2 残4件の統合 — completed in PR #17 (`codex/pr1-surface-consolidation`)
 - [x] #3 WebSocket 再接続 + Run resume — completed in PR #20 (`codex/backlog-3-websocket-resume`)
@@ -20,12 +20,15 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 
 ## Current Item
 
-#12 マージ準備完了・ユーザー承認待ち
+Gate1: #0 Hermes 記憶継承の real 2-model 実走待ち
 
 ## Notes
 
 - #0 report: `HERMES_MEMORY_INHERITANCE_PR0.md`.
-- #0 result: FAIL. The smoke test is reproducible and uses an isolated `HERMES_HOME`, but the available model routes could not complete a live two-model run: `copilot/gpt-4o-mini` and `copilot/claude-haiku-4.5` were rejected as not licensed/authorized. Earlier default route attempts also failed because isolated `openai-codex` auth was unavailable and `anthropic/claude-sonnet-4-6` rejected the configured API key. No fake pass was created.
+- #0 current result: FAIL / blocked by provider setup, not code success. The smoke test is reproducible and uses an isolated `HERMES_HOME`, but no available local route currently gives two real usable models: Copilot routes are rejected as not licensed/authorized, isolated `openai-codex` auth is unavailable, the configured Anthropic key is rejected by Anthropic, OpenRouter is not configured, and local Ollama is not reachable at `127.0.0.1:11434`. 偽 pass は作っていない。
+- #0 preferred next run: `VEQRAL_MEMTEST_PROVIDER_A=custom`, `VEQRAL_MEMTEST_MODEL_A=qwen2.5:7b`, `VEQRAL_MEMTEST_BASE_URL_A=http://127.0.0.1:11434/v1`, `VEQRAL_MEMTEST_PROVIDER_B=openrouter`, `VEQRAL_MEMTEST_MODEL_B=google/gemini-2.5-flash`.
+- #0 required receivers: set `OPENROUTER_API_KEY` in env or Keychain service `dev.hiroyuki.veqral.host` account `openrouter:api-key`; start Ollama and pull the exact local model; optional Anthropic fallback uses env `ANTHROPIC_API_KEY` or Keychain account `anthropic:api-key`. Keys themselves must never be committed or pasted into reports.
+- Gate2 device acceptance checklist is in `DEVICE_ACCEPTANCE.md`. It covers iPhone/iPad tap checks for voice input, host telemetry, saved command drafts, Discord webhook delivery, and Hermes memory visibility. Light instrumentation added in this branch: Discord test notification, telemetry failure message, and Memory last fetch time.
 - #3 reconnect/resume implementation is documented in `WEBSOCKET_RECONNECT_PR3.md`. Manual device smoke is still needed for real network interruption.
 - #4 Discord implementation is documented in `DISCORD_NOTIFICATIONS_PR4.md`. Local Host smoke passed with 4 redacted payloads; external Discord delivery still needs a real webhook URL configured on the paired Host.
 - #5 Memory visibility is documented in `MEMORY_VISIBILITY_PR5.md`. Host smoke passed; paired-device confirmation after a real Hermes Project chat is still needed.
