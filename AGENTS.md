@@ -42,7 +42,7 @@ Device(Mac)
 ## 現状（重要）
 
 - `main` = `18b29b4`（PR #2〜#8 統合済み: P0 パイプライン + 実行時修正）
-- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き ← #15 PR1 core fixes ← #16 PR-A screen inventory ← #17 PR1 surface consolidation ← #18 PR2 portfolio command center ← #19 backlog #0 Hermes memory smoke ← #20 backlog #3 WebSocket reconnect ← #21 backlog #4 Discord notifications
+- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き ← #15 PR1 core fixes ← #16 PR-A screen inventory ← #17 PR1 surface consolidation ← #18 PR2 portfolio command center ← #19 backlog #0 Hermes memory smoke ← #20 backlog #3 WebSocket reconnect ← #21 backlog #4 Discord notifications ← #22 backlog #5 Memory visibility
 - #9: Device→エージェント選択、Codex/Claude 直接、Hermes Project→Chat→model、History「Continue」resume。（更新耐性 adapter を同ブランチに足す指示済み → 入っているかブランチで確認）
 - #10: ワンタップ承認(一覧から)、Chat/セッション名前付け+フィルタ、画像 diff 3 モード+hunk 添付、swipe、日本語/English/System 切替（`Localizable.strings` 体系。`.xcstrings` 移行は未）
 - #11: APNs push（device build は free team では Push capability 非対応で停止 → #12 で外した）
@@ -56,6 +56,7 @@ Device(Mac)
 - #19 (`codex/backlog-0-hermes-memory-inheritance`): Backlog #0。`VeqralHostSmoke verify-memory-inheritance` を追加し、Hermes native memory 継承を使い捨て `HERMES_HOME` で実 LLM 検証する smoke と `HERMES_MEMORY_INHERITANCE_PR0.md` を追加。結果は正直に FAIL（Copilot 2モデル route はライセンス/権限で拒否、default route は隔離 `openai-codex` 認証不可 + Anthropic key rejected）。自作 memory は追加していない。
 - #20 (`codex/backlog-3-websocket-resume`): Backlog #3。Remote Run WebSocket stream を指数バックオフで再接続し、再接続前に run snapshot/replayed logs を同期・重複排除、terminal 状態では resume しない安全策を追加。接続ストリップに connecting/streaming/reconnecting/disconnected を表示。`WEBSOCKET_RECONNECT_PR3.md` に manual smoke 手順を記録。
 - #21 (`codex/backlog-4-discord-notifications`): Backlog #4。Mac Host の Discord webhook 通知を承認待ち/Run 完了/Run 失敗/司令塔 Asset down に拡張。URL は `VEQRAL_DISCORD_WEBHOOK` / legacy portfolio env / Keychain / Host config で解決、本文は redact + Run ID 短縮 + 作業場所名のみ。APNs は feature flag OFF のまま温存。`VeqralHost smoke-discord-notifications` でローカル 4 payload + redact smoke 通過。
+- #22 (`codex/backlog-5-memory-visibility`): Backlog #5。Memory 画面に「Hermes プロジェクト記憶」を追加し、選択中 Project の Hermes source、redact 済み `MEMORY.md`、`~/.hermes/state.db` の session 一覧を read-only 表示。Host は `POST /v1/memory/project` と `VeqralHost smoke-project-memory` を追加。自作 memory store は追加していない。
 
 ## 未完了・次の手番
 
@@ -66,8 +67,9 @@ Device(Mac)
    - 司令塔 E2E: discover → Asset 編集（health/controls/案件）→ control が承認待ちに積まれる → 承認後 Run ログで結果確認 → log-summary → local-only promote
    - #20 WebSocket reconnect: 長い remote run 中にネットワークを一瞬切り、strip が再接続表示になってログが復帰すること（実機 manual smoke 未実施）
    - #21 Discord: 実 webhook URL を設定し、承認待ち/Run 完了/Run 失敗/司令塔 down が外部 Discord に届くこと（ローカル smoke は通過済み）
+   - #22 Memory: paired Host で Hermes Project Chat を実行し、Memory 画面に `MEMORY.md` の事実と同 source の session 一覧が出ること（Host smoke は通過済み）
    - UI 受け入れ確認: 日本語のみ、赤い 0 バッジなし、未ペアリング strip が細い、UUID/コンテナパスが主表示に出ない、Unavailable/Offline が緑でない
-2. スタック統合：実機 OK 後、#9→#21 を main にまとめて取り込む（和集合・落とさず・壊さず・build & smoke 検証）
+2. スタック統合：実機 OK 後、#9→#22 を main にまとめて取り込む（和集合・落とさず・壊さず・build & smoke 検証）
 3. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
 4. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
 5. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
