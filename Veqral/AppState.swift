@@ -499,6 +499,30 @@ struct RemoteCLIToolStatus: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+struct RemoteAuthOnboardingStatus: Codable, Equatable, Sendable {
+    var checkedAt: Date
+    var providers: [RemoteAuthProviderStatus]
+    var readyCount: Int
+    var allRequiredReady: Bool
+    var message: String
+}
+
+struct RemoteAuthProviderStatus: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var title: String
+    var cliCommand: String
+    var loginCommand: String
+    var alternateLoginCommand: String?
+    var isInstalled: Bool
+    var isLoggedIn: Bool
+    var hermesProviderReady: Bool
+    var keychainMarkerPresent: Bool
+    var isReady: Bool
+    var summary: String
+    var credentialHints: [String]
+    var warnings: [String]
+}
+
 struct RemoteRunRecord: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var prompt: String
@@ -972,6 +996,8 @@ final class CommandCenterStore: ObservableObject {
     @Published var isLoadingRemoteProjectMemory = false
     @Published var remoteHostMessage: String = ""
     @Published var remoteHostHealth: RemoteHealthResponse?
+    @Published var authOnboardingStatus: RemoteAuthOnboardingStatus?
+    @Published var authOnboardingMessage: String = ""
     @Published var remoteHostTelemetry: RemoteHostTelemetry?
     @Published var remoteHostTelemetryMessage: String = ""
     @Published var discordTestMessage: String = ""
@@ -1577,12 +1603,16 @@ final class CommandCenterStore: ObservableObject {
                 async let devices = client.devices()
                 async let audit = client.audit()
                 async let github = client.githubStatus(workingDirectory: directory)
+                async let auth = client.authOnboardingStatus()
                 let healthResponse = try await health
                 let runListResponse = try await runList
                 let deviceResponse = try await devices
                 let auditResponse = try await audit
                 let githubResponse = try await github
+                let authResponse = try? await auth
                 remoteHostHealth = healthResponse
+                authOnboardingStatus = authResponse
+                authOnboardingMessage = authResponse?.message ?? ""
                 remoteHostTelemetry = healthResponse.telemetry
                 remoteHostTelemetryMessage = healthResponse.telemetry == nil ? "Host health にテレメトリが含まれていません。手動更新で再取得してください。" : "Host health からテレメトリを取得しました。"
                 await mergeRemoteRuns(runListResponse.runs, client: client)
@@ -1597,6 +1627,26 @@ final class CommandCenterStore: ObservableObject {
                 remoteHostMessage = Self.remoteFailureMessage(error, context: "Mac Host")
             }
             isRefreshingRemoteHost = false
+        }
+    }
+
+    func refreshAuthOnboarding(persistReadyMarkers: Bool = false) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            authOnboardingMessage = L10n.tr("Mac Host pairing is required.")
+            return
+        }
+        let configuration = remoteHost
+        authOnboardingMessage = persistReadyMarkers ? "ログイン状態を確認しています..." : "認証状態を更新しています..."
+        Task { @MainActor in
+            do {
+                let client = RemoteHostClient(configuration: configuration)
+                authOnboardingStatus = persistReadyMarkers
+                    ? try await client.refreshAuthOnboarding()
+                    : try await client.authOnboardingStatus()
+                authOnboardingMessage = authOnboardingStatus?.message ?? "認証状態を更新しました。"
+            } catch {
+                authOnboardingMessage = Self.remoteFailureMessage(error, context: "Auth onboarding")
+            }
         }
     }
 
@@ -3986,6 +4036,16 @@ struct RemoteHostClient: Sendable {
     func telemetry() async throws -> RemoteHostTelemetry {
         let data = try await request(path: "/v1/telemetry", method: "GET", body: Data())
         return try JSONDecoder.commandCenter.decode(RemoteHostTelemetry.self, from: data)
+    }
+
+    func authOnboardingStatus() async throws -> RemoteAuthOnboardingStatus {
+        let data = try await request(path: "/v1/auth/onboarding", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteAuthOnboardingStatus.self, from: data)
+    }
+
+    func refreshAuthOnboarding() async throws -> RemoteAuthOnboardingStatus {
+        let data = try await request(path: "/v1/auth/onboarding/refresh", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteAuthOnboardingStatus.self, from: data)
     }
 
     func cleanupVoiceCommand(_ requestBody: RemoteVoiceCleanupRequest) async throws -> RemoteVoiceCleanupResponse {
