@@ -67,14 +67,14 @@ Device(Mac)
 - #A0 (`codex/a0-code-audit`, PR #30): clean main を実コード監査し `AUDIT.md` を追加。Discord test 2xx 必須化、Host state isolation、Hermes `HERMES_HOME` 尊重、redactor 拡張、portfolio DELETE fail-closed を修正。独立 Draft PR。
 - #A1 (`codex/a1-gate2-xcuitest`, PR #31): Gate2 の XCUITest 自動受け入れを追加。saved command / telemetry / Memory visibility / Discord 2xx / voice transcript→approval gate を simulator で自動化。実機 XCUITest は local Xcode account/provisioning と offline devices で未実行、残る人手は Discord 到達確認と実マイク一言。独立 Draft PR。
 - #A2 (`codex/a2-memory-experience`, PR #32): Memory 画面から選択中 Hermes Project の native memory/session に質問できる導線、Run 詳細から Codex/Claude/Shell 直接モードの文脈を Hermes Project に引き継ぐ導線を追加。自作 memory store/MCP は追加せず、既存 Hermes Run 経路と read-only project memory 表示を利用。`MEMORY_EXPERIENCE_PR_A2.md` に記録。
-- #A3 (`codex/a3-cost-governance`): Mac Host に project cost summary / budget API を追加し、usage cost 上限・80%しきい値・auto pause・high severity approval gate を実装。Run 詳細と司令塔 Asset 詳細に「コストガード」を追加。`COST_GOVERNANCE_PR_A3.md` に記録。
+- #A3 (`codex/a3-cost-governance`, PR #33): Mac Host に project cost summary / budget API を追加し、usage cost 上限・80%しきい値・auto pause・high severity approval gate を実装。Run 詳細と司令塔 Asset 詳細に「コストガード」を追加。`COST_GOVERNANCE_PR_A3.md` に記録。
 
 ## 未完了・次の手番
 
 1. Gate1: #0 Hermes 記憶継承は `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4` の real 2 model で PASS 済み。`HERMES_MEMORY_INHERITANCE_PR0.md` に実トランスクリプトあり。自作 memory は足していない。
    - より強いクロスベンダー証明は、Hermes から Claude/Anthropic login が使える状態になった後で再実行する。
 2. 差別化バックログ（継続）: #A4 司令塔を実データで、が次の未完了項目。
-   - #A0/#A1/#A2 は Draft PR 済み。#A3 は `codex/a3-cost-governance` で実装済み、Draft PR 化と検証完了後に次へ進む。
+   - #A0/#A1/#A2/#A3 は Draft PR 済み。次は #A4 司令塔を実データで検証する。
    - Final の main 統合は #A0〜#A7 が揃い、ユーザーが明示 GO してから。
 3. Gate2（継続）: `DEVICE_ACCEPTANCE.md` に沿って iPhone/iPad 実機タップ確認。
    - 対象: voice input / host telemetry / saved command / Discord 実 webhook / Hermes memory visibility。
