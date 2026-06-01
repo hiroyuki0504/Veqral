@@ -414,8 +414,14 @@
 "Total Tokens" = "Total";
 "Cache Read" = "Cache Read";
 "Cache Write" = "Cache Write";
+"Affected Files" = "Affected Files";
+"Command is not available." = "Command is not available.";
+"Confirm Approval" = "Confirm Approval";
 "Estimated Cost" = "Estimated Cost";
 "Actual Cost" = "Actual Cost";
+"No diff collected for this approval yet." = "No diff collected for this approval yet.";
+"Review Before Approving" = "Review Before Approving";
+"What Will Run" = "What Will Run";
 "Runs local shell commands only where local command execution is available." = "Runs local shell commands only where local command execution is available.";
 "Same memory, requirements, policies, repo context, and output contract are passed to every role." = "Same memory, requirements, policies, repo context, and output contract are passed to every role.";
 "Security Policy" = "Security Policy";

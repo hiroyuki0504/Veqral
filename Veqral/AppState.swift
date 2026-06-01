@@ -181,6 +181,10 @@ extension CommandApproval {
     var symbolName: String {
         tintName == "amber" ? "key" : "exclamationmark.triangle"
     }
+
+    var requiresPreApprovalReview: Bool {
+        risk == "高" || tintName == "red"
+    }
 }
 
 struct CommandDiffEntry: Identifiable, Codable, Equatable {

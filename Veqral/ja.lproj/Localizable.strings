@@ -414,8 +414,14 @@
 "Total Tokens" = "合計";
 "Cache Read" = "キャッシュ読込";
 "Cache Write" = "キャッシュ書込";
+"Affected Files" = "影響ファイル";
+"Command is not available." = "コマンドを取得できません。";
+"Confirm Approval" = "内容を確認して承認";
 "Estimated Cost" = "概算費用";
 "Actual Cost" = "実費用";
+"No diff collected for this approval yet." = "この承認に紐づく差分はまだ取得されていません。";
+"Review Before Approving" = "承認前の確認";
+"What Will Run" = "実行される内容";
 "Runs local shell commands only where local command execution is available." = "ローカルコマンド実行が利用可能な環境でのみ shell コマンドを実行します。";
 "Same memory, requirements, policies, repo context, and output contract are passed to every role." = "全ロールに同じ記憶・要件・ポリシー・repo 文脈・出力契約を渡します。";
 "Security Policy" = "セキュリティポリシー";
