@@ -389,6 +389,76 @@ struct RemoteHealthResponse: Codable, Sendable {
     var port: UInt16
     var hermesVersion: String
     var toolStatuses: [RemoteCLIToolStatus]?
+    var telemetry: RemoteHostTelemetry?
+}
+
+struct RemoteHostTelemetry: Codable, Equatable, Sendable {
+    var checkedAt: Date
+    var cpu: RemoteHostTelemetryCPU
+    var memory: RemoteHostTelemetryMemory
+    var disk: RemoteHostTelemetryDisk
+    var thermal: RemoteHostTelemetryThermal
+    var uptime: RemoteHostTelemetryUptime
+    var power: RemoteHostTelemetryPower
+    var network: RemoteHostTelemetryNetwork
+    var topProcesses: [RemoteHostTelemetryProcess]
+}
+
+struct RemoteHostTelemetryCPU: Codable, Equatable, Sendable {
+    var totalPercent: Double?
+    var perCorePercent: [Double]
+    var loadAverage: [Double]
+}
+
+struct RemoteHostTelemetryMemory: Codable, Equatable, Sendable {
+    var totalBytes: UInt64?
+    var usedBytes: UInt64?
+    var freeBytes: UInt64?
+    var pressure: String
+}
+
+struct RemoteHostTelemetryDisk: Codable, Equatable, Sendable {
+    var mountPoint: String
+    var totalBytes: UInt64?
+    var freeBytes: UInt64?
+    var usedPercent: Double?
+    var smartStatus: String?
+}
+
+struct RemoteHostTelemetryThermal: Codable, Equatable, Sendable {
+    var state: String
+    var rawTemperatureC: Double?
+    var fanRPM: Double?
+}
+
+struct RemoteHostTelemetryUptime: Codable, Equatable, Sendable {
+    var seconds: TimeInterval
+    var osVersion: String
+    var hostName: String
+    var machineModel: String
+}
+
+struct RemoteHostTelemetryPower: Codable, Equatable, Sendable {
+    var isBatteryAvailable: Bool
+    var batteryPercent: Double?
+    var isCharging: Bool?
+    var isACPowered: Bool?
+}
+
+struct RemoteHostTelemetryNetwork: Codable, Equatable, Sendable {
+    var tailscaleIP: String?
+    var interfaceName: String?
+    var rxBytesPerSecond: Double?
+    var txBytesPerSecond: Double?
+}
+
+struct RemoteHostTelemetryProcess: Codable, Identifiable, Equatable, Sendable {
+    var pid: Int32
+    var name: String
+    var cpuPercent: Double?
+    var memoryMB: Double?
+
+    var id: Int32 { pid }
 }
 
 struct RemoteCLIToolStatus: Codable, Identifiable, Equatable, Sendable {
@@ -881,6 +951,7 @@ final class CommandCenterStore: ObservableObject {
     @Published var isLoadingRemoteProjectMemory = false
     @Published var remoteHostMessage: String = ""
     @Published var remoteHostHealth: RemoteHealthResponse?
+    @Published var remoteHostTelemetry: RemoteHostTelemetry?
     @Published var remoteStreamStatus: RemoteStreamStatus = .idle
     @Published var remoteDevices: [RemoteDeviceRecord] = []
     @Published var remoteAuditLines: [String] = []
@@ -1489,6 +1560,7 @@ final class CommandCenterStore: ObservableObject {
                 let auditResponse = try await audit
                 let githubResponse = try await github
                 remoteHostHealth = healthResponse
+                remoteHostTelemetry = healthResponse.telemetry
                 await mergeRemoteRuns(runListResponse.runs, client: client)
                 remoteDevices = deviceResponse.devices
                 remoteAuditLines = auditResponse.lines
@@ -1496,9 +1568,24 @@ final class CommandCenterStore: ObservableObject {
                 remoteHostMessage = "Mac Host online."
             } catch {
                 remoteHostHealth = nil
+                remoteHostTelemetry = nil
                 remoteHostMessage = Self.remoteFailureMessage(error, context: "Mac Host")
             }
             isRefreshingRemoteHost = false
+        }
+    }
+
+    func refreshRemoteHostTelemetry() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else { return }
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                remoteHostTelemetry = try await RemoteHostClient(configuration: configuration).telemetry()
+            } catch {
+                if remoteHostTelemetry == nil {
+                    remoteHostMessage = Self.remoteFailureMessage(error, context: "Mac Host telemetry")
+                }
+            }
         }
     }
 
@@ -3849,6 +3936,11 @@ struct RemoteHostClient: Sendable {
             throw RemoteHostError.server("Health check failed")
         }
         return try JSONDecoder.commandCenter.decode(RemoteHealthResponse.self, from: data)
+    }
+
+    func telemetry() async throws -> RemoteHostTelemetry {
+        let data = try await request(path: "/v1/telemetry", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteHostTelemetry.self, from: data)
     }
 
     func createRun(

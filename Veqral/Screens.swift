@@ -676,6 +676,10 @@ struct DevicesView: View {
                     }
                 }
 
+                VQPanel("Host Status", systemImage: "waveform.path.ecg") {
+                    HostTelemetryPanel(telemetry: store.remoteHostTelemetry, isPaired: store.remoteHost.isPaired)
+                }
+
                 VQPanel("Run Agent on This Mac", systemImage: "switch.2") {
                     VStack(alignment: .leading, spacing: 12) {
                         Text(L10n.tr("Choose which native agent the paired Mac Host should spawn for the next command."))
@@ -838,6 +842,9 @@ struct DevicesView: View {
         .onChange(of: store.remoteHost) { _, _ in
             syncRemoteFields()
         }
+        .task(id: store.remoteHost.deviceID) {
+            await telemetryLoop()
+        }
         .sheet(isPresented: $showPairingScanner) {
             PairingQRScannerSheet(
                 statusMessage: scannerStatusMessage,
@@ -857,6 +864,22 @@ struct DevicesView: View {
         remoteEndpoint = store.remoteHost.endpoint.isEmpty ? store.workspace.macHostEndpoint : store.remoteHost.endpoint
         if remoteDeviceName.isEmpty {
             remoteDeviceName = ProcessInfo.processInfo.hostName
+        }
+    }
+
+    private func telemetryLoop() async {
+        guard await MainActor.run(body: { store.remoteHost.isPaired }) else { return }
+        await MainActor.run {
+            store.refreshRemoteHostTelemetry()
+        }
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
+            let isPaired = await MainActor.run(body: { store.remoteHost.isPaired })
+            guard isPaired else { return }
+            await MainActor.run {
+                store.refreshRemoteHostTelemetry()
+            }
         }
     }
 
@@ -970,6 +993,199 @@ struct DevicesView: View {
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+private struct HostTelemetryPanel: View {
+    let telemetry: RemoteHostTelemetry?
+    let isPaired: Bool
+
+    private let columns = [GridItem(.adaptive(minimum: 150), spacing: 10)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let telemetry {
+                HStack(spacing: 8) {
+                    StatusPill(title: L10n.tr("Live"), tint: VQTheme.green)
+                    StatusPill(title: thermalLabel(telemetry.thermal.state), tint: thermalTint(telemetry.thermal.state))
+                    StatusPill(title: "\(L10n.tr("Updated")) \(relativeTime(telemetry.checkedAt))", tint: VQTheme.steel)
+                    Spacer()
+                }
+
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+                    telemetryMetric("CPU Usage", value: percent(telemetry.cpu.totalPercent), symbol: "cpu")
+                    telemetryMetric("Load", value: loadAverage(telemetry.cpu.loadAverage), symbol: "gauge.with.dots.needle.67percent")
+                    telemetryMetric("Memory", value: memorySummary(telemetry.memory), symbol: "memorychip")
+                    telemetryMetric("Disk", value: diskSummary(telemetry.disk), symbol: "internaldrive")
+                    telemetryMetric("Thermal State", value: thermalLabel(telemetry.thermal.state), symbol: "thermometer.medium")
+                    telemetryMetric("Uptime", value: uptime(telemetry.uptime.seconds), symbol: "clock.arrow.circlepath")
+                    telemetryMetric("Battery", value: powerSummary(telemetry.power), symbol: "battery.75")
+                    telemetryMetric("Network", value: networkSummary(telemetry.network), symbol: "network")
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    KeyValueLine(key: "Memory Pressure", value: telemetry.memory.pressure)
+                    KeyValueLine(key: "OS", value: telemetry.uptime.osVersion)
+                    KeyValueLine(key: "Machine", value: telemetry.uptime.machineModel)
+                    KeyValueLine(key: "Raw Temperature", value: telemetry.thermal.rawTemperatureC.map { String(format: "%.1f C", $0) } ?? "—")
+                    KeyValueLine(key: "Fan", value: telemetry.thermal.fanRPM.map { String(format: "%.0f rpm", $0) } ?? "—")
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L10n.tr("Top Processes"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    if telemetry.topProcesses.isEmpty {
+                        Text(L10n.tr("No process sample."))
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.secondaryText)
+                    } else {
+                        ForEach(telemetry.topProcesses.prefix(5)) { process in
+                            HStack(spacing: 8) {
+                                Text(process.name)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(VQTheme.ink)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Text("CPU \(percent(process.cpuPercent))")
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(VQTheme.secondaryText)
+                                Text(memoryMB(process.memoryMB))
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(VQTheme.secondaryText)
+                            }
+                        }
+                    }
+                }
+            } else {
+                Text(isPaired ? L10n.tr("Refresh Host to load telemetry.") : L10n.tr("Host telemetry appears after pairing."))
+                    .font(.subheadline)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func telemetryMetric(_ title: String, value: String, symbol: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: symbol)
+                .frame(width: 22)
+                .foregroundStyle(VQTheme.accent)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L10n.tr(title))
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+                Text(value)
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                    .lineLimit(2)
+            }
+        }
+        .padding(9)
+        .background(VQTheme.control.opacity(0.30))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func memorySummary(_ memory: RemoteHostTelemetryMemory) -> String {
+        "\(bytes(memory.usedBytes)) / \(bytes(memory.totalBytes))"
+    }
+
+    private func diskSummary(_ disk: RemoteHostTelemetryDisk) -> String {
+        "\(percent(disk.usedPercent)) \(L10n.tr("used")) · \(bytes(disk.freeBytes)) \(L10n.tr("free"))"
+    }
+
+    private func loadAverage(_ values: [Double]) -> String {
+        guard values.count == 3 else { return "—" }
+        return values.map { String(format: "%.2f", $0) }.joined(separator: " / ")
+    }
+
+    private func powerSummary(_ power: RemoteHostTelemetryPower) -> String {
+        guard power.isBatteryAvailable else {
+            return power.isACPowered == true ? L10n.tr("AC power") : "—"
+        }
+        let percentText = power.batteryPercent.map { String(format: "%.0f%%", $0) } ?? "—"
+        if power.isCharging == true {
+            return "\(percentText) · \(L10n.tr("Charging"))"
+        }
+        return percentText
+    }
+
+    private func networkSummary(_ network: RemoteHostTelemetryNetwork) -> String {
+        let route = network.tailscaleIP ?? network.interfaceName ?? "—"
+        if let rx = network.rxBytesPerSecond, let tx = network.txBytesPerSecond {
+            return "\(route) · ↓ \(bytesPerSecond(rx)) ↑ \(bytesPerSecond(tx))"
+        }
+        return route
+    }
+
+    private func thermalLabel(_ state: String) -> String {
+        switch state {
+        case "nominal":
+            return L10n.tr("Nominal")
+        case "fair":
+            return L10n.tr("Fair")
+        case "serious":
+            return L10n.tr("Serious")
+        case "critical":
+            return L10n.tr("Critical")
+        default:
+            return L10n.tr("Unknown")
+        }
+    }
+
+    private func thermalTint(_ state: String) -> Color {
+        switch state {
+        case "nominal":
+            return VQTheme.green
+        case "fair":
+            return VQTheme.amber
+        case "serious", "critical":
+            return VQTheme.red
+        default:
+            return VQTheme.unavailable
+        }
+    }
+
+    private func percent(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.1f%%", value)
+    }
+
+    private func bytes(_ value: UInt64?) -> String {
+        guard let value else { return "—" }
+        return ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .binary)
+    }
+
+    private func bytesPerSecond(_ value: Double) -> String {
+        "\(ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .binary))/s"
+    }
+
+    private func memoryMB(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.0f MB", value)
+    }
+
+    private func uptime(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds))
+        let days = total / 86_400
+        let hours = (total % 86_400) / 3_600
+        let minutes = (total % 3_600) / 60
+        if days > 0 {
+            return "\(days)d \(hours)h"
+        }
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        return "\(minutes)m"
+    }
+
+    private func relativeTime(_ date: Date) -> String {
+        let seconds = max(0, Int(Date().timeIntervalSince(date)))
+        if seconds < 60 {
+            return "\(seconds)s"
+        }
+        return "\(seconds / 60)m"
+    }
 }
 
 private struct PairingQRScannerSheet: View {

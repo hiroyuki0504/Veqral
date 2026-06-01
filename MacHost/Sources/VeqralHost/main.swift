@@ -24,6 +24,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-run-usage" {
             RunUsageSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-host-telemetry" {
+            HostTelemetrySmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -654,6 +657,349 @@ enum RunUsageSmoke {
     }
 }
 
+enum HostTelemetrySmoke {
+    static func runAndExit() -> Never {
+        Task.detached {
+            do {
+                let collector = HostTelemetryCollector()
+                let first = await collector.snapshot(tailscaleIP: "100.64.0.1")
+                try require(first.uptime.seconds > 0, "稼働時間を取得できません。")
+                try require(first.cpu.loadAverage.count == 3, "load average を取得できません。")
+                try require(!first.cpu.perCorePercent.isEmpty, "per-core CPU を取得できません。")
+                try require((first.memory.totalBytes ?? 0) > 0, "メモリ総量を取得できません。")
+                try require((first.disk.totalBytes ?? 0) > 0, "ディスク総量を取得できません。")
+                try require(!first.thermal.state.isEmpty, "熱状態を取得できません。")
+                try await Task.sleep(nanoseconds: 1_100_000_000)
+                let second = await collector.snapshot(tailscaleIP: "100.64.0.1")
+                try require(second.cpu.totalPercent != nil, "CPU 使用率を計算できません。")
+                print("PASS: Host telemetry smoke cpu=\(String(format: "%.1f", second.cpu.totalPercent ?? 0))% cores=\(second.cpu.perCorePercent.count) thermal=\(second.thermal.state) processes=\(second.topProcesses.count)")
+                Foundation.exit(0)
+            } catch {
+                print("FAIL: Host telemetry smoke failed: \(error.localizedDescription)")
+                Foundation.exit(1)
+            }
+        }
+        dispatchMain()
+    }
+
+    private static func require(_ condition: Bool, _ message: String) throws {
+        if !condition {
+            throw SmokeError(message)
+        }
+    }
+}
+
+actor HostTelemetryCollector {
+    private struct CPUTicks {
+        var user: UInt64
+        var system: UInt64
+        var idle: UInt64
+        var nice: UInt64
+
+        var active: UInt64 { user + system + nice }
+        var total: UInt64 { active + idle }
+    }
+
+    private struct InterfaceBytes {
+        var timestamp: Date
+        var name: String
+        var rx: UInt64
+        var tx: UInt64
+    }
+
+    private var previousCPU: [CPUTicks]?
+    private var previousInterface: InterfaceBytes?
+
+    func snapshot(tailscaleIP: String?) -> HostTelemetryResponse {
+        HostTelemetryResponse(
+            checkedAt: Date(),
+            cpu: cpu(),
+            memory: memory(),
+            disk: disk(),
+            thermal: thermal(),
+            uptime: uptime(),
+            power: power(),
+            network: network(tailscaleIP: tailscaleIP),
+            topProcesses: topProcesses()
+        )
+    }
+
+    private func cpu() -> HostTelemetryCPU {
+        let ticks = cpuTicks()
+        let previous = previousCPU
+        let perCore = percentages(current: ticks, previous: previous)
+        let totalPercent = aggregatePercentage(current: ticks, previous: previous)
+        previousCPU = ticks
+        return HostTelemetryCPU(
+            totalPercent: totalPercent,
+            perCorePercent: perCore,
+            loadAverage: loadAverage()
+        )
+    }
+
+    private func cpuTicks() -> [CPUTicks] {
+        var cpuInfo: processor_info_array_t?
+        var cpuInfoCount = mach_msg_type_number_t(0)
+        var cpuCount = natural_t(0)
+        let result = host_processor_info(
+            mach_host_self(),
+            PROCESSOR_CPU_LOAD_INFO,
+            &cpuCount,
+            &cpuInfo,
+            &cpuInfoCount
+        )
+        guard result == KERN_SUCCESS, let cpuInfo else { return [] }
+        defer {
+            vm_deallocate(
+                mach_task_self_,
+                vm_address_t(UInt(bitPattern: cpuInfo)),
+                vm_size_t(Int(cpuInfoCount) * MemoryLayout<integer_t>.stride)
+            )
+        }
+
+        let stride = Int(CPU_STATE_MAX)
+        return (0..<Int(cpuCount)).map { index in
+            let base = index * stride
+            return CPUTicks(
+                user: UInt64(max(0, Int(cpuInfo[base + Int(CPU_STATE_USER)]))),
+                system: UInt64(max(0, Int(cpuInfo[base + Int(CPU_STATE_SYSTEM)]))),
+                idle: UInt64(max(0, Int(cpuInfo[base + Int(CPU_STATE_IDLE)]))),
+                nice: UInt64(max(0, Int(cpuInfo[base + Int(CPU_STATE_NICE)])))
+            )
+        }
+    }
+
+    private func percentages(current: [CPUTicks], previous: [CPUTicks]?) -> [Double] {
+        current.enumerated().map { index, ticks in
+            if let previous, previous.indices.contains(index) {
+                return percent(current: ticks, previous: previous[index])
+            }
+            return bootAveragePercent(ticks)
+        }
+    }
+
+    private func aggregatePercentage(current: [CPUTicks], previous: [CPUTicks]?) -> Double? {
+        guard !current.isEmpty else { return nil }
+        let currentTotal = current.reduce(CPUTicks(user: 0, system: 0, idle: 0, nice: 0)) { partial, ticks in
+            CPUTicks(
+                user: partial.user + ticks.user,
+                system: partial.system + ticks.system,
+                idle: partial.idle + ticks.idle,
+                nice: partial.nice + ticks.nice
+            )
+        }
+        if let previous, previous.count == current.count {
+            let previousTotal = previous.reduce(CPUTicks(user: 0, system: 0, idle: 0, nice: 0)) { partial, ticks in
+                CPUTicks(
+                    user: partial.user + ticks.user,
+                    system: partial.system + ticks.system,
+                    idle: partial.idle + ticks.idle,
+                    nice: partial.nice + ticks.nice
+                )
+            }
+            return percent(current: currentTotal, previous: previousTotal)
+        }
+        return bootAveragePercent(currentTotal)
+    }
+
+    private func percent(current: CPUTicks, previous: CPUTicks) -> Double {
+        let activeDelta = current.active > previous.active ? current.active - previous.active : 0
+        let totalDelta = current.total > previous.total ? current.total - previous.total : 0
+        guard totalDelta > 0 else { return 0 }
+        return min(100, max(0, Double(activeDelta) / Double(totalDelta) * 100))
+    }
+
+    private func bootAveragePercent(_ ticks: CPUTicks) -> Double {
+        guard ticks.total > 0 else { return 0 }
+        return min(100, max(0, Double(ticks.active) / Double(ticks.total) * 100))
+    }
+
+    private func loadAverage() -> [Double] {
+        var values = [Double](repeating: 0, count: 3)
+        let count = getloadavg(&values, 3)
+        guard count == 3 else { return [] }
+        return values
+    }
+
+    private func memory() -> HostTelemetryMemory {
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let result = withUnsafeMutablePointer(to: &stats) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, rebound, &count)
+            }
+        }
+        var pageSize = vm_size_t(0)
+        host_page_size(mach_host_self(), &pageSize)
+        let total = ProcessInfo.processInfo.physicalMemory
+        guard result == KERN_SUCCESS, pageSize > 0 else {
+            return HostTelemetryMemory(totalBytes: total, usedBytes: nil, freeBytes: nil, pressure: memoryPressure())
+        }
+        let freePages = UInt64(stats.free_count + stats.inactive_count + stats.speculative_count)
+        let free = min(total, freePages * UInt64(pageSize))
+        let used = total > free ? total - free : nil
+        return HostTelemetryMemory(
+            totalBytes: total,
+            usedBytes: used,
+            freeBytes: free,
+            pressure: memoryPressure()
+        )
+    }
+
+    private func memoryPressure() -> String {
+        let output = ProcessRunner.run("/usr/bin/memory_pressure", ["-Q"], timeout: 2).combinedTrimmed
+        return output
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+            ?? "—"
+    }
+
+    private func disk() -> HostTelemetryDisk {
+        let attrs = try? FileManager.default.attributesOfFileSystem(forPath: "/")
+        let total = (attrs?[.systemSize] as? NSNumber)?.uint64Value
+        let free = (attrs?[.systemFreeSize] as? NSNumber)?.uint64Value
+        let usedPercent: Double?
+        if let total, let free, total > 0 {
+            usedPercent = Double(total - free) / Double(total) * 100
+        } else {
+            usedPercent = nil
+        }
+        return HostTelemetryDisk(mountPoint: "/", totalBytes: total, freeBytes: free, usedPercent: usedPercent, smartStatus: nil)
+    }
+
+    private func thermal() -> HostTelemetryThermal {
+        let state: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal:
+            state = "nominal"
+        case .fair:
+            state = "fair"
+        case .serious:
+            state = "serious"
+        case .critical:
+            state = "critical"
+        @unknown default:
+            state = "unknown"
+        }
+        return HostTelemetryThermal(state: state, rawTemperatureC: nil, fanRPM: nil)
+    }
+
+    private func uptime() -> HostTelemetryUptime {
+        HostTelemetryUptime(
+            seconds: ProcessInfo.processInfo.systemUptime,
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            hostName: localHostName(),
+            machineModel: sysctlString("hw.model").nilIfBlank ?? "—"
+        )
+    }
+
+    private func power() -> HostTelemetryPower {
+        let output = ProcessRunner.run("/usr/bin/pmset", ["-g", "batt"], timeout: 2).combinedTrimmed
+        let hasBattery = output.localizedCaseInsensitiveContains("InternalBattery") || output.contains("%;")
+        guard hasBattery else {
+            return HostTelemetryPower(isBatteryAvailable: false, batteryPercent: nil, isCharging: nil, isACPowered: output.localizedCaseInsensitiveContains("AC Power"))
+        }
+        let charging = output.localizedCaseInsensitiveContains("charging") && !output.localizedCaseInsensitiveContains("not charging")
+        return HostTelemetryPower(
+            isBatteryAvailable: true,
+            batteryPercent: firstBatteryPercent(in: output),
+            isCharging: charging,
+            isACPowered: output.localizedCaseInsensitiveContains("AC Power")
+        )
+    }
+
+    private func firstBatteryPercent(in text: String) -> Double? {
+        guard let range = text.range(of: #"([0-9]{1,3})%"#, options: .regularExpression) else { return nil }
+        return Double(text[range].dropLast())
+    }
+
+    private func network(tailscaleIP: String?) -> HostTelemetryNetwork {
+        guard let current = preferredInterfaceBytes() else {
+            previousInterface = nil
+            return HostTelemetryNetwork(tailscaleIP: tailscaleIP, interfaceName: tailscaleIP == nil ? nil : "Tailscale", rxBytesPerSecond: nil, txBytesPerSecond: nil)
+        }
+
+        let previous = previousInterface
+        previousInterface = current
+        let interval = previous.map { current.timestamp.timeIntervalSince($0.timestamp) } ?? 0
+        let rxRate: Double?
+        let txRate: Double?
+        if let previous, previous.name == current.name, interval > 0 {
+            rxRate = Double(current.rx >= previous.rx ? current.rx - previous.rx : 0) / interval
+            txRate = Double(current.tx >= previous.tx ? current.tx - previous.tx : 0) / interval
+        } else {
+            rxRate = nil
+            txRate = nil
+        }
+        return HostTelemetryNetwork(tailscaleIP: tailscaleIP, interfaceName: current.name, rxBytesPerSecond: rxRate, txBytesPerSecond: txRate)
+    }
+
+    private func preferredInterfaceBytes() -> InterfaceBytes? {
+        let interfaces = interfaceBytes()
+        return interfaces.first { $0.name.hasPrefix("utun") }
+            ?? interfaces.first { $0.name == "en0" }
+            ?? interfaces.first
+    }
+
+    private func interfaceBytes() -> [InterfaceBytes] {
+        var pointer: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&pointer) == 0, let pointer else { return [] }
+        defer { freeifaddrs(pointer) }
+
+        var results: [InterfaceBytes] = []
+        var cursor: UnsafeMutablePointer<ifaddrs>? = pointer
+        let now = Date()
+        while let current = cursor {
+            defer { cursor = current.pointee.ifa_next }
+            guard let address = current.pointee.ifa_addr,
+                  Int32(address.pointee.sa_family) == AF_LINK,
+                  (current.pointee.ifa_flags & UInt32(IFF_LOOPBACK)) == 0,
+                  let data = current.pointee.ifa_data else {
+                continue
+            }
+            let name = String(cString: current.pointee.ifa_name)
+            let ifData = data.assumingMemoryBound(to: if_data.self).pointee
+            results.append(InterfaceBytes(timestamp: now, name: name, rx: UInt64(ifData.ifi_ibytes), tx: UInt64(ifData.ifi_obytes)))
+        }
+        return results
+    }
+
+    private func topProcesses() -> [HostTelemetryProcess] {
+        let output = ProcessRunner.run("/bin/ps", ["-axo", "pid=,pcpu=,rss=,comm=", "-r"], timeout: 2)
+        guard output.exitCode == 0 else { return [] }
+        return output.stdout
+            .split(whereSeparator: \.isNewline)
+            .prefix(6)
+            .compactMap { line -> HostTelemetryProcess? in
+                let parts = line.split(whereSeparator: \.isWhitespace)
+                guard parts.count >= 4,
+                      let pid = Int32(parts[0]),
+                      let cpu = Double(parts[1]),
+                      let rssKB = Double(parts[2]) else {
+                    return nil
+                }
+                return HostTelemetryProcess(
+                    pid: pid,
+                    name: String(parts.dropFirst(3).joined(separator: " ")).nilIfBlank ?? "process",
+                    cpuPercent: cpu,
+                    memoryMB: rssKB / 1024.0
+                )
+            }
+    }
+
+    private func sysctlString(_ key: String) -> String {
+        var size = 0
+        guard sysctlbyname(key, nil, &size, nil, 0) == 0, size > 0 else { return "" }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(key, &buffer, &size, nil, 0) == 0 else { return "" }
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+}
+
 struct HostLogEvent: Codable, Sendable {
     enum Kind: String, Codable, Sendable {
         case log
@@ -1161,6 +1507,7 @@ final class HostServer: @unchecked Sendable {
     private let runner: AgentRunner
     private let memoryStore = HermesMemoryStore()
     private let historyStore = AgentHistoryStore()
+    private let telemetryCollector = HostTelemetryCollector()
     private let portfolioStore: PortfolioRegistryStore
     private let portfolioMonitor: PortfolioMonitor
     private let connectionLock = NSLock()
@@ -1239,13 +1586,15 @@ final class HostServer: @unchecked Sendable {
         do {
             if request.path == "/v1/health" {
                 let toolStatuses = CLIAdapterRegistry.allStatuses()
+                let currentTailscaleIP = tailscaleIP()
                 let response = HealthResponse(
                     status: "ok",
                     host: localHostName(),
-                    tailscaleIP: tailscaleIP(),
+                    tailscaleIP: currentTailscaleIP,
                     port: config.port,
                     hermesVersion: toolStatuses.first { $0.engine == AgentEngine.hermes.rawValue }?.version ?? AgentRunner.hermesVersion(),
-                    toolStatuses: toolStatuses
+                    toolStatuses: toolStatuses,
+                    telemetry: await telemetryCollector.snapshot(tailscaleIP: currentTailscaleIP)
                 )
                 sendJSON(response, connection: connection)
                 return
@@ -1271,6 +1620,11 @@ final class HostServer: @unchecked Sendable {
             }
 
             let authenticatedDeviceID = try await authenticate(request)
+
+            if request.path == "/v1/telemetry", request.method == "GET" {
+                sendJSON(await telemetryCollector.snapshot(tailscaleIP: tailscaleIP()), connection: connection)
+                return
+            }
 
             if request.path == "/v1/push/token", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(PushTokenRequest.self, from: request.body)
@@ -5428,6 +5782,74 @@ struct HealthResponse: Codable {
     var port: UInt16
     var hermesVersion: String
     var toolStatuses: [CLIToolStatus]
+    var telemetry: HostTelemetryResponse?
+}
+
+struct HostTelemetryResponse: Codable {
+    var checkedAt: Date
+    var cpu: HostTelemetryCPU
+    var memory: HostTelemetryMemory
+    var disk: HostTelemetryDisk
+    var thermal: HostTelemetryThermal
+    var uptime: HostTelemetryUptime
+    var power: HostTelemetryPower
+    var network: HostTelemetryNetwork
+    var topProcesses: [HostTelemetryProcess]
+}
+
+struct HostTelemetryCPU: Codable {
+    var totalPercent: Double?
+    var perCorePercent: [Double]
+    var loadAverage: [Double]
+}
+
+struct HostTelemetryMemory: Codable {
+    var totalBytes: UInt64?
+    var usedBytes: UInt64?
+    var freeBytes: UInt64?
+    var pressure: String
+}
+
+struct HostTelemetryDisk: Codable {
+    var mountPoint: String
+    var totalBytes: UInt64?
+    var freeBytes: UInt64?
+    var usedPercent: Double?
+    var smartStatus: String?
+}
+
+struct HostTelemetryThermal: Codable {
+    var state: String
+    var rawTemperatureC: Double?
+    var fanRPM: Double?
+}
+
+struct HostTelemetryUptime: Codable {
+    var seconds: TimeInterval
+    var osVersion: String
+    var hostName: String
+    var machineModel: String
+}
+
+struct HostTelemetryPower: Codable {
+    var isBatteryAvailable: Bool
+    var batteryPercent: Double?
+    var isCharging: Bool?
+    var isACPowered: Bool?
+}
+
+struct HostTelemetryNetwork: Codable {
+    var tailscaleIP: String?
+    var interfaceName: String?
+    var rxBytesPerSecond: Double?
+    var txBytesPerSecond: Double?
+}
+
+struct HostTelemetryProcess: Codable {
+    var pid: Int32
+    var name: String
+    var cpuPercent: Double?
+    var memoryMB: Double?
 }
 
 struct PairingStatus: Codable {
