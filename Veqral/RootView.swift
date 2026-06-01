@@ -4,7 +4,6 @@ import UIKit
 #endif
 
 struct RootView: View {
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var store: CommandCenterStore
 
     var body: some View {
@@ -12,11 +11,7 @@ struct RootView: View {
             #if targetEnvironment(macCatalyst)
             MacRootView()
             #else
-            if horizontalSizeClass == .compact {
-                CompactRootView()
-            } else {
-                RegularRootView()
-            }
+            CompactRootView()
             #endif
         }
         .preferredColorScheme(.dark)
@@ -44,10 +39,7 @@ private struct Gate2AcceptanceStatus: View {
     var body: some View {
         VStack(spacing: 0) {
             Button {
-                store.requestedSection = nil
-                DispatchQueue.main.async {
-                    store.requestedSection = .home
-                }
+                requestSection(.home)
             } label: {
                 Text("Command")
                     .font(.caption2)
@@ -59,10 +51,7 @@ private struct Gate2AcceptanceStatus: View {
             .accessibilityLabel("gate2.nav.command")
 
             Button {
-                store.requestedSection = nil
-                DispatchQueue.main.async {
-                    store.requestedSection = .github
-                }
+                requestSection(.github)
             } label: {
                 Text("More")
                     .font(.caption2)
@@ -73,12 +62,46 @@ private struct Gate2AcceptanceStatus: View {
             .accessibilityIdentifier("gate2.nav.more")
             .accessibilityLabel("gate2.nav.more")
 
+            Button {
+                requestSection(.devices)
+            } label: {
+                Text("Devices")
+                    .font(.caption2)
+                    .foregroundStyle(.clear)
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("gate2.nav.devices")
+            .accessibilityLabel("gate2.nav.devices")
+
+            Button {
+                requestSection(.memory)
+            } label: {
+                Text("Memory")
+                    .font(.caption2)
+                    .foregroundStyle(.clear)
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("gate2.nav.memory")
+            .accessibilityLabel("gate2.nav.memory")
+
             Text("pendingApprovals:\(store.pendingApprovals().count)")
                 .font(.caption2)
                 .foregroundStyle(.clear)
                 .frame(width: 1, height: 1)
                 .accessibilityIdentifier("gate2.approval.pendingCount")
                 .accessibilityLabel("pendingApprovals:\(store.pendingApprovals().count)")
+        }
+    }
+
+    private func requestSection(_ section: AppSection) {
+        #if canImport(UIKit)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
+        store.requestedSection = nil
+        DispatchQueue.main.async {
+            store.requestedSection = section
         }
     }
 }
@@ -162,60 +185,197 @@ private struct MacRootView: View {
 
 private struct CompactRootView: View {
     @EnvironmentObject private var store: CommandCenterStore
-    @State private var selectedTab: AppSection = .home
+    @State private var selectedSection: AppSection = .home
+    @State private var isDrawerPresented = false
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            NavigationStack {
-                CommandCenterPhoneDashboard()
-                    .navigationDestination(for: AppSection.self) { section in
-                        sectionDestination(section)
-                    }
-            }
-            .tabItem { Label(AppSection.home.title, systemImage: AppSection.home.symbol) }
-            .tag(AppSection.home)
-            .accessibilityIdentifier("gate2.tab.home")
+        NavigationStack {
+            Group {
+                if selectedSection == .home {
+                    CommandCenterMobileChatView(
+                        openDrawer: {
+                            isDrawerPresented = true
+                        },
+                        openSection: { section in
+                            selectedSection = section
+                        }
+                    )
+                } else {
+                    sectionDestination(selectedSection)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarLeading) {
+                                Button {
+                                    isDrawerPresented = true
+                                } label: {
+                                    Image(systemName: "line.3.horizontal")
+                                }
+                                .accessibilityLabel(L10n.tr("Open navigation"))
+                                .accessibilityIdentifier("gate2.mobile.menu")
+                            }
 
-            NavigationStack {
-                PortfolioView()
-            }
-            .tabItem { Label(AppSection.portfolio.title, systemImage: AppSection.portfolio.symbol) }
-            .tag(AppSection.portfolio)
-            .accessibilityIdentifier("gate2.tab.portfolio")
+                            ToolbarItem(placement: .principal) {
+                                Label(selectedSection.title, systemImage: selectedSection.symbol)
+                                    .font(.subheadline.weight(.semibold))
+                            }
 
-            NavigationStack {
-                ApprovalsView()
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button {
+                                    selectedSection = .home
+                                    store.commandDraft = ""
+                                    store.selectedRunID = nil
+                                } label: {
+                                    Image(systemName: "plus")
+                                }
+                                .accessibilityLabel(L10n.tr("New command"))
+                            }
+                        }
+                        .navigationBarTitleDisplayMode(.inline)
+                }
             }
-            .tabItem { Label(AppSection.approvals.title, systemImage: AppSection.approvals.symbol) }
-            .tag(AppSection.approvals)
-            .accessibilityIdentifier("gate2.tab.approvals")
-
-            NavigationStack {
-                DevicesView()
-            }
-            .tabItem { Label(AppSection.devices.title, systemImage: AppSection.devices.symbol) }
-            .tag(AppSection.devices)
-            .accessibilityIdentifier("gate2.tab.devices")
-
-            NavigationStack {
-                MoreView()
-            }
-            .tabItem { Label(L10n.tr("More"), systemImage: "ellipsis.circle") }
-            .tag(AppSection.github)
-            .accessibilityIdentifier("gate2.tab.more")
         }
         .tint(VQTheme.accent)
-        .toolbarBackground(VQTheme.canvas, for: .tabBar)
-        .toolbarBackground(.visible, for: .tabBar)
+        .background(VQTheme.canvas.ignoresSafeArea())
+        .sheet(isPresented: $isDrawerPresented) {
+            MobileNavigationDrawer(
+                selectedSection: $selectedSection,
+                isPresented: $isDrawerPresented
+            )
+            .environmentObject(store)
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
         .onChange(of: store.requestedSection) { _, section in
             guard let section else { return }
-            if section == .github {
-                selectedTab = .github
-            } else {
-                selectedTab = AppSection.primaryTabs.contains(section) ? section : .home
-            }
+            selectedSection = section
+            isDrawerPresented = false
             store.requestedSection = nil
         }
+    }
+}
+
+private struct MobileNavigationDrawer: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    @Binding var selectedSection: AppSection
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Veqral")
+                            .font(.title2.weight(.semibold))
+                            .foregroundStyle(VQTheme.ink)
+                        Text(VQDisplay.hostName(store))
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.secondaryText)
+                            .lineLimit(1)
+                    }
+                    .padding(.top, 8)
+
+                    Button {
+                        select(.home)
+                        store.commandDraft = ""
+                        store.selectedRunID = nil
+                    } label: {
+                        Label(L10n.tr("New command"), systemImage: "plus.circle.fill")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: 10))
+
+                    drawerSection(L10n.tr("Today")) {
+                        drawerRow(.home, identifier: "gate2.sidebar.home")
+                        drawerRow(.approvals, count: store.pendingApprovals().count, identifier: "gate2.sidebar.approvals")
+                        drawerRow(.history, identifier: "gate2.more.history")
+                    }
+
+                    drawerSection(L10n.tr("Workspaces")) {
+                        drawerRow(.projects, identifier: "gate2.more.projects")
+                        drawerRow(.portfolio, identifier: "gate2.sidebar.portfolio")
+                        drawerRow(.memory, identifier: "gate2.more.memory")
+                    }
+
+                    drawerSection(L10n.tr("Tools")) {
+                        drawerRow(.runs, identifier: "gate2.more.runs")
+                        drawerRow(.diff, identifier: "gate2.more.diff")
+                        drawerRow(.artifacts, identifier: "gate2.more.artifacts")
+                        drawerRow(.github, identifier: "gate2.more.github")
+                    }
+
+                    drawerSection(L10n.tr("System")) {
+                        drawerRow(.devices, identifier: "gate2.sidebar.devices")
+                        Picker(L10n.tr("App Language"), selection: $store.appLanguage) {
+                            ForEach(AppLanguage.allCases) { language in
+                                Text(language.title).tag(language)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                }
+                .padding(18)
+            }
+            .background(VQTheme.canvas.ignoresSafeArea())
+            .navigationTitle(L10n.tr("Navigation"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(L10n.tr("Close")) {
+                        isPresented = false
+                    }
+                }
+            }
+        }
+        .accessibilityIdentifier("gate2.mobile.drawer")
+    }
+
+    @ViewBuilder
+    private func drawerSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(VQTheme.mutedText)
+                .textCase(.uppercase)
+            VStack(spacing: 4) {
+                content()
+            }
+        }
+    }
+
+    private func drawerRow(_ section: AppSection, count: Int? = nil, identifier: String) -> some View {
+        Button {
+            select(section)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: section.symbol)
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 24)
+                    .foregroundStyle(selectedSection == section ? VQTheme.accent : VQTheme.secondaryText)
+                Text(section.title)
+                    .font(.subheadline.weight(selectedSection == section ? .semibold : .regular))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                if let count, count > 0 {
+                    Text("\(count)")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 22, minHeight: 22)
+                        .background(VQTheme.red)
+                        .clipShape(Circle())
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 48)
+            .background(selectedSection == section ? VQTheme.control.opacity(0.82) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
+    }
+
+    private func select(_ section: AppSection) {
+        selectedSection = section
+        isPresented = false
     }
 }
 

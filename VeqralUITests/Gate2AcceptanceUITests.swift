@@ -17,7 +17,24 @@ final class Gate2AcceptanceUITests: XCTestCase {
         verifyVoiceTranscriptApprovalGate()
     }
 
-    private func launchApp() {
+    func testVoicePermissionErrorsDoNotCrash() throws {
+        continueAfterFailure = false
+        launchApp(extraEnvironment: [
+            "VEQRAL_UI_TEST_VOICE_TRANSCRIPT": "",
+            "VEQRAL_UI_TEST_VOICE_FORCE_ERROR": "microphoneDenied"
+        ])
+        openSection(.command)
+        let voice = app.buttons["gate2.voice.open"]
+        XCTAssertTrue(voice.waitForExistenceWithScrolling(in: app, timeout: 20), "Voice button was not visible.")
+        scrollTo(voice)
+        voice.tap()
+
+        let status = app.staticTexts["gate2.voice.status"]
+        XCTAssertTrue(status.waitForText(containing: ["マイク"], timeout: 10), "Voice permission error did not render.")
+        XCTAssertEqual(app.state, .runningForeground, "App should stay alive after a voice permission error.")
+    }
+
+    private func launchApp(extraEnvironment: [String: String] = [:]) {
         app = XCUIApplication()
         app.launchArguments = [
             "-veqral-ui-testing",
@@ -34,6 +51,9 @@ final class Gate2AcceptanceUITests: XCTestCase {
             "VEQRAL_UI_TEST_PROJECT_NAME": "Gate2 XCUITest",
             "VEQRAL_UI_TEST_VOICE_TRANSCRIPT": processEnvironment["VEQRAL_GATE2_VOICE_TRANSCRIPT"] ?? "えっと 本番に deploy して .env の token を削除して"
         ]
+        for (key, value) in extraEnvironment {
+            launchEnvironment[key] = value
+        }
         if let pairingURL = processEnvironment["VEQRAL_GATE2_PAIRING_URL"], !pairingURL.isEmpty {
             launchEnvironment["VEQRAL_UI_TEST_PAIRING_URL"] = pairingURL
         }
@@ -51,7 +71,8 @@ final class Gate2AcceptanceUITests: XCTestCase {
     private func pairWithMacHost() {
         openSection(.devices)
         let useLink = app.buttons["gate2.pairing.useLink"]
-        XCTAssertTrue(useLink.waitForExistence(timeout: 15), "Pairing link button was not visible.")
+        XCTAssertTrue(useLink.waitForExistenceWithScrolling(in: app, timeout: 20), "Pairing link button was not visible.")
+        scrollTo(useLink)
         waitUntilHittable(useLink, timeout: 10)
         useLink.tap()
 
@@ -165,8 +186,19 @@ final class Gate2AcceptanceUITests: XCTestCase {
             return
         }
 
+        if section == .devices {
+            openDevicesSection()
+            return
+        }
+
         if section == .memory {
             openMemorySection()
+            return
+        }
+
+        if let navIdentifier = section.navIdentifier,
+           app.buttons[navIdentifier].exists {
+            app.buttons[navIdentifier].tap()
             return
         }
 
@@ -189,14 +221,32 @@ final class Gate2AcceptanceUITests: XCTestCase {
     }
 
     private func openMemorySection() {
-        if app.buttons["gate2.sidebar.memory"].exists {
-            let directMemory = app.buttons["gate2.nav.memory"]
-            if directMemory.exists {
-                directMemory.tap()
+        let screen = app.descendants(matching: .any)["gate2.screen.memory"]
+        if screen.exists {
+            return
+        }
+
+        let directMemory = app.buttons["gate2.nav.memory"]
+        if directMemory.exists {
+            directMemory.tap()
+            if screen.waitForExistence(timeout: 4) {
                 return
             }
+        }
+
+        if app.buttons["gate2.sidebar.memory"].exists {
             app.buttons["gate2.sidebar.memory"].tap()
-            return
+            if screen.waitForExistence(timeout: 4) {
+                return
+            }
+        }
+
+        if openMobileDrawer() {
+            let memoryLink = app.buttons["gate2.more.memory"]
+            if memoryLink.waitForExistence(timeout: 8) {
+                memoryLink.tap()
+                return
+            }
         }
 
         if app.buttons["gate2.nav.more"].exists {
@@ -212,6 +262,59 @@ final class Gate2AcceptanceUITests: XCTestCase {
         } else {
             tapTab(labels: ["その他", "More"])
         }
+    }
+
+    private func openDevicesSection() {
+        let screen = app.descendants(matching: .any)["gate2.screen.devices"]
+        if screen.exists || app.buttons["gate2.pairing.useLink"].exists {
+            return
+        }
+
+        let directDevices = app.buttons["gate2.nav.devices"]
+        if directDevices.exists {
+            directDevices.tap()
+            if screen.waitForExistence(timeout: 4) || app.buttons["gate2.pairing.useLink"].exists {
+                return
+            }
+        }
+
+        if app.buttons["gate2.sidebar.devices"].exists {
+            app.buttons["gate2.sidebar.devices"].tap()
+            if screen.waitForExistence(timeout: 4) || app.buttons["gate2.pairing.useLink"].exists {
+                return
+            }
+        }
+
+        if openMobileDrawer() {
+            let devicesLink = app.buttons["gate2.sidebar.devices"]
+            if devicesLink.waitForExistence(timeout: 8) {
+                devicesLink.tap()
+                return
+            }
+        }
+
+        tapTab(labels: ["デバイス", "Devices"])
+    }
+
+    @discardableResult
+    private func openMobileDrawer() -> Bool {
+        let drawer = app.descendants(matching: .any)["gate2.mobile.drawer"]
+        if drawer.exists {
+            return true
+        }
+        let explicitMenu = app.buttons["gate2.mobile.menu"]
+        if explicitMenu.waitForExistence(timeout: 4) {
+            explicitMenu.tap()
+            return drawer.waitForExistence(timeout: 8)
+        }
+        for label in ["ナビゲーションを開く", "Open navigation"] {
+            let button = app.buttons[label]
+            if button.waitForExistence(timeout: 2) {
+                button.tap()
+                return drawer.waitForExistence(timeout: 8)
+            }
+        }
+        return false
     }
 
     private func tapMemoryLinkFromMore() {
@@ -295,7 +398,19 @@ final class Gate2AcceptanceUITests: XCTestCase {
         let scrollView = app.scrollViews.firstMatch
         guard scrollView.exists else { return }
         for _ in 0..<limit where !element.isHittable {
-            scrollView.swipeUp()
+            if element.exists {
+                let frame = element.frame
+                let appFrame = app.frame
+                if frame.minY < appFrame.minY + 48 {
+                    scrollView.swipeDown()
+                } else if frame.maxY > appFrame.maxY - 48 {
+                    scrollView.swipeUp()
+                } else {
+                    break
+                }
+            } else {
+                scrollView.swipeUp()
+            }
         }
     }
 
@@ -332,6 +447,15 @@ private enum Gate2Section {
         case .devices: "gate2.sidebar.devices"
         case .approvals: "gate2.sidebar.approvals"
         case .memory: "gate2.sidebar.memory"
+        }
+    }
+
+    var navIdentifier: String? {
+        switch self {
+        case .command: "gate2.nav.command"
+        case .devices: "gate2.nav.devices"
+        case .approvals: nil
+        case .memory: "gate2.nav.memory"
         }
     }
 }
