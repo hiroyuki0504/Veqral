@@ -42,7 +42,7 @@ Device(Mac)
 ## 現状（重要）
 
 - `main` = `18b29b4`（PR #2〜#8 統合済み: P0 パイプライン + 実行時修正）
-- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き ← #15 PR1 core fixes ← #16 PR-A screen inventory ← #17 PR1 surface consolidation ← #18 PR2 portfolio command center ← #19 backlog #0 Hermes memory smoke ← #20 backlog #3 WebSocket reconnect ← #21 backlog #4 Discord notifications ← #22 backlog #5 Memory visibility ← #23 backlog #6 Run usage ← #24 backlog #7 Approval context ← #25 backlog #8 Saved command drafts ← #26 backlog #9 Host telemetry ← #27 backlog #10 Voice input
+- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き ← #15 PR1 core fixes ← #16 PR-A screen inventory ← #17 PR1 surface consolidation ← #18 PR2 portfolio command center ← #19 backlog #0 Hermes memory smoke ← #20 backlog #3 WebSocket reconnect ← #21 backlog #4 Discord notifications ← #22 backlog #5 Memory visibility ← #23 backlog #6 Run usage ← #24 backlog #7 Approval context ← #25 backlog #8 Saved command drafts ← #26 backlog #9 Host telemetry ← #27 backlog #10 Voice input ← #28 backlog #12 Integration plan（main merge は未実行）
 - #9: Device→エージェント選択、Codex/Claude 直接、Hermes Project→Chat→model、History「Continue」resume。（更新耐性 adapter を同ブランチに足す指示済み → 入っているかブランチで確認）
 - #10: ワンタップ承認(一覧から)、Chat/セッション名前付け+フィルタ、画像 diff 3 モード+hunk 添付、swipe、日本語/English/System 切替（`Localizable.strings` 体系。`.xcstrings` 移行は未）
 - #11: APNs push（device build は free team では Push capability 非対応で停止 → #12 で外した）
@@ -62,6 +62,7 @@ Device(Mac)
 - #25 (`codex/backlog-8-saved-commands`): Backlog #8。Command composer に「定型コマンド」バーを追加し、現在の指令を保存、chip タップで再投入、menu から削除できるようにした。保存時の runtime も復元。`CommandCenterSnapshot` に加えて、iCloud Documents が使える端末では `Veqral/saved-command-drafts.json` へ best-effort 同期キャッシュ、使えない環境はローカル fallback。`SAVED_COMMANDS_PR8.md` に受け入れを記録。
 - #26 (`codex/backlog-9-host-telemetry`): Backlog #9。Mac Host に authenticated `GET /v1/telemetry` を追加し、`/v1/health` に初回 telemetry を同梱。CPU/per-core/load、memory/pressure、disk、`ProcessInfo.thermalState`、uptime/OS/model、battery/AC、network throughput(best-effort)、上位 process を収集。Devices 画面の「ホスト状態」で表示中だけ 5 秒間隔更新。raw 温度/fan/SMART は取得不可なら `—`。`VeqralHost smoke-host-telemetry` 通過。
 - #27 (`codex/backlog-10-voice-input`): Backlog #10。Command composer に mic ボタンを追加し、iPhone/iPad で Speech + AVFoundation の日本語 dictation → ローカル filler/自己修正 cleanup → Host `POST /v1/voice/cleanup` の短い LLM cleanup → raw/cleaned 確認 → `submitDraft()` 送信。Mac Catalyst は sheet で非対応表示。Host cleanup は Hermes 優先、選択中 Codex/Claude fallback、失敗時は rule cleanup。raw audio 非保存。`VeqralHost smoke-voice-cleanup` 通過。
+- #28 (`codex/backlog-12-main-integration-plan`): Backlog #12。`MAIN_INTEGRATION_PLAN_PR12.md` に #9→#27 を clean main へ統合する手順、検証、findings、rollback を記録。`main` merge/force-push/deploy は未実行。ユーザー明示承認待ち。
 
 ## 未完了・次の手番
 
@@ -79,7 +80,7 @@ Device(Mac)
    - #26 Host telemetry: Devices→ホスト状態で CPU/メモリ/ディスク/熱状態/稼働時間/バッテリー/ネットワークが表示され、画面表示中に約 5 秒間隔で更新されること。raw 温度/fan は `—` でよい。
    - #27 Voice input: iPhone/iPad で mic→権限許可→日本語発話→Stop→raw/cleaned 表示→編集→送信。Host に cleanup LLM credentials が無い場合は rule cleanup fallback 表示でよい。高リスク語は送信後に既存承認 Gate に乗ること。
    - UI 受け入れ確認: 日本語のみ、赤い 0 バッジなし、未ペアリング strip が細い、UUID/コンテナパスが主表示に出ない、Unavailable/Offline が緑でない
-2. スタック統合：実機 OK 後、#9→#27 を main にまとめて取り込む（和集合・落とさず・壊さず・build & smoke 検証）
+2. スタック統合：#28 の計画どおり #9→#27 を main にまとめて取り込む準備は完了。`main` への merge はユーザーの明示承認待ち。
 3. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
 4. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
 5. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
