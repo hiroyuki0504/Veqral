@@ -64,7 +64,7 @@ struct HostConnectionStrip: View {
     @EnvironmentObject private var store: CommandCenterStore
 
     var body: some View {
-        if !store.remoteHost.isPaired {
+        if shouldShow {
             HStack(spacing: 10) {
                 Image(systemName: symbol)
                     .font(.caption.weight(.semibold))
@@ -97,17 +97,40 @@ struct HostConnectionStrip: View {
         }
     }
 
+    private var shouldShow: Bool {
+        !store.remoteHost.isPaired || store.remoteStreamStatus.phase != .idle
+    }
+
     private var isOnline: Bool {
         store.remoteHost.isEnabled && store.remoteHost.isPaired && store.remoteHostHealth?.status == "ok"
     }
 
     private var title: String {
+        switch store.remoteStreamStatus.phase {
+        case .connecting:
+            return "Log stream connecting"
+        case .connected:
+            return "Log stream connected"
+        case .reconnecting:
+            return "Reconnecting log stream"
+        case .disconnected:
+            return "Log stream disconnected"
+        case .idle:
+            break
+        }
         if isOnline { return "Mac Host connected" }
         if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "Mac Host offline" }
         return "Pair Mac Host"
     }
 
     private var detail: String {
+        let streamStatus = store.remoteStreamStatus
+        if streamStatus.phase != .idle {
+            let retry = streamStatus.nextRetrySeconds.map { " · \(L10n.tr("Retry in")) \($0)s" } ?? ""
+            let run = streamStatus.runTitle.nilIfBlank ?? L10n.tr("Remote streams active")
+            let detail = streamStatus.detail.nilIfBlank ?? L10n.tr("Streaming run logs.")
+            return "\(run) · \(detail)\(retry)"
+        }
         if store.remoteHost.isPaired {
             return store.remoteHost.displayEndpoint
         }
@@ -115,18 +138,52 @@ struct HostConnectionStrip: View {
     }
 
     private var status: String {
+        switch store.remoteStreamStatus.phase {
+        case .connecting:
+            return "Connecting"
+        case .connected:
+            return "Streaming"
+        case .reconnecting:
+            return "Retrying"
+        case .disconnected:
+            return "Offline"
+        case .idle:
+            break
+        }
         if isOnline { return "Connected" }
         if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "Offline" }
         return "Pairing needed"
     }
 
     private var symbol: String {
+        switch store.remoteStreamStatus.phase {
+        case .connecting:
+            return "point.3.connected.trianglepath.dotted"
+        case .connected:
+            return "dot.radiowaves.left.and.right"
+        case .reconnecting:
+            return "arrow.triangle.2.circlepath"
+        case .disconnected:
+            return "wifi.exclamationmark"
+        case .idle:
+            break
+        }
         if isOnline { return "checkmark.circle" }
         if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "wifi.exclamationmark" }
         return "qrcode.viewfinder"
     }
 
     private var tint: Color {
+        switch store.remoteStreamStatus.phase {
+        case .connecting, .reconnecting:
+            return VQTheme.amber
+        case .connected:
+            return VQTheme.green
+        case .disconnected:
+            return VQTheme.amber
+        case .idle:
+            break
+        }
         if isOnline { return VQTheme.green }
         if store.remoteHost.isEnabled && store.remoteHost.isPaired { return VQTheme.amber }
         return VQTheme.amber
