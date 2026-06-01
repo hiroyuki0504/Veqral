@@ -1,12 +1,12 @@
 # Hermes Memory Inheritance PR0
 
-- Source: `veqral-memtest-20260601-062018-acdde521`
+- Source: `veqral-memtest-20260601-151411-e399a7e5`
 - Hermes home: isolated temporary home (`hermes-home`)
 - Chat A: `openai-codex/gpt-5.5`
 - Chat B: `openai-codex/gpt-5.4`
 - Chat A credential source: Hermes ChatGPT subscription login (`auth.json`)
 - Chat B credential source: Hermes ChatGPT subscription login (`auth.json`)
-- Code name: `Tachibana-7-62AD929B`
+- Code name: `Tachibana-7-860881C5`
 
 ## Backend Capability Check
 
@@ -19,10 +19,10 @@
 
 ```text
 ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
-MEMWRITE:Tachibana-7-62AD929B
+MEMWRITE:Tachibana-7-860881C5
 
 
-session_id: 20260601_152020_9d0a1d
+session_id: 20260602_001412_3c5bad
 ```
 
 ## Native Memory Check
@@ -34,12 +34,31 @@ session_id: 20260601_152020_9d0a1d
 ## Chat B Transcript
 
 ```text
-CODENAME:Tachibana-7-62AD929B
+CODENAME:Tachibana-7-860881C5
 
 
-session_id: 20260601_152028_b5a622
+session_id: 20260602_001423_1db7cb
 ```
 
 ## Result
 
 PASS: Chat B returned the code name written by Chat A while using a different provider/model.
+
+## #A7 Cross-Vendor Re-Run Attempt
+
+- Date: 2026-06-02
+- Requested route: `anthropic/claude-haiku-4-5 -> openai-codex/gpt-5.5`
+- Report: `HERMES_CROSS_VENDOR_PR_A7.md`
+- Result: BLOCKED before LLM execution. 偽 pass は作っていません。
+
+The verifier intentionally tested the Claude side as subscription/login auth, not as an API-key route. With API-key environment removed, `hermes auth status anthropic` reports logged out, while `openai-codex` subscription login remains available through `~/.hermes/auth.json`.
+
+Required next step: restore Hermes-readable Claude/Anthropic login with `claude /login` or `claude setup-token`, then rerun:
+
+```sh
+VEQRAL_MEMTEST_PROVIDER_A=anthropic \
+VEQRAL_MEMTEST_MODEL_A=claude-haiku-4-5 \
+VEQRAL_MEMTEST_PROVIDER_B=openai-codex \
+VEQRAL_MEMTEST_MODEL_B=gpt-5.5 \
+swift run --package-path MacHost VeqralHostSmoke verify-memory-inheritance --report HERMES_CROSS_VENDOR_PR_A7.md
+```

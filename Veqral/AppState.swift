@@ -499,6 +499,30 @@ struct RemoteCLIToolStatus: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+struct RemoteAuthOnboardingStatus: Codable, Equatable, Sendable {
+    var checkedAt: Date
+    var providers: [RemoteAuthProviderStatus]
+    var readyCount: Int
+    var allRequiredReady: Bool
+    var message: String
+}
+
+struct RemoteAuthProviderStatus: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var title: String
+    var cliCommand: String
+    var loginCommand: String
+    var alternateLoginCommand: String?
+    var isInstalled: Bool
+    var isLoggedIn: Bool
+    var hermesProviderReady: Bool
+    var keychainMarkerPresent: Bool
+    var isReady: Bool
+    var summary: String
+    var credentialHints: [String]
+    var warnings: [String]
+}
+
 struct RemoteRunRecord: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var prompt: String
@@ -533,6 +557,42 @@ struct RemoteRunSnapshotResponse: Codable, Sendable {
     var logs: [RemoteHostLogEvent]
     var diff: [RemoteGitDiffEntry]
     var artifacts: [RemoteArtifactRecord]
+}
+
+struct RemoteProjectCostSummary: Codable, Identifiable, Equatable, Sendable {
+    var projectKey: String
+    var projectID: String?
+    var workingDirectory: String?
+    var displayName: String
+    var runCount: Int
+    var inputTokens: Int
+    var outputTokens: Int
+    var reasoningTokens: Int
+    var totalTokens: Int
+    var estimatedCostUSD: Double
+    var actualCostUSD: Double
+    var costUSD: Double
+    var budgetLimitUSD: Double?
+    var thresholdPercent: Double
+    var paused: Bool
+    var isNearLimit: Bool
+    var isOverLimit: Bool
+
+    var id: String { projectKey }
+}
+
+struct RemoteProjectBudgetListResponse: Codable, Sendable {
+    var summaries: [RemoteProjectCostSummary]
+}
+
+struct RemoteProjectBudgetUpdateRequest: Codable, Sendable {
+    var projectKey: String?
+    var projectID: String?
+    var workingDirectory: String?
+    var displayName: String?
+    var limitUSD: Double?
+    var thresholdPercent: Double?
+    var paused: Bool?
 }
 
 struct RemoteGitDiffEntry: Codable, Equatable, Sendable {
@@ -972,6 +1032,8 @@ final class CommandCenterStore: ObservableObject {
     @Published var isLoadingRemoteProjectMemory = false
     @Published var remoteHostMessage: String = ""
     @Published var remoteHostHealth: RemoteHealthResponse?
+    @Published var authOnboardingStatus: RemoteAuthOnboardingStatus?
+    @Published var authOnboardingMessage: String = ""
     @Published var remoteHostTelemetry: RemoteHostTelemetry?
     @Published var remoteHostTelemetryMessage: String = ""
     @Published var discordTestMessage: String = ""
@@ -988,6 +1050,8 @@ final class CommandCenterStore: ObservableObject {
     @Published var portfolioLogSummary: String = ""
     @Published var portfolioCommits: [PortfolioRecentCommit] = []
     @Published var portfolioMessage: String = ""
+    @Published var projectCostSummaries: [RemoteProjectCostSummary] = []
+    @Published var costGovernanceMessage: String = ""
     @Published var isLoadingPortfolio = false
     @Published var remoteHistorySessions: [RemoteHistorySession] = []
     @Published var remoteHistoryProjects: [String] = []
@@ -1141,6 +1205,10 @@ final class CommandCenterStore: ObservableObject {
         let folderURL = supportURL.appendingPathComponent("Veqral", isDirectory: true)
         try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
         persistenceURL = folderURL.appendingPathComponent("command-center-state.json")
+        if Self.uiTestingResetRequested {
+            try? FileManager.default.removeItem(at: persistenceURL)
+            SavedCommandDraftCache.clearLocal(cacheFolder: folderURL)
+        }
         pairingToken = Self.makePairingToken()
         let defaultWorkingDirectory: String
         defaultWorkingDirectory = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
@@ -1201,12 +1269,63 @@ final class CommandCenterStore: ObservableObject {
             savedCommandDrafts = SavedCommandDraftCache.load(cacheFolder: folderURL)
             persist()
         }
+        applyUITestLaunchOverrides()
         isReadyForAutosave = true
         ensureAgentProjectForCurrentWorkspace()
         scheduleWorkspaceRefresh(delayNanoseconds: 0)
         requestNotificationPermission()
         reconnectRemoteRuns()
         refreshRemoteHostStatus()
+    }
+
+    private static var uiTestingResetRequested: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return env["VEQRAL_UI_TEST_RESET"] == "1"
+    }
+
+    private func applyUITestLaunchOverrides() {
+        let env = ProcessInfo.processInfo.environment
+        guard CommandLine.arguments.contains("-veqral-ui-testing") || env["VEQRAL_UI_TESTING"] == "1" else {
+            return
+        }
+
+        runs = []
+        approvals = []
+        logs = []
+        diffs = []
+        selectedRunID = nil
+        remoteRunIDs = [:]
+        savedCommandDrafts = []
+        if let directory = env["VEQRAL_UI_TEST_WORKING_DIRECTORY"]?.nilIfBlank {
+            workingDirectory = NSString(string: directory).expandingTildeInPath
+        }
+        if let runtimeValue = env["VEQRAL_UI_TEST_RUNTIME"]?.nilIfBlank,
+           let runtime = CommandRuntime(rawValue: runtimeValue) {
+            selectedRuntime = runtime
+        }
+        if let projectID = env["VEQRAL_UI_TEST_PROJECT_ID"]?.nilIfBlank {
+            let name = env["VEQRAL_UI_TEST_PROJECT_NAME"]?.nilIfBlank ?? "Gate2 XCUITest"
+            let chat = AgentChatSpace(
+                id: "gate2-xcuitest-chat",
+                title: "Gate2 Chat",
+                sessionID: nil,
+                provider: selectedHermesProvider,
+                model: selectedHermesModel,
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+            agentProjects = [
+                AgentProjectSpace(
+                    id: projectID,
+                    name: name,
+                    workingDirectory: workingDirectory,
+                    createdAt: Date(),
+                    chats: [chat]
+                )
+            ]
+            selectedAgentProjectID = projectID
+            selectedAgentChatID = chat.id
+        }
     }
 
     func selectRun(_ id: UUID) {
@@ -1400,6 +1519,7 @@ final class CommandCenterStore: ObservableObject {
             pairingSignature: cleanSignature
         )
         configureRemoteHost(endpoint: cleanEndpoint, deviceID: response.deviceID, token: response.token, name: "Mac Host")
+        refreshRemoteHostTelemetry()
         refreshRemoteHostStatus()
     }
 
@@ -1577,26 +1697,54 @@ final class CommandCenterStore: ObservableObject {
                 async let devices = client.devices()
                 async let audit = client.audit()
                 async let github = client.githubStatus(workingDirectory: directory)
+                async let budgets = client.costBudgets()
+                async let auth = client.authOnboardingStatus()
                 let healthResponse = try await health
                 let runListResponse = try await runList
                 let deviceResponse = try await devices
                 let auditResponse = try await audit
                 let githubResponse = try await github
+                let budgetResponse = try? await budgets
+                let authResponse = try? await auth
                 remoteHostHealth = healthResponse
+                authOnboardingStatus = authResponse
+                authOnboardingMessage = authResponse?.message ?? ""
                 remoteHostTelemetry = healthResponse.telemetry
                 remoteHostTelemetryMessage = healthResponse.telemetry == nil ? "Host health にテレメトリが含まれていません。手動更新で再取得してください。" : "Host health からテレメトリを取得しました。"
                 await mergeRemoteRuns(runListResponse.runs, client: client)
                 remoteDevices = deviceResponse.devices
                 remoteAuditLines = auditResponse.lines
                 remoteGitHubStatus = githubResponse
+                projectCostSummaries = budgetResponse?.summaries ?? localCostSummaries()
                 remoteHostMessage = "Mac Host online."
             } catch {
                 remoteHostHealth = nil
-                remoteHostTelemetry = nil
-                remoteHostTelemetryMessage = Self.remoteFailureMessage(error, context: "Mac Host telemetry")
+                if remoteHostTelemetry == nil {
+                    remoteHostTelemetryMessage = Self.remoteFailureMessage(error, context: "Mac Host telemetry")
+                }
                 remoteHostMessage = Self.remoteFailureMessage(error, context: "Mac Host")
             }
             isRefreshingRemoteHost = false
+        }
+    }
+
+    func refreshAuthOnboarding(persistReadyMarkers: Bool = false) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            authOnboardingMessage = L10n.tr("Mac Host pairing is required.")
+            return
+        }
+        let configuration = remoteHost
+        authOnboardingMessage = persistReadyMarkers ? "ログイン状態を確認しています..." : "認証状態を更新しています..."
+        Task { @MainActor in
+            do {
+                let client = RemoteHostClient(configuration: configuration)
+                authOnboardingStatus = persistReadyMarkers
+                    ? try await client.refreshAuthOnboarding()
+                    : try await client.authOnboardingStatus()
+                authOnboardingMessage = authOnboardingStatus?.message ?? "認証状態を更新しました。"
+            } catch {
+                authOnboardingMessage = Self.remoteFailureMessage(error, context: "Auth onboarding")
+            }
         }
     }
 
@@ -1631,6 +1779,72 @@ final class CommandCenterStore: ObservableObject {
                 discordTestMessage = Self.remoteFailureMessage(error, context: "Discord test")
             }
         }
+    }
+
+    func refreshCostGovernance() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            projectCostSummaries = localCostSummaries()
+            costGovernanceMessage = "Mac Host 未接続のため、この端末にある Run から概算しています。"
+            return
+        }
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).costBudgets()
+                projectCostSummaries = response.summaries
+                costGovernanceMessage = "コスト集計を更新しました。"
+            } catch {
+                costGovernanceMessage = Self.remoteFailureMessage(error, context: "Cost governance")
+            }
+        }
+    }
+
+    func saveCostBudget(summary: RemoteProjectCostSummary, limitUSD: Double?, paused: Bool? = nil) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            costGovernanceMessage = "予算設定には Mac Host ペアリングが必要です。"
+            return
+        }
+        let configuration = remoteHost
+        let request = RemoteProjectBudgetUpdateRequest(
+            projectKey: summary.projectKey,
+            projectID: summary.projectID,
+            workingDirectory: summary.workingDirectory,
+            displayName: summary.displayName,
+            limitUSD: limitUSD,
+            thresholdPercent: summary.thresholdPercent,
+            paused: paused
+        )
+        Task { @MainActor in
+            do {
+                let updated = try await RemoteHostClient(configuration: configuration).updateCostBudget(request)
+                upsertCostSummary(updated)
+                costGovernanceMessage = "予算を保存しました。"
+            } catch {
+                costGovernanceMessage = Self.remoteFailureMessage(error, context: "Cost budget")
+            }
+        }
+    }
+
+    func costSummary(for run: CommandRun) -> RemoteProjectCostSummary {
+        let key = Self.costProjectKey(projectID: run.agentProjectID, workingDirectory: run.workingDirectory)
+        if let remote = projectCostSummaries.first(where: { $0.projectKey == key }) {
+            return remote
+        }
+        return localCostSummary(projectKey: key, projectID: run.agentProjectID, workingDirectory: run.workingDirectory)
+    }
+
+    func costSummary(for asset: PortfolioAsset) -> RemoteProjectCostSummary? {
+        let workingDirectory = asset.sourceRefs.localPaths.first?.path
+        let key: String
+        if let projectID = asset.linkedProjectId?.nilIfBlank {
+            key = Self.costProjectKey(projectID: projectID, workingDirectory: workingDirectory ?? "")
+        } else if let workingDirectory {
+            key = Self.costProjectKey(projectID: nil, workingDirectory: workingDirectory)
+        } else {
+            return nil
+        }
+        return projectCostSummaries.first(where: { $0.projectKey == key })
+            ?? localCostSummary(projectKey: key, projectID: asset.linkedProjectId, workingDirectory: workingDirectory ?? "")
     }
 
     func refreshGitHubStatus() {
@@ -2140,6 +2354,35 @@ final class CommandCenterStore: ObservableObject {
         )
     }
 
+    func askSelectedProjectMemory(_ question: String) {
+        let cleanQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuestion.isEmpty else { return }
+        guard selectedAgentProject != nil else {
+            remoteProjectMemoryMessage = "Hermes Project を選択すると、記憶へ問い合わせできます。"
+            return
+        }
+        createHermesChat(title: "記憶質問 \(Self.shortDateTimeFormatter.string(from: Date()))", select: true)
+        let prompt = """
+        選択中の Hermes Project の native memory と、この source に紐づく session 履歴だけを根拠に答えてください。
+        - Veqral 用の別 memory store は作らない。
+        - 根拠が薄い場合は「記憶からは断定できない」と明記する。
+        - 事実、関連する作業、次に見るべき点を短く整理する。
+
+        質問:
+        \(cleanQuestion)
+        """
+        submitHermesProjectCommand(prompt)
+        remoteProjectMemoryMessage = "記憶への問い合わせを新しい Hermes Chat に送信しました。"
+        requestedSection = .home
+    }
+
+    func handoffRunContextToHermes(_ run: CommandRun) {
+        selectOrCreateAgentProject(workingDirectory: run.workingDirectory, chatTitle: "引き継ぎ \(Self.shortRunID(run))")
+        let prompt = hermesHandoffPrompt(for: run)
+        submitHermesProjectCommand(prompt)
+        requestedSection = .home
+    }
+
     func continueHistorySession(_ session: RemoteHistorySession, command: String? = nil) {
         let text = (command ?? commandDraft).trimmingCharacters(in: .whitespacesAndNewlines)
         let prompt = text.isEmpty ? "Continue this session from Veqral. Briefly orient me to the current state and wait for the next instruction." : text
@@ -2158,6 +2401,143 @@ final class CommandCenterStore: ObservableObject {
             providerModel: session.model
         )
     }
+
+    @discardableResult
+    private func selectOrCreateAgentProject(workingDirectory directory: String, chatTitle: String?) -> AgentProjectSpace? {
+        let cleanDirectory = directory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSHomeDirectory() : directory
+        let expanded = NSString(string: cleanDirectory).expandingTildeInPath
+        let id = Self.stableAgentProjectID(for: expanded)
+        if !agentProjects.contains(where: { $0.id == id }) {
+            agentProjects.insert(
+                AgentProjectSpace(
+                    id: id,
+                    name: URL(fileURLWithPath: expanded).lastPathComponent.nilIfBlank ?? "Project",
+                    workingDirectory: expanded,
+                    createdAt: Date(),
+                    chats: []
+                ),
+                at: 0
+            )
+        }
+        selectedAgentProjectID = id
+        if let chatTitle {
+            createHermesChat(title: chatTitle, select: true)
+        } else if let project = selectedAgentProject {
+            if let currentChatID = selectedAgentChatID,
+               project.chats.contains(where: { $0.id == currentChatID }) {
+                return project
+            }
+            if let firstChat = project.chats.first {
+                selectedAgentChatID = firstChat.id
+                selectedHermesProvider = firstChat.provider
+                selectedHermesModel = firstChat.model
+            } else {
+                createHermesChat(select: true)
+            }
+        }
+        persist()
+        return selectedAgentProject
+    }
+
+    private func hermesHandoffPrompt(for run: CommandRun) -> String {
+        let logSummary = handoffLogSummary(for: run.id)
+        let diffSummary = handoffDiffSummary(for: run.id)
+        let usageLine = run.usage.flatMap(Self.handoffUsageLine) ?? "記録なし"
+        return """
+        以下は Veqral の直接モードまたは Shell 実行から Hermes Project へ引き継ぐ文脈です。
+        Hermes native memory / session history の範囲で整理し、同じ Project の別 Chat・別モデル（Claude/Codex など）が続きから作業できるようにしてください。
+        Veqral 用の別 memory store や MCP は作らないでください。
+
+        Run:
+        - ID: \(Self.shortRunID(run))
+        - Runtime: \(run.runtimeOrDefault.title)
+        - Status: \(run.status.title)
+        - Working directory: \(run.workingDirectory)
+        - Model: \(run.model)
+        - Usage: \(usageLine)
+
+        元の指令:
+        \(Self.redactedHandoffText(run.command, limit: 2_000))
+
+        ログ要約:
+        \(logSummary)
+
+        差分要約:
+        \(diffSummary)
+
+        次にやってほしいこと:
+        1. この実行の目的、現在地、未解決事項を Project 文脈として短く整理する。
+        2. 次の Chat/別モデルが続けるための「次の一手」を3つ以内で出す。
+        3. 重要な事実だけを Hermes native memory に残す必要がある場合は、Hermes の memory 機能で保存する。
+        """
+    }
+
+    private func handoffLogSummary(for runID: UUID) -> String {
+        let entries = logEntries(for: runID).suffix(24)
+        guard !entries.isEmpty else { return "ログなし" }
+        let text = entries.map { entry in
+            "[\(entry.stream)] \(entry.message)"
+        }.joined(separator: "\n")
+        return Self.redactedHandoffText(text, limit: 4_000)
+    }
+
+    private func handoffDiffSummary(for runID: UUID) -> String {
+        let entries = diffEntries(for: runID)
+        guard !entries.isEmpty else { return "差分なし" }
+        let text = entries.prefix(20).map { entry in
+            "- \(entry.path): +\(entry.additions) / -\(entry.deletions)"
+        }.joined(separator: "\n")
+        return Self.redactedHandoffText(text, limit: 2_000)
+    }
+
+    private static func handoffUsageLine(_ usage: CommandRunUsage) -> String? {
+        var parts: [String] = []
+        if let input = usage.inputTokens {
+            parts.append("入力 \(input)")
+        }
+        if let output = usage.outputTokens {
+            parts.append("出力 \(output)")
+        }
+        if let reasoning = usage.reasoningTokens {
+            parts.append("推論 \(reasoning)")
+        }
+        if let total = usage.totalTokensOrDerived {
+            parts.append("合計 \(total)")
+        }
+        if let cost = usage.costUSD {
+            parts.append(String(format: "費用 %.4f USD", cost))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " / ")
+    }
+
+    private static func shortRunID(_ run: CommandRun) -> String {
+        String(run.id.uuidString.prefix(8)).lowercased()
+    }
+
+    private static func redactedHandoffText(_ text: String, limit: Int) -> String {
+        var output = text
+        let replacements: [(String, String)] = [
+            (#"(?i)authorization\s*[:=]\s*bearer\s+[^\s'"]+"#, "Authorization: [REDACTED]"),
+            (#"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*['"]?[^'"\s]+"#, "$1=[REDACTED]"),
+            (#"(?i)(OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|VEQRAL_DISCORD_WEBHOOK)\s*=\s*[^\s]+"#, "$1=[REDACTED]"),
+            (#"(?i)sk-[A-Za-z0-9_\-]{12,}"#, "[REDACTED_KEY]")
+        ]
+        for (pattern, replacement) in replacements {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = regex.stringByReplacingMatches(in: output, range: range, withTemplate: replacement)
+        }
+        if output.count > limit {
+            return String(output.prefix(limit)) + "\n...（省略）"
+        }
+        return output
+    }
+
+    private static let shortDateTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd HH:mm"
+        return formatter
+    }()
 
     private func updateAgentChat(_ chat: AgentChatSpace) {
         guard let projectIndex = agentProjects.firstIndex(where: { project in
@@ -3011,6 +3391,69 @@ final class CommandCenterStore: ObservableObject {
         }
     }
 
+    private func upsertCostSummary(_ summary: RemoteProjectCostSummary) {
+        if let index = projectCostSummaries.firstIndex(where: { $0.projectKey == summary.projectKey }) {
+            projectCostSummaries[index] = summary
+        } else {
+            projectCostSummaries.insert(summary, at: 0)
+        }
+    }
+
+    private func localCostSummaries() -> [RemoteProjectCostSummary] {
+        let keys = Set(runs.map { Self.costProjectKey(projectID: $0.agentProjectID, workingDirectory: $0.workingDirectory) })
+        return keys.map { key in
+            let run = runs.first { Self.costProjectKey(projectID: $0.agentProjectID, workingDirectory: $0.workingDirectory) == key }
+            return localCostSummary(projectKey: key, projectID: run?.agentProjectID, workingDirectory: run?.workingDirectory ?? workingDirectory)
+        }
+        .sorted { $0.costUSD > $1.costUSD }
+    }
+
+    private func localCostSummary(projectKey: String, projectID: String?, workingDirectory: String) -> RemoteProjectCostSummary {
+        let matchingRuns = runs.filter {
+            Self.costProjectKey(projectID: $0.agentProjectID, workingDirectory: $0.workingDirectory) == projectKey
+        }
+        let usage = matchingRuns.compactMap(\.usage)
+        let input = usage.compactMap(\.inputTokens).reduce(0, +)
+        let output = usage.compactMap(\.outputTokens).reduce(0, +)
+        let reasoning = usage.compactMap(\.reasoningTokens).reduce(0, +)
+        let total = usage.compactMap(\.totalTokensOrDerived).reduce(0, +)
+        let estimated = usage.compactMap(\.estimatedCostUSD).reduce(0, +)
+        let actual = usage.compactMap(\.actualCostUSD).reduce(0, +)
+        let existingBudget = projectCostSummaries.first { $0.projectKey == projectKey }
+        let limit = existingBudget?.budgetLimitUSD
+        let threshold = existingBudget?.thresholdPercent ?? 0.8
+        let cost = actual > 0 ? actual : estimated
+        let over = limit.map { $0 > 0 && cost >= $0 } ?? false
+        let near = limit.map { $0 > 0 && cost >= $0 * threshold } ?? false
+        return RemoteProjectCostSummary(
+            projectKey: projectKey,
+            projectID: projectID,
+            workingDirectory: workingDirectory.nilIfBlank,
+            displayName: projectID?.nilIfBlank ?? URL(fileURLWithPath: workingDirectory).lastPathComponent.nilIfBlank ?? "Project",
+            runCount: matchingRuns.count,
+            inputTokens: input,
+            outputTokens: output,
+            reasoningTokens: reasoning,
+            totalTokens: total,
+            estimatedCostUSD: estimated,
+            actualCostUSD: actual,
+            costUSD: cost,
+            budgetLimitUSD: limit,
+            thresholdPercent: threshold,
+            paused: existingBudget?.paused ?? false,
+            isNearLimit: near,
+            isOverLimit: over
+        )
+    }
+
+    private static func costProjectKey(projectID: String?, workingDirectory: String) -> String {
+        if let projectID = projectID?.nilIfBlank {
+            return "project:\(projectID)"
+        }
+        let directory = workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSHomeDirectory() : workingDirectory
+        return "path:\(NSString(string: directory).expandingTildeInPath)"
+    }
+
     private func title(for command: String) -> String {
         if command.count <= 52 {
             return command
@@ -3474,6 +3917,10 @@ private enum SavedCommandDraftCache {
             )
             try? data.write(to: url, options: .atomic)
         }
+    }
+
+    static func clearLocal(cacheFolder: URL) {
+        try? FileManager.default.removeItem(at: localURL(cacheFolder: cacheFolder))
     }
 
     private static func localURL(cacheFolder: URL) -> URL {
@@ -3988,6 +4435,16 @@ struct RemoteHostClient: Sendable {
         return try JSONDecoder.commandCenter.decode(RemoteHostTelemetry.self, from: data)
     }
 
+    func authOnboardingStatus() async throws -> RemoteAuthOnboardingStatus {
+        let data = try await request(path: "/v1/auth/onboarding", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteAuthOnboardingStatus.self, from: data)
+    }
+
+    func refreshAuthOnboarding() async throws -> RemoteAuthOnboardingStatus {
+        let data = try await request(path: "/v1/auth/onboarding/refresh", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteAuthOnboardingStatus.self, from: data)
+    }
+
     func cleanupVoiceCommand(_ requestBody: RemoteVoiceCleanupRequest) async throws -> RemoteVoiceCleanupResponse {
         let body = try JSONEncoder.commandCenter.encode(requestBody)
         let data = try await request(path: "/v1/voice/cleanup", method: "POST", body: body)
@@ -4118,6 +4575,17 @@ struct RemoteHostClient: Sendable {
         return try JSONDecoder.commandCenter.decode(RemoteDraftPRResponse.self, from: data)
     }
 
+    func costBudgets() async throws -> RemoteProjectBudgetListResponse {
+        let data = try await request(path: "/v1/budgets", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteProjectBudgetListResponse.self, from: data)
+    }
+
+    func updateCostBudget(_ requestBody: RemoteProjectBudgetUpdateRequest) async throws -> RemoteProjectCostSummary {
+        let body = try JSONEncoder.commandCenter.encode(requestBody)
+        let data = try await request(path: "/v1/budgets", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteProjectCostSummary.self, from: data)
+    }
+
     func registerPushToken(deviceToken: String, environment: String, bundleID: String, locale: String) async throws -> RemotePushTokenResponse {
         struct Body: Encodable {
             var deviceToken: String
@@ -4144,8 +4612,9 @@ struct RemoteHostClient: Sendable {
         struct Body: Encodable {
             var engagementRoots: [String]?
             var codeRoots: [String]?
+            var includeGitHub: Bool?
         }
-        let body = try JSONEncoder.commandCenter.encode(Body(engagementRoots: nil, codeRoots: nil))
+        let body = try JSONEncoder.commandCenter.encode(Body(engagementRoots: nil, codeRoots: nil, includeGitHub: nil))
         let data = try await request(path: "/v1/portfolio/discover", method: "POST", body: body)
         return try JSONDecoder.commandCenter.decode(RemotePortfolioAssetListResponse.self, from: data)
     }

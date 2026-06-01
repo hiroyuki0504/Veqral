@@ -30,6 +30,15 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-voice-cleanup" {
             VoiceCleanupSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-cost-governance" {
+            CostGovernanceSmoke.runAndExit()
+        }
+        if CommandLine.arguments.dropFirst().first == "smoke-portfolio-real-data" {
+            PortfolioRealDataSmoke.runAndExit()
+        }
+        if CommandLine.arguments.dropFirst().first == "smoke-auth-onboarding" {
+            AuthOnboardingSmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -54,6 +63,56 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
     }
 }
 
+struct ProjectBudgetLimit: Codable, Sendable, Equatable {
+    var limitUSD: Double?
+    var thresholdPercent: Double = 0.8
+    var paused: Bool = false
+    var updatedAt: Date? = nil
+
+    var normalized: ProjectBudgetLimit {
+        ProjectBudgetLimit(
+            limitUSD: limitUSD.flatMap { $0 > 0 ? $0 : nil },
+            thresholdPercent: min(max(thresholdPercent, 0.1), 1.0),
+            paused: paused,
+            updatedAt: updatedAt
+        )
+    }
+}
+
+struct ProjectCostSummary: Codable, Sendable, Equatable {
+    var projectKey: String
+    var projectID: String?
+    var workingDirectory: String?
+    var displayName: String
+    var runCount: Int
+    var inputTokens: Int
+    var outputTokens: Int
+    var reasoningTokens: Int
+    var totalTokens: Int
+    var estimatedCostUSD: Double
+    var actualCostUSD: Double
+    var costUSD: Double
+    var budgetLimitUSD: Double?
+    var thresholdPercent: Double
+    var paused: Bool
+    var isNearLimit: Bool
+    var isOverLimit: Bool
+}
+
+struct ProjectBudgetListResponse: Codable {
+    var summaries: [ProjectCostSummary]
+}
+
+struct ProjectBudgetUpdateRequest: Codable {
+    var projectKey: String?
+    var projectID: String?
+    var workingDirectory: String?
+    var displayName: String?
+    var limitUSD: Double?
+    var thresholdPercent: Double?
+    var paused: Bool?
+}
+
 struct HostConfig: Codable, Sendable {
     var port: UInt16 = 7878
     var defaultWorkingDirectory: String = NSHomeDirectory()
@@ -74,9 +133,13 @@ struct HostConfig: Codable, Sendable {
     var portfolioCodeRoots: [String] = []
     var discordWebhook: String?
     var portfolioDiscordWebhook: String?
+    var projectBudgets: [String: ProjectBudgetLimit]? = nil
 
     static var folder: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        if let path = ProcessInfo.processInfo.environment["VEQRAL_HOST_HOME"]?.nilIfBlank {
+            return URL(fileURLWithPath: path.expandingTilde, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".veqral-host", isDirectory: true)
     }
 
@@ -87,14 +150,33 @@ struct HostConfig: Codable, Sendable {
     static func load() -> HostConfig {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         if let data = try? Data(contentsOf: configURL),
-           let config = try? JSONDecoder().decode(HostConfig.self, from: data) {
+           var config = try? JSONDecoder().decode(HostConfig.self, from: data) {
+            config.applyEnvironmentOverrides()
             return config
         }
-        let config = HostConfig()
+        var config = HostConfig()
+        config.applyEnvironmentOverrides()
         if let data = try? JSONEncoder.pretty.encode(config) {
             try? data.write(to: configURL, options: .atomic)
         }
         return config
+    }
+
+    private mutating func applyEnvironmentOverrides() {
+        let env = ProcessInfo.processInfo.environment
+        if let value = env["VEQRAL_HOST_PORT"]?.nilIfBlank,
+           let port = UInt16(value) {
+            self.port = port
+        }
+        if let directory = env["VEQRAL_HOST_WORKING_DIRECTORY"]?.nilIfBlank {
+            self.defaultWorkingDirectory = directory.expandingTilde
+        }
+    }
+
+    func save() throws {
+        try FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+        let data = try JSONEncoder.pretty.encode(self)
+        try data.write(to: Self.configURL, options: .atomic)
     }
 
     var resolvedPushNotificationsEnabled: Bool {
@@ -128,8 +210,12 @@ struct HostConfig: Codable, Sendable {
     }
 
     var resolvedDiscordWebhook: String? {
-        ProcessInfo.processInfo.environment["VEQRAL_DISCORD_WEBHOOK"]?.nilIfBlank
-            ?? ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_DISCORD_WEBHOOK"]?.nilIfBlank
+        let env = ProcessInfo.processInfo.environment
+        if Self.booleanValue(env["VEQRAL_DISABLE_DISCORD_WEBHOOK"]) {
+            return nil
+        }
+        return env["VEQRAL_DISCORD_WEBHOOK"]?.nilIfBlank
+            ?? env["VEQRAL_PORTFOLIO_DISCORD_WEBHOOK"]?.nilIfBlank
             ?? KeychainStore.get(account: "discord:webhook")?.nilIfBlank
             ?? KeychainStore.get(account: "portfolio:discord-webhook")?.nilIfBlank
             ?? discordWebhook?.nilIfBlank
@@ -138,6 +224,10 @@ struct HostConfig: Codable, Sendable {
 
     var resolvedPortfolioDiscordWebhook: String? {
         resolvedDiscordWebhook
+    }
+
+    var resolvedProjectBudgets: [String: ProjectBudgetLimit] {
+        projectBudgets ?? [:]
     }
 
     private static func booleanValue(_ value: String?) -> Bool {
@@ -302,6 +392,122 @@ struct RunUsage: Codable, Sendable, Equatable {
     }
 }
 
+enum RunBudgetCalculator {
+    static func projectKey(projectID: String?, workingDirectory: String) -> String {
+        if let projectID = projectID?.nilIfBlank {
+            return "project:\(projectID)"
+        }
+        return "path:\(workingDirectory.expandingTilde)"
+    }
+
+    static func summaries(runs: [HostRun], budgets: [String: ProjectBudgetLimit]) -> [ProjectCostSummary] {
+        var buckets: [String: ProjectCostAccumulator] = [:]
+        for run in runs {
+            let key = projectKey(projectID: run.projectID, workingDirectory: run.workingDirectory)
+            var bucket = buckets[key] ?? ProjectCostAccumulator(
+                projectKey: key,
+                projectID: run.projectID?.nilIfBlank,
+                workingDirectory: run.workingDirectory.nilIfBlank,
+                displayName: displayName(projectID: run.projectID, workingDirectory: run.workingDirectory)
+            )
+            bucket.add(run)
+            buckets[key] = bucket
+        }
+        for (key, _) in budgets where buckets[key] == nil {
+            buckets[key] = ProjectCostAccumulator(
+                projectKey: key,
+                projectID: key.hasPrefix("project:") ? String(key.dropFirst("project:".count)) : nil,
+                workingDirectory: key.hasPrefix("path:") ? String(key.dropFirst("path:".count)) : nil,
+                displayName: displayName(projectID: key.hasPrefix("project:") ? String(key.dropFirst("project:".count)) : nil, workingDirectory: key)
+            )
+        }
+        return buckets.values
+            .map { $0.summary(budget: budgets[$0.projectKey]?.normalized) }
+            .sorted { lhs, rhs in
+                if lhs.isOverLimit != rhs.isOverLimit { return lhs.isOverLimit && !rhs.isOverLimit }
+                if lhs.isNearLimit != rhs.isNearLimit { return lhs.isNearLimit && !rhs.isNearLimit }
+                return lhs.costUSD > rhs.costUSD
+            }
+    }
+
+    static func summary(for key: String, runs: [HostRun], budgets: [String: ProjectBudgetLimit]) -> ProjectCostSummary {
+        summaries(runs: runs, budgets: budgets).first { $0.projectKey == key }
+            ?? ProjectCostAccumulator(projectKey: key, projectID: nil, workingDirectory: nil, displayName: key)
+                .summary(budget: budgets[key]?.normalized)
+    }
+
+    static func approvalReason(for key: String, runs: [HostRun], budgets: [String: ProjectBudgetLimit]) -> String? {
+        guard let budget = budgets[key]?.normalized else { return nil }
+        let summary = summary(for: key, runs: runs, budgets: budgets)
+        if budget.paused {
+            return "Cost budget paused for \(summary.displayName)"
+        }
+        if summary.isOverLimit, let limit = summary.budgetLimitUSD {
+            return String(format: "Cost budget exceeded for %@: $%.4f / $%.4f", summary.displayName, summary.costUSD, limit)
+        }
+        return nil
+    }
+
+    private static func displayName(projectID: String?, workingDirectory: String) -> String {
+        if let projectID = projectID?.nilIfBlank {
+            return projectID
+        }
+        return URL(fileURLWithPath: workingDirectory.expandingTilde).lastPathComponent.nilIfBlank ?? workingDirectory
+    }
+
+    private struct ProjectCostAccumulator {
+        var projectKey: String
+        var projectID: String?
+        var workingDirectory: String?
+        var displayName: String
+        var runCount = 0
+        var inputTokens = 0
+        var outputTokens = 0
+        var reasoningTokens = 0
+        var totalTokens = 0
+        var estimatedCostUSD = 0.0
+        var actualCostUSD = 0.0
+
+        mutating func add(_ run: HostRun) {
+            runCount += 1
+            guard let usage = run.usage?.normalized else { return }
+            inputTokens += usage.inputTokens ?? 0
+            outputTokens += usage.outputTokens ?? 0
+            reasoningTokens += usage.reasoningTokens ?? 0
+            totalTokens += usage.totalTokens ?? 0
+            estimatedCostUSD += usage.estimatedCostUSD ?? 0
+            actualCostUSD += usage.actualCostUSD ?? 0
+        }
+
+        func summary(budget: ProjectBudgetLimit?) -> ProjectCostSummary {
+            let threshold = budget?.thresholdPercent ?? 0.8
+            let cost = actualCostUSD > 0 ? actualCostUSD : estimatedCostUSD
+            let limit = budget?.limitUSD
+            let over = limit.map { $0 > 0 && cost >= $0 } ?? false
+            let near = limit.map { $0 > 0 && cost >= $0 * threshold } ?? false
+            return ProjectCostSummary(
+                projectKey: projectKey,
+                projectID: projectID,
+                workingDirectory: workingDirectory,
+                displayName: displayName,
+                runCount: runCount,
+                inputTokens: inputTokens,
+                outputTokens: outputTokens,
+                reasoningTokens: reasoningTokens,
+                totalTokens: totalTokens,
+                estimatedCostUSD: estimatedCostUSD,
+                actualCostUSD: actualCostUSD,
+                costUSD: cost,
+                budgetLimitUSD: limit,
+                thresholdPercent: threshold,
+                paused: budget?.paused ?? false,
+                isNearLimit: near,
+                isOverLimit: over
+            )
+        }
+    }
+}
+
 enum DiscordWebhookNotifier {
     static func shouldNotify(event: PushEventType) -> Bool {
         switch event {
@@ -342,13 +548,20 @@ enum DiscordWebhookNotifier {
         await send(webhook: webhook, content: content)
     }
 
-    static func send(webhook: String, content: String) async {
-        guard let url = URL(string: webhook) else { return }
+    @discardableResult
+    static func send(webhook: String, content: String) async -> Bool {
+        guard let url = URL(string: webhook) else { return false }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try? JSONEncoder().encode(["content": clipped(Redactor.redact(content), limit: 1_800)])
-        _ = try? await URLSession.shared.data(for: request)
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+            return (200..<300).contains(http.statusCode)
+        } catch {
+            return false
+        }
     }
 
     private static func title(for event: PushEventType) -> String {
@@ -400,6 +613,9 @@ enum DiscordNotificationSmoke {
         let bearerSample = "Author" + "ization: bearer veqraltestsecret"
         let tokenSample = "tok" + "en=token-should-hide"
         let passwordSample = "pass" + "word=password-should-hide"
+        let discordWebhookSample = "https://discord.com/api/web" + "hooks/123456789/discord-webhook-should-hide"
+        let slackTokenSample = "xox" + "b-slack-token-should-hide"
+        let openRouterSample = "sk" + "-or-openrouter-key-should-hide"
 
         let run = HostRun(
             id: UUID().uuidString,
@@ -433,7 +649,10 @@ enum DiscordNotificationSmoke {
         failedRun.exitCode = 2
         await DiscordWebhookNotifier.sendRun(webhook: webhookURL.absoluteString, run: failedRun, event: .failed, message: "Run failed with exit code 2", severity: .low)
 
-        await DiscordWebhookNotifier.send(webhook: webhookURL.absoluteString, content: "司令塔: Smoke Asset が停止しました。 \(passwordSample)")
+        await DiscordWebhookNotifier.send(
+            webhook: webhookURL.absoluteString,
+            content: "司令塔: Smoke Asset が停止しました。 \(passwordSample) \(discordWebhookSample) \(slackTokenSample) \(openRouterSample)"
+        )
 
         let payloads = try receiver.waitForPayloads(count: 4, timeout: 5)
         let contents = try payloads.map(contentField(from:))
@@ -445,6 +664,9 @@ enum DiscordNotificationSmoke {
         try require(!joined.contains("veqraltestsecret"), "Authorization bearer が redaction されていません。")
         try require(!joined.contains("token-should-hide"), "token が redaction されていません。")
         try require(!joined.contains("password-should-hide"), "password が redaction されていません。")
+        try require(!joined.contains("discord-webhook-should-hide"), "Discord webhook が redaction されていません。")
+        try require(!joined.contains("slack-token-should-hide"), "Slack token が redaction されていません。")
+        try require(!joined.contains("openrouter-key-should-hide"), "OpenRouter key が redaction されていません。")
         print("PASS: Discord notification smoke received \(payloads.count) redacted payloads.")
     }
 
@@ -603,6 +825,61 @@ enum ProjectMemorySmoke {
             print("FAIL: Project memory smoke failed: \(error.localizedDescription)")
             Foundation.exit(1)
         }
+    }
+}
+
+enum CostGovernanceSmoke {
+    static func runAndExit() -> Never {
+        let projectID = "cost-smoke"
+        let key = RunBudgetCalculator.projectKey(projectID: projectID, workingDirectory: "/tmp/cost-smoke")
+        let runs = [
+            HostRun(
+                id: "run-cost-smoke-1",
+                prompt: "usage smoke",
+                workingDirectory: "/tmp/cost-smoke",
+                sessionID: nil,
+                status: .complete,
+                startedAt: Date(),
+                completedAt: Date(),
+                exitCode: 0,
+                pid: nil,
+                approvalReason: nil,
+                engine: .hermes,
+                resumeSessionID: nil,
+                projectID: projectID,
+                chatID: nil,
+                provider: "openai-codex",
+                model: "gpt-5.5",
+                approvalSeverity: nil,
+                usage: RunUsage(
+                    inputTokens: 100,
+                    outputTokens: 40,
+                    cacheReadTokens: nil,
+                    cacheWriteTokens: nil,
+                    reasoningTokens: 10,
+                    totalTokens: nil,
+                    estimatedCostUSD: 0.015,
+                    actualCostUSD: nil,
+                    source: "smoke",
+                    model: "gpt-5.5"
+                )
+            )
+        ]
+        let budgets = [key: ProjectBudgetLimit(limitUSD: 0.01, thresholdPercent: 0.8, paused: false, updatedAt: Date())]
+        let summary = RunBudgetCalculator.summary(for: key, runs: runs, budgets: budgets)
+        guard summary.totalTokens == 150,
+              summary.costUSD == 0.015,
+              summary.isNearLimit,
+              summary.isOverLimit else {
+            print("FAIL: Cost governance summary did not aggregate or flag budget correctly.")
+            Foundation.exit(1)
+        }
+        guard RunBudgetCalculator.approvalReason(for: key, runs: runs, budgets: budgets)?.contains("Cost budget exceeded") == true else {
+            print("FAIL: Cost governance approval reason was not produced.")
+            Foundation.exit(1)
+        }
+        print("PASS: Cost governance smoke tokens=\(summary.totalTokens) cost=\(summary.costUSD) over=\(summary.isOverLimit)")
+        Foundation.exit(0)
     }
 }
 
@@ -1023,6 +1300,315 @@ enum VoiceCleanupSmoke {
     }
 }
 
+enum PortfolioRealDataSmoke {
+    static func runAndExit() -> Never {
+        Task.detached {
+            do {
+                let result = try await run()
+                print("PASS: Portfolio A4 smoke mode=\(result.mode) assets=\(result.assetCount) status=\(result.status) run=\(result.runID.prefix(8)) missing=\(result.missingConfiguration.joined(separator: ","))")
+                Foundation.exit(0)
+            } catch {
+                print("FAIL: Portfolio A4 smoke failed: \(error.localizedDescription)")
+                Foundation.exit(1)
+            }
+        }
+        dispatchMain()
+    }
+
+    private struct SmokeResult {
+        var mode: String
+        var assetCount: Int
+        var status: String
+        var runID: String
+        var missingConfiguration: [String]
+    }
+
+    private static func run() async throws -> SmokeResult {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("veqral-a4-portfolio-\(UUID().uuidString)", isDirectory: true)
+        let hostHome = root.appendingPathComponent("host-home", isDirectory: true)
+        let registry = root.appendingPathComponent("registry", isDirectory: true)
+        let codeRoot = root.appendingPathComponent("code-root", isDirectory: true)
+        let appRoot = codeRoot.appendingPathComponent("VeqralA4SampleApp", isDirectory: true)
+        let logURL = appRoot.appendingPathComponent("veqral-a4.log")
+        defer { try? fileManager.removeItem(at: root) }
+
+        let missing = missingPortfolioEnvironment(ProcessInfo.processInfo.environment)
+        try fileManager.createDirectory(at: appRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: hostHome, withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 5.9
+        import PackageDescription
+        let package = Package(name: "VeqralA4SampleApp")
+        """.write(to: appRoot.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        Veqral A4 sample log line
+        asset running
+        """.write(to: logURL, atomically: true, encoding: .utf8)
+
+        setenv("VEQRAL_HOST_HOME", hostHome.path, 1)
+        setenv("VEQRAL_PORTFOLIO_REGISTRY_REPO", "", 1)
+        setenv("VEQRAL_PORTFOLIO_REGISTRY_PATH", registry.path, 1)
+        setenv("VEQRAL_DISABLE_DISCORD_WEBHOOK", "1", 1)
+
+        var config = HostConfig()
+        config.defaultWorkingDirectory = appRoot.path
+        config.portfolioRegistryPath = registry.path
+        config.portfolioRegistryRepo = ""
+        config.portfolioCodeRoots = [codeRoot.path]
+        config.portfolioEngagementRoots = []
+        config.discordWebhook = nil
+        config.portfolioDiscordWebhook = nil
+        config.pushNotificationsEnabled = false
+
+        let store = PortfolioRegistryStore(config: config)
+        let discovered = try store.discover(
+            request: PortfolioDiscoverRequest(
+                engagementRoots: nil,
+                codeRoots: [codeRoot.path],
+                includeGitHub: false
+            )
+        )
+        guard var asset = discovered.first(where: { $0.name == "VeqralA4SampleApp" }) else {
+            throw SmokeError("sample asset was not discovered from local code root")
+        }
+        asset.summary = "A4 acceptance sample asset"
+        asset.healthSpec = PortfolioHealthSpec(type: "cmd", target: "/bin/test -f \(shellQuoted(logURL.path))")
+        asset.logSource = PortfolioLogSource(path: logURL.path, cmd: nil)
+        asset.controls = PortfolioControls(
+            start: nil,
+            stop: nil,
+            restart: "/bin/echo veqral-a4-control-approved",
+            deploy: nil
+        )
+
+        let saved = try store.upsert(asset, message: "A4 sample asset acceptance")
+        let listed = try store.list()
+        guard listed.contains(where: { $0.id == saved.id }) else {
+            throw SmokeError("saved asset was not returned by list")
+        }
+
+        let status = try store.status(id: saved.id)
+        guard status.status == .running else {
+            throw SmokeError("sample asset status expected running, got \(status.status.rawValue): \(status.health)")
+        }
+        let logs = try store.logs(id: saved.id)
+        guard logs.joined(separator: "\n").contains("Veqral A4 sample log line") else {
+            throw SmokeError("sample asset logs were not loaded")
+        }
+        let summary = try store.logSummary(id: saved.id)
+        guard summary.nilIfBlank != nil else {
+            throw SmokeError("sample asset log summary was empty")
+        }
+
+        let state = HostState(config: config)
+        let control = try await store.controlRun(assetID: saved.id, action: "restart", state: state)
+        guard control.approvalRequired, control.status == RunStatusWire.waitingApproval.rawValue else {
+            throw SmokeError("portfolio control did not enter approval state")
+        }
+        guard let waiting = await state.run(runID: control.runID),
+              waiting.approvalSeverity == .high,
+              waiting.approvalReason?.contains("Portfolio restart requires approval") == true else {
+            throw SmokeError("portfolio control approval metadata is missing")
+        }
+        let approved = try await state.approve(runID: control.runID)
+        guard approved.status == .queued else {
+            throw SmokeError("approved portfolio control did not return to queued")
+        }
+        await AgentRunner(state: state).start(runID: control.runID)
+        guard let finished = await state.run(runID: control.runID),
+              finished.status == .complete,
+              finished.exitCode == 0 else {
+            throw SmokeError("approved portfolio control did not complete")
+        }
+        let controlLog = await state.replayLogs(runID: control.runID)
+            .map(\.message)
+            .joined(separator: "\n")
+        guard controlLog.contains("veqral-a4-control-approved") else {
+            throw SmokeError("approved portfolio control output was not captured")
+        }
+
+        let mode = missing.isEmpty ? "sample-fixture; live roots present but not mutated" : "sample-fixture; §0 roots unset"
+        return SmokeResult(
+            mode: mode,
+            assetCount: listed.count,
+            status: status.status.rawValue,
+            runID: control.runID,
+            missingConfiguration: missing
+        )
+    }
+
+    private static func missingPortfolioEnvironment(_ env: [String: String]) -> [String] {
+        var missing: [String] = []
+        if env["VEQRAL_PORTFOLIO_CODE_ROOTS"]?.nilIfBlank == nil,
+           env["VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS"]?.nilIfBlank == nil {
+            missing.append("VEQRAL_PORTFOLIO_CODE_ROOTS/ENGAGEMENT_ROOTS")
+        }
+        if env["VEQRAL_PORTFOLIO_REGISTRY_REPO"]?.nilIfBlank == nil,
+           env["VEQRAL_PORTFOLIO_REGISTRY_PATH"]?.nilIfBlank == nil {
+            missing.append("VEQRAL_PORTFOLIO_REGISTRY_REPO/PATH")
+        }
+        return missing
+    }
+}
+
+struct AuthOnboardingStatus: Codable {
+    var checkedAt: Date
+    var providers: [AuthProviderStatus]
+    var readyCount: Int
+    var allRequiredReady: Bool
+    var message: String
+}
+
+struct AuthProviderStatus: Codable {
+    var id: String
+    var title: String
+    var cliCommand: String
+    var loginCommand: String
+    var alternateLoginCommand: String?
+    var isInstalled: Bool
+    var isLoggedIn: Bool
+    var hermesProviderReady: Bool
+    var keychainMarkerPresent: Bool
+    var isReady: Bool
+    var summary: String
+    var credentialHints: [String]
+    var warnings: [String]
+}
+
+enum AuthOnboardingManager {
+    static func status(persistReadyMarkers: Bool) -> AuthOnboardingStatus {
+        let providers = [
+            provider(
+                id: "codex",
+                title: "Codex",
+                engine: .codex,
+                loginCommand: "codex login",
+                alternateLoginCommand: nil,
+                credentialHints: ["~/.codex/auth.json"],
+                hermesProviderHint: "~/.hermes/auth.json"
+            ),
+            provider(
+                id: "claude",
+                title: "Claude",
+                engine: .claude,
+                loginCommand: "claude login",
+                alternateLoginCommand: "claude setup-token",
+                credentialHints: ["~/.claude/.credentials.json", "~/.claude.json"],
+                hermesProviderHint: nil
+            ),
+            provider(
+                id: "hermes",
+                title: "Hermes",
+                engine: .hermes,
+                loginCommand: "hermes chat -Q --provider openai-codex --model gpt-5.4 --max-turns 1 -q 'ping'",
+                alternateLoginCommand: "hermes chat -Q --provider claude --max-turns 1 -q 'ping'",
+                credentialHints: ["~/.hermes/auth.json"],
+                hermesProviderHint: nil
+            )
+        ]
+
+        if persistReadyMarkers {
+            for provider in providers where provider.isReady {
+                try? KeychainStore.set("ready:\(Int(Date().timeIntervalSince1970))", account: markerAccount(provider.id))
+            }
+        }
+
+        let refreshed = providers.map { provider -> AuthProviderStatus in
+            var provider = provider
+            provider.keychainMarkerPresent = KeychainStore.get(account: markerAccount(provider.id))?.nilIfBlank != nil || provider.keychainMarkerPresent
+            return provider
+        }
+        let readyCount = refreshed.filter(\.isReady).count
+        let allRequiredReady = refreshed.filter { $0.id == "codex" || $0.id == "claude" || $0.id == "hermes" }.allSatisfy(\.isReady)
+        return AuthOnboardingStatus(
+            checkedAt: Date(),
+            providers: refreshed,
+            readyCount: readyCount,
+            allRequiredReady: allRequiredReady,
+            message: allRequiredReady ? "Codex / Claude / Hermes are ready." : "Run the listed login commands on the Mac, then refresh."
+        )
+    }
+
+    private static func provider(
+        id: String,
+        title: String,
+        engine: AgentEngine,
+        loginCommand: String,
+        alternateLoginCommand: String?,
+        credentialHints: [String],
+        hermesProviderHint: String?
+    ) -> AuthProviderStatus {
+        let cli = CLIAdapterRegistry.status(for: engine)
+        let loginDetected = credentialHints.contains { FileManager.default.fileExists(atPath: $0.expandingTilde) }
+        let hermesProviderReady = hermesProviderHint.map { FileManager.default.fileExists(atPath: $0.expandingTilde) } ?? loginDetected
+        let markerPresent = KeychainStore.get(account: markerAccount(id))?.nilIfBlank != nil
+        let ready = cli.isInstalled && loginDetected && hermesProviderReady
+        var warnings: [String] = []
+        if !cli.isInstalled {
+            warnings.append("\(title) CLI is not installed.")
+        }
+        if !loginDetected {
+            warnings.append("\(title) login is not detected.")
+        }
+        if !hermesProviderReady {
+            warnings.append("Hermes provider readiness is not detected for \(title).")
+        }
+        if markerPresent && !ready {
+            warnings.append("Keychain readiness marker exists, but current login check is not ready.")
+        }
+
+        return AuthProviderStatus(
+            id: id,
+            title: title,
+            cliCommand: cli.executablePath == nil ? engine.rawValue : cli.executablePath!,
+            loginCommand: loginCommand,
+            alternateLoginCommand: alternateLoginCommand,
+            isInstalled: cli.isInstalled,
+            isLoggedIn: loginDetected,
+            hermesProviderReady: hermesProviderReady,
+            keychainMarkerPresent: markerPresent,
+            isReady: ready,
+            summary: ready ? "\(title) is ready." : "\(title) needs login or provider setup.",
+            credentialHints: credentialHints,
+            warnings: warnings
+        )
+    }
+
+    private static func markerAccount(_ providerID: String) -> String {
+        "auth-onboarding:\(providerID):ready"
+    }
+}
+
+enum AuthOnboardingSmoke {
+    static func runAndExit() -> Never {
+        do {
+            let status = AuthOnboardingManager.status(persistReadyMarkers: false)
+            let ids = Set(status.providers.map(\.id))
+            guard ids == Set(["codex", "claude", "hermes"]) else {
+                throw SmokeError("auth onboarding providers are incomplete")
+            }
+            guard status.providers.allSatisfy({ !$0.loginCommand.isEmpty && !$0.cliCommand.isEmpty }) else {
+                throw SmokeError("auth onboarding commands are incomplete")
+            }
+            let data = try JSONEncoder.pretty.encode(status)
+            let text = String(data: data, encoding: .utf8) ?? ""
+            guard !text.contains(NSHomeDirectory()) else {
+                throw SmokeError("auth onboarding leaked an absolute home path")
+            }
+            guard !text.localizedCaseInsensitiveContains("bearer ") else {
+                throw SmokeError("auth onboarding leaked a bearer value")
+            }
+            print("PASS: Auth onboarding smoke providers=\(status.providers.count) ready=\(status.readyCount) allReady=\(status.allRequiredReady)")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Auth onboarding smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+}
+
 enum VoiceCleanupRunner {
     static func cleanup(_ request: VoiceCleanupRequest) throws -> VoiceCleanupResponse {
         let ruleBased = request.ruleBasedText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1311,6 +1897,39 @@ actor HostState {
             && activeRuns < config.maxActiveRuns
     }
 
+    func budgetSummaries() -> ProjectBudgetListResponse {
+        ProjectBudgetListResponse(
+            summaries: RunBudgetCalculator.summaries(
+                runs: Array(runs.values),
+                budgets: config.resolvedProjectBudgets
+            )
+        )
+    }
+
+    func updateBudget(_ request: ProjectBudgetUpdateRequest) throws -> ProjectCostSummary {
+        let key = request.projectKey?.nilIfBlank
+            ?? request.projectID?.nilIfBlank.map { "project:\($0)" }
+            ?? request.workingDirectory?.nilIfBlank.map { "path:\($0.expandingTilde)" }
+        guard let key else {
+            throw HostError.badRequest("Project key is required.")
+        }
+        var budgets = config.resolvedProjectBudgets
+        var current = budgets[key] ?? ProjectBudgetLimit()
+        current.limitUSD = request.limitUSD.flatMap { $0 > 0 ? $0 : nil }
+        if let threshold = request.thresholdPercent {
+            current.thresholdPercent = threshold
+        }
+        if let paused = request.paused {
+            current.paused = paused
+        }
+        current.updatedAt = Date()
+        budgets[key] = current.normalized
+        config.projectBudgets = budgets
+        try persistConfig()
+        appendAudit("updated cost budget key=\(key) limit=\(current.limitUSD.map { String(format: "%.4f", $0) } ?? "none") paused=\(current.paused)")
+        return RunBudgetCalculator.summary(for: key, runs: Array(runs.values), budgets: config.resolvedProjectBudgets)
+    }
+
     func createRun(
         prompt: String,
         workingDirectory: String,
@@ -1329,8 +1948,16 @@ actor HostState {
             throw HostError.badRequest("Working directory does not exist")
         }
         let risk = RiskClassifier.classify(prompt)
+        let projectKey = RunBudgetCalculator.projectKey(projectID: projectID?.nilIfBlank, workingDirectory: directory)
+        let costBudgetReason = RunBudgetCalculator.approvalReason(
+            for: projectKey,
+            runs: Array(runs.values),
+            budgets: config.resolvedProjectBudgets
+        )
         let approvalReason: String? = if let forceApprovalReason = forceApprovalReason?.nilIfBlank {
             forceApprovalReason
+        } else if let costBudgetReason {
+            costBudgetReason
         } else if !budgetAllows(project: directory) {
             "Budget guard exceeded"
         } else if risk.requiresApproval {
@@ -1342,6 +1969,8 @@ actor HostState {
             nil
         } else if forceApprovalReason?.nilIfBlank != nil {
             forceApprovalSeverity
+        } else if costBudgetReason != nil {
+            .high
         } else if approvalReason == "Budget guard exceeded" {
             .high
         } else {
@@ -1437,6 +2066,7 @@ actor HostState {
         runs[runID] = run
         processes[runID] = nil
         persistRuns()
+        pauseBudgetIfNeeded(after: run)
         appendAudit("finished run id=\(runID) exit=\(exitCode)")
         publish(HostLogEvent(runID: runID, kind: .complete, stream: "host", message: "Exit code: \(exitCode)", createdAt: Date(), sessionID: run.sessionID, exitCode: exitCode))
         notifyDevices(
@@ -1479,6 +2109,25 @@ actor HostState {
         persistRuns()
         appendAudit("resume requested run id=\(runID)")
         return run
+    }
+
+    private func pauseBudgetIfNeeded(after run: HostRun) {
+        let key = RunBudgetCalculator.projectKey(projectID: run.projectID, workingDirectory: run.workingDirectory)
+        var budgets = config.resolvedProjectBudgets
+        guard var budget = budgets[key]?.normalized,
+              budget.paused == false else {
+            return
+        }
+        let summary = RunBudgetCalculator.summary(for: key, runs: Array(runs.values), budgets: budgets)
+        guard summary.isOverLimit else { return }
+        budget.paused = true
+        budget.updatedAt = Date()
+        budgets[key] = budget
+        config.projectBudgets = budgets
+        try? persistConfig()
+        appendAudit("paused cost budget key=\(key) cost=\(String(format: "%.4f", summary.costUSD)) limit=\(summary.budgetLimitUSD.map { String(format: "%.4f", $0) } ?? "none")")
+        publish(HostLogEvent(runID: run.id, kind: .status, stream: "host", message: "Cost budget paused for \(summary.displayName)", createdAt: Date(), sessionID: run.sessionID))
+        notifyDevices(run: run, event: .question, message: "Cost budget paused for \(summary.displayName)", severity: .high)
     }
 
     func approve(runID: String) throws -> HostRun {
@@ -1579,6 +2228,10 @@ actor HostState {
         if let data = try? JSONEncoder.pretty.encode(sortedRuns) {
             try? data.write(to: Self.runsURL, options: .atomic)
         }
+    }
+
+    private func persistConfig() throws {
+        try config.save()
     }
 
     private func appendLogFile(_ event: HostLogEvent) {
@@ -1764,6 +2417,18 @@ final class HostServer: @unchecked Sendable {
                 return
             }
 
+            if request.path == "/v1/auth/onboarding", request.method == "GET" {
+                sendJSON(AuthOnboardingManager.status(persistReadyMarkers: false), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/auth/onboarding/refresh", request.method == "POST" {
+                let status = AuthOnboardingManager.status(persistReadyMarkers: true)
+                await state.recordAudit("auth onboarding refreshed device=\(authenticatedDeviceID) ready=\(status.readyCount)/\(status.providers.count)")
+                sendJSON(status, connection: connection)
+                return
+            }
+
             if request.path == "/v1/voice/cleanup", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(VoiceCleanupRequest.self, from: request.body)
                 sendJSON(try VoiceCleanupRunner.cleanup(body), connection: connection)
@@ -1776,7 +2441,9 @@ final class HostServer: @unchecked Sendable {
                 }
                 let host = localHostName()
                 let content = "Veqral Discord テスト通知: \(host) の Mac Host から送信しました。"
-                await DiscordWebhookNotifier.send(webhook: webhook, content: content)
+                guard await DiscordWebhookNotifier.send(webhook: webhook, content: content) else {
+                    throw HostError.badRequest("Discord webhook did not return a 2xx response.")
+                }
                 await state.recordAudit("discord test notification requested device=\(authenticatedDeviceID)")
                 sendJSON(NotificationTestResponse(ok: true, message: "Discord test notification sent."), connection: connection)
                 return
@@ -1892,6 +2559,17 @@ final class HostServer: @unchecked Sendable {
                 return
             }
 
+            if request.path == "/v1/budgets", request.method == "GET" {
+                sendJSON(await state.budgetSummaries(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/budgets", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(ProjectBudgetUpdateRequest.self, from: request.body)
+                sendJSON(try await state.updateBudget(body), connection: connection)
+                return
+            }
+
             if request.path == "/v1/portfolio/assets", request.method == "GET" {
                 sendJSON(PortfolioAssetListResponse(assets: try portfolioStore.list()), connection: connection)
                 return
@@ -1925,10 +2603,8 @@ final class HostServer: @unchecked Sendable {
                     return
                 }
                 if request.method == "DELETE", parts.count == 4 {
-                    try portfolioStore.delete(id: assetID)
-                    await state.recordAudit("portfolio deleted asset id=\(assetID)")
-                    sendJSON(SimpleResponse(ok: true), connection: connection)
-                    return
+                    await state.recordAudit("portfolio delete blocked pending approval flow asset id=\(assetID)")
+                    throw HostError.approvalRequired("Portfolio asset deletion requires an approval-backed delete flow.")
                 }
                 guard parts.count >= 5 else { throw HostError.notFound("Invalid portfolio action") }
                 let action = parts[4]
@@ -3602,6 +4278,7 @@ struct PortfolioAssetRequest: Codable {
 struct PortfolioDiscoverRequest: Codable {
     var engagementRoots: [String]?
     var codeRoots: [String]?
+    var includeGitHub: Bool?
 }
 
 struct PortfolioAssetStatusResponse: Codable {
@@ -3708,7 +4385,8 @@ final class PortfolioRegistryStore {
         let existing = try list()
         var mergedByKey: [String: PortfolioAsset] = Dictionary(uniqueKeysWithValues: existing.map { (dedupKey($0), $0) })
         var changedAssetIDs: Set<String> = []
-        for asset in discoverGitHubAssets() + discoverLocalCodeAssets(roots: request.codeRoots) + discoverEngagementAssets(roots: request.engagementRoots) {
+        let githubAssets = request.includeGitHub == false ? [] : discoverGitHubAssets()
+        for asset in githubAssets + discoverLocalCodeAssets(roots: request.codeRoots) + discoverEngagementAssets(roots: request.engagementRoots) {
             let key = dedupKey(asset)
             if var current = mergedByKey[key] {
                 let before = current
@@ -4585,13 +5263,24 @@ struct HistorySessionDetailResponse: Codable {
 }
 
 struct HermesMemoryStore {
-    private let memoriesFolder = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hermes/memories", isDirectory: true)
-    private let skillsFolder = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hermes/skills", isDirectory: true)
-    private let stateDBURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hermes/state.db")
+    private let hermesHome = URL(
+        fileURLWithPath: ProcessInfo.processInfo.environment["HERMES_HOME"]?.nilIfBlank?.expandingTilde
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hermes", isDirectory: true).path,
+        isDirectory: true
+    )
     private let maxReadableBytes = 1_048_576
+
+    private var memoriesFolder: URL {
+        hermesHome.appendingPathComponent("memories", isDirectory: true)
+    }
+
+    private var skillsFolder: URL {
+        hermesHome.appendingPathComponent("skills", isDirectory: true)
+    }
+
+    private var stateDBURL: URL {
+        hermesHome.appendingPathComponent("state.db")
+    }
 
     func list() throws -> MemoryListResponse {
         var files = [
@@ -6251,6 +6940,9 @@ enum Redactor {
         let patterns = [
             (#"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]+"#, "$1[REDACTED]"),
             (#"(?i)(token|api[_-]?key|secret|password)\s*[:=]\s*['"]?[^'"\s]+"#, "$1=[REDACTED]"),
+            (#"https://discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9._\-]+"#, "[REDACTED_DISCORD_WEBHOOK]"),
+            (#"(?i)xox[baprs]-[A-Za-z0-9-]+"#, "[REDACTED_SLACK_TOKEN]"),
+            (#"(?i)sk-or-[A-Za-z0-9_-]{12,}"#, "[REDACTED_OPENROUTER_KEY]"),
             (#"(?i)sk-[A-Za-z0-9]{12,}"#, "[REDACTED]"),
             (#"(?i)gh[opusr]_[A-Za-z0-9_]+"#, "[REDACTED]"),
             (#"(?i)github_pat_[A-Za-z0-9_]+"#, "[REDACTED]")
