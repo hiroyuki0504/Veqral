@@ -42,27 +42,28 @@ Device(Mac)
 ## 現状（重要）
 
 - `main` = `18b29b4`（PR #2〜#8 統合済み: P0 パイプライン + 実行時修正）
-- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き ← #15 PR1 core fixes ← #16 PR-A screen inventory ← #17 PR1 surface consolidation
+- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き ← #15 PR1 core fixes ← #16 PR-A screen inventory ← #17 PR1 surface consolidation ← #18 PR2 portfolio command center
 - #9: Device→エージェント選択、Codex/Claude 直接、Hermes Project→Chat→model、History「Continue」resume。（更新耐性 adapter を同ブランチに足す指示済み → 入っているかブランチで確認）
 - #10: ワンタップ承認(一覧から)、Chat/セッション名前付け+フィルタ、画像 diff 3 モード+hunk 添付、swipe、日本語/English/System 切替（`Localizable.strings` 体系。`.xcstrings` 移行は未）
 - #11: APNs push（device build は free team では Push capability 非対応で停止 → #12 で外した）
 - #12: Push capability/entitlement を build から除去 + push を feature flag OFF（コードは温存）、Devices に QR スキャナ + 手動 fallback、全画面共通の接続ストリップ、UI を少し製品寄りに。free team で実機 build 成功
 - #13: Codex 用の引継ぎ `AGENTS.md` をリポジトリ直下に追加。
 - #14 (`codex/ui-japanese-polish`): UI/UX のみ。日本語一本化、Home の警告カード中立化、UUID/パス前面表示抑制、状態色整理、Projects/Devices/Approvals/More 配下の文言・余白・重複 UI を整理。Run/pairing/WebSocket/Hermes/履歴/承認の挙動変更なし。
-- #15 (`codex/pr1-core-fixes`): QR pairing URL に署名を追加（手動 code fallback は維持）、LaunchAgent 由来の Host 実行環境 PATH/HOME を補強、Mac Catalyst は常時 3 ペイン + 最小サイズ。実機指摘対応として、停止中 Run の近くにも承認ボタンを表示し、Devices は current deviceID と端末名一致の自分/旧自分レコードを非表示にする。iPhone 16 Pro Max はインストール+起動確認済み。iPad Pro 13-inch はインストール成功、起動は iPad 側の free team developer profile 信頼待ち。
+- #15 (`codex/pr1-core-fixes`): QR pairing URL に署名を追加（手動 code fallback は維持）、LaunchAgent 由来の Host 実行環境 PATH/HOME を補強、Mac Catalyst は常時 3 ペイン + 最小サイズ。実機指摘対応として、停止中 Run の近くにも承認ボタンを表示し、Devices は current deviceID と端末名一致の自分/旧自分レコードを非表示にする。iPhone 16 Pro Max はインストール+起動確認済み。iPad Pro 13-inch は当時インストール成功、起動は #18 で確認済み。
 - #16 (`codex/pr-a-screen-inventory`): PR-A。`SCREEN_INVENTORY_PR_A.md` に画面/機能棚卸し、keep/merge/cut、判断待ちを記録。到達不能だった旧 `DashboardView` / `SidebarView` / `InspectorView` と、それらに紐づく seed-era rows/models を削除。Run/pairing/WebSocket/Hermes/履歴/承認の挙動変更なし。#9〜#15 が未マージのため #15 に stacked。
 - #17 (`codex/pr1-surface-consolidation`): PR1。PR-A の残4件を確定整理。トップレベル `Intent`/`Requirements`/`Agents`/`Models`/`Terminal` を削除し、要件メモは Command、Hermes model 選択は Projects→Hermes Chats、agent/runtime 選択は Command/Devices、terminal/PTTY/log は Command 作業面へ統合。`SURFACE_CONSOLIDATION_PR1.md` に before/after を記録。Run/pairing/WebSocket/Hermes/履歴/承認の挙動変更なし。
+- #18 (`codex/pr2-portfolio-command-center`): PR2。司令塔タブを追加し、Host の HMAC 認証下に Portfolio registry API（`assets/<id>.yaml`、discover/status/logs/log-summary/commits/control/promote）を実装。GitHub/ローカル/案件ルート discover、承認付き shell control/promote、Ollama→Claude ログ要約、Discord webhook 通知、SwiftUI 一覧/詳細/追加/編集/案件拡張/Project link/最近 commit を追加。`PORTFOLIO_COMMAND_CENTER_PR2.md` に DoD と残課題を記録。iPhone 16 Pro Max と iPad Pro 13-inch にインストール+起動確認済み。
 
 ## 未完了・次の手番
 
 1. 実機検証（最優先）
-   - QR ペアリング（カメラで認識→connected）
+   - QR ペアリング（ユーザー報告ではカメラ認識→connected 済み。#18 端末配布後に念のため再確認）
    - Hermes の記憶継承。同 Project で Chat①(モデル A)に記憶→Chat②(モデル B)が継承（プロジェクトの心臓、まだ未検証）
    - 使いやすさ機能（承認ボタンは Approvals/Run detail/phone run row で見えること、Devices に自分自身が出ないこと）
+   - 司令塔 E2E: discover → Asset 編集（health/controls/案件）→ control が承認待ちに積まれる → 承認後 Run ログで結果確認 → log-summary → local-only promote
    - UI 受け入れ確認: 日本語のみ、赤い 0 バッジなし、未ペアリング strip が細い、UUID/コンテナパスが主表示に出ない、Unavailable/Offline が緑でない
-   - iPad で `0504yamayama@gmail.com` の開発者プロファイルを信頼して起動確認（app install は成功済み）
-2. スタック統合：実機 OK 後、#9→#12 を main にまとめて取り込む（和集合・落とさず・壊さず・build & smoke 検証）
-3. PR2 司令塔（ポートフォリオ層）: #17 tip に stack。レジストリ repo + Host API + SwiftUI 司令塔タブ + 承認付き操作 + 案件拡張 + Discord 通知 + promote を既存基盤流用で実装する。案件ルート/コードルート未設定でも空設定で動くデフォルトにする。
+2. スタック統合：実機 OK 後、#9→#18 を main にまとめて取り込む（和集合・落とさず・壊さず・build & smoke 検証）
+3. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
 4. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
 5. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
 6. 組織化：worker → skills で精度 → PM を置く → 上に積む（段階的）
