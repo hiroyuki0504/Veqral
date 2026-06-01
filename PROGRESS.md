@@ -4,7 +4,7 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 
 ## Status
 
-- [x] #0 Hermes 記憶継承の自動実証 — completed in `codex/backlog-0-hermes-memory-inheritance` with an honest FAIL result
+- [x] #0 Hermes 記憶継承の自動実証 — completed in PR #19 (`codex/backlog-0-hermes-memory-inheritance`) with an honest FAIL result
 - [x] #1 UI/UX 洗練 — completed earlier in PR #14 (`codex/ui-japanese-polish`)
 - [x] #2 残4件の統合 — completed in PR #17 (`codex/pr1-surface-consolidation`)
 - [ ] #3 WebSocket 再接続 + Run resume
