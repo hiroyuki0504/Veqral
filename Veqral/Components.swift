@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 import CoreImage.CIFilterBuiltins
-import AVFoundation
+@preconcurrency import AVFoundation
 import PhotosUI
 import UniformTypeIdentifiers
 
@@ -28,17 +28,16 @@ struct ScreenScaffold<Content: View>: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
+                        Text(L10n.tr(title))
                             .font(.system(.title2, design: .default, weight: .semibold))
                             .foregroundStyle(VQTheme.ink)
-                        Text("Veqral")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(VQTheme.secondaryText)
                     }
 
                     Spacer()
                 }
                 .padding(.top, 6)
+
+                HostConnectionStrip()
 
                 content
             }
@@ -56,8 +55,201 @@ struct ScreenScaffold<Content: View>: View {
                 .ignoresSafeArea()
             }
         }
-        .navigationTitle(title)
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct HostConnectionStrip: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
+    var body: some View {
+        if shouldShow {
+            HStack(spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 24, height: 24)
+                    .foregroundStyle(tint)
+                    .background(tint.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+                Text(L10n.tr(title))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer(minLength: 8)
+                StatusPill(title: status, tint: tint)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(VQTheme.elevated.opacity(0.72))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(tint.opacity(0.24), lineWidth: 1)
+            }
+        }
+    }
+
+    private var shouldShow: Bool {
+        !store.remoteHost.isPaired || store.remoteStreamStatus.phase != .idle
+    }
+
+    private var isOnline: Bool {
+        store.remoteHost.isEnabled && store.remoteHost.isPaired && store.remoteHostHealth?.status == "ok"
+    }
+
+    private var title: String {
+        switch store.remoteStreamStatus.phase {
+        case .connecting:
+            return "Log stream connecting"
+        case .connected:
+            return "Log stream connected"
+        case .reconnecting:
+            return "Reconnecting log stream"
+        case .disconnected:
+            return "Log stream disconnected"
+        case .idle:
+            break
+        }
+        if isOnline { return "Mac Host connected" }
+        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "Mac Host offline" }
+        return "Pair Mac Host"
+    }
+
+    private var detail: String {
+        let streamStatus = store.remoteStreamStatus
+        if streamStatus.phase != .idle {
+            let retry = streamStatus.nextRetrySeconds.map { " · \(L10n.tr("Retry in")) \($0)s" } ?? ""
+            let run = streamStatus.runTitle.nilIfBlank ?? L10n.tr("Remote streams active")
+            let detail = streamStatus.detail.nilIfBlank ?? L10n.tr("Streaming run logs.")
+            return "\(run) · \(detail)\(retry)"
+        }
+        if store.remoteHost.isPaired {
+            return store.remoteHost.displayEndpoint
+        }
+        return L10n.tr("Scan the menu bar QR from Devices.")
+    }
+
+    private var status: String {
+        switch store.remoteStreamStatus.phase {
+        case .connecting:
+            return "Connecting"
+        case .connected:
+            return "Streaming"
+        case .reconnecting:
+            return "Retrying"
+        case .disconnected:
+            return "Offline"
+        case .idle:
+            break
+        }
+        if isOnline { return "Connected" }
+        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "Offline" }
+        return "Pairing needed"
+    }
+
+    private var symbol: String {
+        switch store.remoteStreamStatus.phase {
+        case .connecting:
+            return "point.3.connected.trianglepath.dotted"
+        case .connected:
+            return "dot.radiowaves.left.and.right"
+        case .reconnecting:
+            return "arrow.triangle.2.circlepath"
+        case .disconnected:
+            return "wifi.exclamationmark"
+        case .idle:
+            break
+        }
+        if isOnline { return "checkmark.circle" }
+        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return "wifi.exclamationmark" }
+        return "qrcode.viewfinder"
+    }
+
+    private var tint: Color {
+        switch store.remoteStreamStatus.phase {
+        case .connecting, .reconnecting:
+            return VQTheme.amber
+        case .connected:
+            return VQTheme.green
+        case .disconnected:
+            return VQTheme.amber
+        case .idle:
+            break
+        }
+        if isOnline { return VQTheme.green }
+        if store.remoteHost.isEnabled && store.remoteHost.isPaired { return VQTheme.amber }
+        return VQTheme.amber
+    }
+}
+
+enum VQDisplay {
+    static func workspaceName(_ workspace: WorkspaceSnapshot) -> String {
+        humanName(workspace.projectName, fallbackPath: workspace.workingDirectory, fallback: L10n.tr("Workspace"))
+    }
+
+    static func projectName(_ project: AgentProjectSpace) -> String {
+        humanName(project.name, fallbackPath: project.workingDirectory, fallback: L10n.tr("Project"))
+    }
+
+    @MainActor
+    static func hostName(_ store: CommandCenterStore) -> String {
+        let candidate = store.remoteHost.name.nilIfBlank ?? store.workspace.hostName.nilIfBlank ?? store.workspace.deviceName
+        return humanName(candidate, fallbackPath: store.workspace.workingDirectory, fallback: "Mac Host")
+    }
+
+    static func endpoint(_ host: RemoteHostConfiguration) -> String {
+        host.endpoint.nilIfBlank ?? L10n.tr("Not Paired")
+    }
+
+    static func workspaceStatus(_ workspace: WorkspaceSnapshot) -> String {
+        let raw = workspace.statusSummary.nilIfBlank ?? (workspace.errorMessage == nil ? "Ready" : "Unavailable")
+        return L10n.tr(raw)
+    }
+
+    static func workspaceStatusTint(_ workspace: WorkspaceSnapshot) -> Color {
+        let status = workspace.statusSummary.lowercased()
+        if workspace.errorMessage != nil || status.contains("unavailable") || status.contains("not detected") {
+            return VQTheme.unavailable
+        }
+        if status.contains("refresh") || status.contains("check") || status.contains("pending") {
+            return VQTheme.amber
+        }
+        return workspace.changedFiles == 0 ? VQTheme.green : VQTheme.amber
+    }
+
+    static func pathTail(_ path: String, fallback: String = "Not detected") -> String {
+        let clean = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return L10n.tr(fallback) }
+        let name = URL(fileURLWithPath: clean).lastPathComponent
+        return name.isEmpty ? clean : name
+    }
+
+    private static func humanName(_ name: String, fallbackPath: String, fallback: String) -> String {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !clean.isEmpty, !looksOpaque(clean) {
+            return clean
+        }
+        let pathName = pathTail(fallbackPath, fallback: fallback)
+        return looksOpaque(pathName) ? fallback : pathName
+    }
+
+    private static func looksOpaque(_ value: String) -> Bool {
+        UUID(uuidString: value) != nil || value.contains("/private/var/mobile/Containers/")
+    }
+}
+
+private extension String {
+    var nilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -223,7 +415,7 @@ struct VQPanel<Content: View>: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(VQTheme.accent)
                 }
-                Text(title)
+                Text(L10n.tr(title))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
                 Spacer()
@@ -255,7 +447,7 @@ struct StatusPill: View {
     let tint: Color
 
     var body: some View {
-        Text(title)
+        Text(L10n.tr(title))
             .font(.caption2.weight(.semibold))
             .foregroundStyle(tint)
             .lineLimit(1)
@@ -266,83 +458,272 @@ struct StatusPill: View {
     }
 }
 
-struct MetricTile: View {
-    let metric: CommandMetric
+struct ApprovalActionButtons: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let approval: CommandApproval
+    var compact = false
+    @State private var isReviewingApproval = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: metric.symbol)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(metric.tint)
-                Spacer()
+        HStack(spacing: 8) {
+            Button {
+                store.reject(approval)
+            } label: {
+                Label(L10n.tr("Reject"), systemImage: "xmark")
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.bordered)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(metric.value)
-                    .font(.system(size: 34, weight: .semibold, design: .default))
-                    .foregroundStyle(VQTheme.ink)
-                    .minimumScaleFactor(0.75)
-                Text(metric.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(VQTheme.ink)
-                Text(metric.detail)
-                    .font(.footnote)
-                    .foregroundStyle(VQTheme.secondaryText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+            Button {
+                if approval.requiresPreApprovalReview {
+                    isReviewingApproval = true
+                } else {
+                    store.approve(approval)
+                }
+            } label: {
+                Label(L10n.tr("Approve"), systemImage: "checkmark")
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.borderedProminent)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .panelBackground()
+        .buttonBorderShape(.roundedRectangle(radius: 8))
+        .controlSize(compact ? .small : .regular)
+        .font((compact ? Font.caption2 : Font.footnote).weight(.semibold))
+        .sheet(isPresented: $isReviewingApproval) {
+            ApprovalReviewSheet(
+                approval: approval,
+                diffs: store.diffEntries(for: approval.runID),
+                onReject: {
+                    isReviewingApproval = false
+                    store.reject(approval)
+                },
+                onApprove: {
+                    isReviewingApproval = false
+                    store.approve(approval)
+                }
+            )
+        }
     }
 }
 
-struct CommandComposer: View {
-    @EnvironmentObject private var store: CommandCenterStore
+private struct ApprovalReviewSheet: View {
+    let approval: CommandApproval
+    let diffs: [CommandDiffEntry]
+    let onReject: () -> Void
+    let onApprove: () -> Void
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            RuntimeSegmentedControl()
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: approval.symbolName)
+                    .font(.title3.weight(.semibold))
+                    .frame(width: 36, height: 36)
+                    .foregroundStyle(approval.tint)
+                    .background(approval.tint.opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(L10n.tr("Review Before Approving"))
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    Text(approval.detail)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer()
+            }
+
+            ScrollView {
+                ApprovalImpactPreview(approval: approval, diffs: diffs, compact: false, includePatch: true)
+                    .padding(.vertical, 2)
+            }
 
             HStack(spacing: 10) {
-                Image(systemName: "sparkle.magnifyingglass")
-                    .foregroundStyle(VQTheme.accent)
-                TextField("What should the agents do next?", text: $store.commandDraft, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...3)
-                    .font(.body)
-                    .onSubmit {
-                        store.submitDraft()
-                    }
-                Button(action: store.submitDraft) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
+                Button {
+                    dismiss()
+                    onReject()
+                } label: {
+                    Label(L10n.tr("Reject"), systemImage: "xmark")
+                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(VQTheme.accent)
-                .help("Send")
-            }
-            .padding(12)
-            .background(VQTheme.control.opacity(0.74))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(VQTheme.hairline, lineWidth: 1)
-            }
+                .buttonStyle(.bordered)
 
-            HStack(spacing: 8) {
-                QuickCommandButton(title: "Status", symbol: "checklist", command: "git status --short")
-                QuickCommandButton(title: "Diff", symbol: "plus.forwardslash.minus", command: "git diff --stat")
-                QuickCommandButton(title: "Build", symbol: "hammer", command: "xcodebuild -project Veqral.xcodeproj -scheme Veqral -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' CODE_SIGNING_ALLOWED=NO build")
-                QuickCommandButton(title: "Remote", symbol: "arrow.triangle.pull", command: "git remote -v")
+                Button {
+                    dismiss()
+                    onApprove()
+                } label: {
+                    Label(L10n.tr("Confirm Approval"), systemImage: "checkmark.shield")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
             }
-
-            CommandAttachmentControls()
+            .buttonBorderShape(.roundedRectangle(radius: 8))
         }
-        .padding(14)
-        .commandComposerBackground()
+        .padding(20)
+        .frame(maxWidth: 620, maxHeight: 680)
+        .background(VQTheme.canvas)
+    }
+}
+
+struct ApprovalImpactPreview: View {
+    let approval: CommandApproval
+    let diffs: [CommandDiffEntry]
+    var compact = false
+    var includePatch = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 8 : 12) {
+            ImpactSectionTitle(title: L10n.tr("What Will Run"), symbol: "terminal")
+            Text(approval.command.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank ?? L10n.tr("Command is not available."))
+                .font((compact ? Font.caption2 : Font.caption).monospaced())
+                .foregroundStyle(VQTheme.ink)
+                .textSelection(.enabled)
+                .lineLimit(compact ? 4 : 12)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(VQTheme.terminal.opacity(0.92))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            ImpactSectionTitle(title: L10n.tr("Affected Files"), symbol: "doc.text.magnifyingglass")
+            if diffs.isEmpty {
+                Text(L10n.tr("No diff collected for this approval yet."))
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(VQTheme.control.opacity(0.42))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("\(diffs.count) \(L10n.tr("files changed"))")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(VQTheme.ink)
+                        Spacer()
+                        Text("+\(diffs.map(\.additions).reduce(0, +))  -\(diffs.map(\.deletions).reduce(0, +))")
+                            .font(.caption.monospaced().weight(.semibold))
+                            .foregroundStyle(VQTheme.secondaryText)
+                    }
+
+                    ForEach(diffs.prefix(compact ? 3 : 8)) { diff in
+                        ApprovalDiffRow(diff: diff, includePatch: includePatch)
+                    }
+                }
+                .padding(10)
+                .background(VQTheme.control.opacity(0.42))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+    }
+}
+
+private struct ImpactSectionTitle: View {
+    let title: String
+    let symbol: String
+
+    var body: some View {
+        Label(title, systemImage: symbol)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(VQTheme.secondaryText)
+    }
+}
+
+private struct ApprovalDiffRow: View {
+    let diff: CommandDiffEntry
+    let includePatch: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: diff.path.hasSuffix("json") ? "curlybraces" : "doc.text")
+                    .font(.caption)
+                    .frame(width: 22, height: 22)
+                    .foregroundStyle(diff.deletions > 12 ? VQTheme.red : VQTheme.accent)
+                    .background((diff.deletions > 12 ? VQTheme.red : VQTheme.accent).opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+
+                Text(diff.path)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(VQTheme.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text("+\(diff.additions)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(VQTheme.green)
+                Text("-\(diff.deletions)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(diff.deletions == 0 ? VQTheme.secondaryText : VQTheme.red)
+            }
+
+            if includePatch,
+               let patch = diff.patch?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !patch.isEmpty {
+                Text(String(patch.prefix(1_500)))
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .textSelection(.enabled)
+                    .lineLimit(18)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(VQTheme.canvas.opacity(0.64))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+    }
+}
+
+struct RunApprovalCallout: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let approval: CommandApproval
+    var compact = false
+
+    private var tint: Color {
+        approval.tintName == "amber" ? VQTheme.amber : VQTheme.red
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 8 : 10) {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: approval.symbolName)
+                    .frame(width: compact ? 24 : 30, height: compact ? 24 : 30)
+                    .foregroundStyle(tint)
+                    .background(tint.opacity(0.13))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(L10n.tr("Approval required"))
+                        .font((compact ? Font.caption : Font.subheadline).weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    Text(approval.detail)
+                        .font(compact ? .caption2 : .caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .lineLimit(compact ? 2 : 3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+
+            ApprovalImpactPreview(
+                approval: approval,
+                diffs: store.diffEntries(for: approval.runID),
+                compact: compact,
+                includePatch: false
+            )
+
+            ApprovalActionButtons(approval: approval, compact: compact)
+        }
+        .padding(compact ? 9 : 11)
+        .background(tint.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(tint.opacity(0.48), lineWidth: 1)
+        }
     }
 }
 
@@ -357,13 +738,13 @@ struct CommandAttachmentControls: View {
                 Button {
                     requestCamera()
                 } label: {
-                    Label("Camera", systemImage: "camera")
+                    Label(L10n.tr("Camera"), systemImage: "camera")
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle(radius: 8))
 
                 PhotosPicker(selection: $selectedPhoto, matching: .images, photoLibrary: .shared()) {
-                    Label("Photos", systemImage: "photo.on.rectangle")
+                    Label(L10n.tr("Photos"), systemImage: "photo.on.rectangle")
                 }
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -372,7 +753,7 @@ struct CommandAttachmentControls: View {
                     Button(role: .destructive) {
                         store.clearAttachments()
                     } label: {
-                        Label("Clear", systemImage: "xmark.circle")
+                        Label(L10n.tr("Clear"), systemImage: "xmark.circle")
                     }
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.roundedRectangle(radius: 8))
@@ -446,7 +827,7 @@ struct CommandAttachmentControls: View {
 
     private func requestCamera() {
         guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
-            store.attachmentMessage = "Camera is not available on this device. Use Photos instead."
+                    store.attachmentMessage = L10n.tr("Camera is not available on this device. Use Photos instead.")
             return
         }
 
@@ -459,16 +840,16 @@ struct CommandAttachmentControls: View {
                     if granted {
                         showCamera = true
                     } else {
-                        store.attachmentMessage = "Camera permission denied. Enable it in Settings to attach captures."
+                        store.attachmentMessage = L10n.tr("Camera permission denied. Enable it in Settings to attach captures.")
                     }
                 }
             }
         case .denied:
-            store.attachmentMessage = "Camera permission denied. Enable it in Settings to attach captures."
+            store.attachmentMessage = L10n.tr("Camera permission denied. Enable it in Settings to attach captures.")
         case .restricted:
-            store.attachmentMessage = "Camera access is restricted on this device."
+            store.attachmentMessage = L10n.tr("Camera access is restricted on this device.")
         @unknown default:
-            store.attachmentMessage = "Camera authorization state is unavailable."
+            store.attachmentMessage = L10n.tr("Camera authorization state is unavailable.")
         }
     }
 }
@@ -571,6 +952,112 @@ private struct CameraCaptureView: UIViewControllerRepresentable {
     }
 }
 
+struct QRCodeScannerView: UIViewControllerRepresentable {
+    let onCode: (String) -> Void
+    let onFailure: (String) -> Void
+
+    func makeUIViewController(context: Context) -> QRCodeScannerController {
+        QRCodeScannerController(onCode: onCode, onFailure: onFailure)
+    }
+
+    func updateUIViewController(_ uiViewController: QRCodeScannerController, context: Context) {}
+}
+
+final class QRCodeScannerController: UIViewController, @preconcurrency AVCaptureMetadataOutputObjectsDelegate {
+    private let onCode: (String) -> Void
+    private let onFailure: (String) -> Void
+    private let session = AVCaptureSession()
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var didCapture = false
+
+    init(onCode: @escaping (String) -> Void, onFailure: @escaping (String) -> Void) {
+        self.onCode = onCode
+        self.onFailure = onFailure
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = UIColor.black
+        configureSession()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        previewLayer?.frame = view.bounds
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        guard !session.isRunning else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [session] in
+            session.startRunning()
+        }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        guard session.isRunning else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [session] in
+            session.stopRunning()
+        }
+    }
+
+    private func configureSession() {
+        guard let device = AVCaptureDevice.default(for: .video) else {
+            onFailure(L10n.tr("Camera is not available on this device. Use manual pairing instead."))
+            return
+        }
+
+        do {
+            let input = try AVCaptureDeviceInput(device: device)
+            guard session.canAddInput(input) else {
+                onFailure(L10n.tr("Camera input is unavailable. Use manual pairing instead."))
+                return
+            }
+            session.addInput(input)
+        } catch {
+            onFailure("\(L10n.tr("Camera could not start.")) \(error.localizedDescription)")
+            return
+        }
+
+        let output = AVCaptureMetadataOutput()
+        guard session.canAddOutput(output) else {
+            onFailure(L10n.tr("QR scanning is unavailable. Use manual pairing instead."))
+            return
+        }
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: .main)
+        output.metadataObjectTypes = output.availableMetadataObjectTypes.contains(.qr) ? [.qr] : []
+
+        let preview = AVCaptureVideoPreviewLayer(session: session)
+        preview.videoGravity = .resizeAspectFill
+        preview.frame = view.bounds
+        view.layer.insertSublayer(preview, at: 0)
+        previewLayer = preview
+    }
+
+    func metadataOutput(
+        _ output: AVCaptureMetadataOutput,
+        didOutput metadataObjects: [AVMetadataObject],
+        from connection: AVCaptureConnection
+    ) {
+        guard !didCapture,
+              let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+              object.type == .qr,
+              let value = object.stringValue else {
+            return
+        }
+        didCapture = true
+        session.stopRunning()
+        onCode(value)
+    }
+}
+
 struct RuntimeSegmentedControl: View {
     @EnvironmentObject private var store: CommandCenterStore
 
@@ -599,83 +1086,6 @@ struct RuntimeSegmentedControl: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(VQTheme.hairline, lineWidth: 1)
         }
-    }
-}
-
-struct QuickCommandButton: View {
-    @EnvironmentObject private var store: CommandCenterStore
-    let title: String
-    let symbol: String
-    let command: String
-
-    var body: some View {
-        Button {
-            store.submitCommand(command, runtime: .localShell)
-        } label: {
-            Label(title, systemImage: symbol)
-                .font(.footnote.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
-        .buttonStyle(.bordered)
-        .buttonBorderShape(.roundedRectangle(radius: 8))
-        .tint(VQTheme.steel)
-    }
-}
-
-private extension View {
-    func commandComposerBackground() -> some View {
-        background {
-            ZStack {
-                VQTheme.elevated
-                LinearGradient(
-                    colors: [Color.white.opacity(0.060), Color.clear],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(VQTheme.hairline.opacity(0.95), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.18), radius: 18, x: 0, y: 10)
-    }
-}
-
-struct RunRow: View {
-    let run: AgentRun
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: run.phaseSymbol)
-                    .frame(width: 28, height: 28)
-                    .foregroundStyle(run.status.tint)
-                    .background(run.status.tint.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(run.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(VQTheme.ink)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text("\(run.agent) · \(run.device) · \(run.model)")
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                }
-
-                Spacer()
-                StatusPill(title: run.status.title, tint: run.status.tint)
-            }
-
-            ProgressView(value: run.progress)
-                .tint(run.status.tint)
-        }
-        .padding(.vertical, 4)
     }
 }
 
@@ -727,18 +1137,6 @@ struct CommandRunListRow: View {
     }
 }
 
-extension AgentRun {
-    var phaseSymbol: String {
-        switch phase {
-        case .requirements: "checklist"
-        case .implementation: "hammer"
-        case .testing: "testtube.2"
-        case .github: "point.3.connected.trianglepath.dotted"
-        case .deploy: "paperplane"
-        }
-    }
-}
-
 extension CommandRun {
     var phaseSymbol: String {
         switch phase {
@@ -751,43 +1149,6 @@ extension CommandRun {
     }
 }
 
-struct DeviceRow: View {
-    let device: Device
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(device.name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(VQTheme.ink)
-                    Text("\(device.type) · \(device.hostName)")
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                }
-                Spacer()
-                StatusPill(title: device.status.title, tint: device.status.tint)
-            }
-
-            HStack {
-                Label(device.tailscaleIP, systemImage: "network")
-                Spacer()
-                if let battery = device.battery {
-                    Label(battery, systemImage: "battery.75percent")
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(VQTheme.secondaryText)
-
-            ProgressView(value: device.workload)
-                .tint(device.status.tint)
-
-            FlowLayout(items: device.capabilities)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
 struct RemoteDeviceSummaryRow: View {
     let device: RemoteDeviceRecord
     let isCurrent: Bool
@@ -796,8 +1157,8 @@ struct RemoteDeviceSummaryRow: View {
         HStack(alignment: .center, spacing: 10) {
             Image(systemName: isCurrent ? "iphone.gen3" : "rectangle.connected.to.line.below")
                 .frame(width: 28, height: 28)
-                .foregroundStyle(device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green)
-                .background((device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green).opacity(0.12))
+                .foregroundStyle(device.lastSeenAt == nil ? VQTheme.unavailable : VQTheme.green)
+                .background((device.lastSeenAt == nil ? VQTheme.unavailable : VQTheme.green).opacity(0.12))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             VStack(alignment: .leading, spacing: 3) {
                 Text(device.name)
@@ -811,57 +1172,9 @@ struct RemoteDeviceSummaryRow: View {
                     .truncationMode(.middle)
             }
             Spacer()
-            StatusPill(title: device.lastSeenAt == nil ? "Paired" : "Seen", tint: device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green)
+            StatusPill(title: device.lastSeenAt == nil ? "Paired" : "Seen", tint: device.lastSeenAt == nil ? VQTheme.unavailable : VQTheme.green)
         }
         .padding(.vertical, 4)
-    }
-}
-
-struct ContextPackageIndicator: View {
-    let title: String
-    let subtitle: String
-    let items: [String]
-
-    init(
-        title: String = "Shared Context Package",
-        subtitle: String = "Same memory, requirements, policies, repo context, and output contract are passed to every role.",
-        items: [String] = ContextPackage.items
-    ) {
-        self.title = title
-        self.subtitle = subtitle
-        self.items = items
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "archivebox")
-                    .frame(width: 28, height: 28)
-                    .foregroundStyle(VQTheme.green)
-                    .background(VQTheme.green.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(VQTheme.ink)
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
-                StatusPill(title: "Unified", tint: VQTheme.green)
-            }
-
-            FlowLayout(items: items)
-        }
-        .padding(12)
-        .background(VQTheme.green.opacity(0.055))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(VQTheme.green.opacity(0.18), lineWidth: 1)
-        }
     }
 }
 
@@ -910,7 +1223,7 @@ struct FlowLayout: View {
     var body: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 82), spacing: 6)], alignment: .leading, spacing: 6) {
             ForEach(items, id: \.self) { item in
-                Text(item)
+                Text(L10n.tr(item))
                     .font(.caption2.weight(.medium))
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
@@ -925,71 +1238,13 @@ struct FlowLayout: View {
     }
 }
 
-struct ApprovalRow: View {
-    let approval: ApprovalRequest
-    let compact: Bool
-
-    init(_ approval: ApprovalRequest, compact: Bool = false) {
-        self.approval = approval
-        self.compact = compact
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: approval.riskType.symbol)
-                    .frame(width: 28, height: 28)
-                    .foregroundStyle(VQTheme.amber)
-                    .background(VQTheme.amber.opacity(0.14))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(approval.summary)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(VQTheme.ink)
-                    Text(approval.reason)
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(approval.action)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(VQTheme.steel)
-                        .lineLimit(2)
-                }
-            }
-
-            if !compact {
-                HStack {
-                    StatusPill(title: approval.riskType.title, tint: VQTheme.amber)
-                    Text(approval.affectedTarget)
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
-                }
-
-                HStack(spacing: 8) {
-                    StatusPill(title: "Review in Approvals", tint: VQTheme.accent)
-                    Text("Approve, reject, or follow up from the live approval queue.")
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .font(.footnote.weight(.semibold))
-            }
-        }
-        .padding(.vertical, 4)
-    }
-}
-
 struct KeyValueLine: View {
     let key: String
     let value: String
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(key)
+            Text(L10n.tr(key))
                 .font(.caption)
                 .foregroundStyle(VQTheme.secondaryText)
             Spacer(minLength: 16)
@@ -1001,10 +1256,47 @@ struct KeyValueLine: View {
     }
 }
 
+struct CompactKeyValueLine: View {
+    let key: String
+    let value: String
+    var monospaced = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(L10n.tr(key))
+                .font(.caption)
+                .foregroundStyle(VQTheme.secondaryText)
+            Spacer(minLength: 16)
+            Text(value)
+                .font(monospaced ? .caption.monospaced().weight(.semibold) : .caption.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+    }
+}
+
 struct EmptyDivider: View {
     var body: some View {
         Rectangle()
             .fill(VQTheme.hairline)
             .frame(height: 1)
+    }
+}
+
+private extension CommandRuntime {
+    var commandPlaceholder: String {
+        switch self {
+        case .hermesAgent:
+            L10n.tr("Send instructions to Hermes...")
+        case .codexDirect:
+            L10n.tr("Send instructions to Codex...")
+        case .claudeDirect:
+            L10n.tr("Send instructions to Claude...")
+        case .localShell:
+            L10n.tr("Enter a shell command...")
+        }
     }
 }

@@ -44,6 +44,10 @@
 	<string>Veqral lets you attach camera captures to agent run instructions.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Veqral lets you attach selected images from Photos to agent run instructions.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Veqral uses the microphone only while you dictate a command draft.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Veqral converts dictated Japanese commands into editable text before sending.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

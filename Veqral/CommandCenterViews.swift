@@ -1,4 +1,11 @@
+import Foundation
 import SwiftUI
+#if canImport(AVFoundation)
+import AVFoundation
+#endif
+#if canImport(Speech)
+import Speech
+#endif
 
 struct AppearanceToggleButton: View {
     @EnvironmentObject private var store: CommandCenterStore
@@ -19,7 +26,7 @@ struct AppearanceToggleButton: View {
                 }
         }
         .buttonStyle(.plain)
-        .help("Refresh workspace")
+        .help(L10n.tr("Refresh workspace"))
     }
 }
 
@@ -29,9 +36,9 @@ struct CommandCenterSidebar: View {
 
     private var sidebarGroups: [(String, [AppSection])] {
         [
-            ("Command", AppSection.commandGroup),
-            ("Operations", AppSection.operationGroup),
-            ("System", AppSection.systemGroup)
+            (L10n.tr("Command"), AppSection.commandGroup),
+            (L10n.tr("Operations"), AppSection.operationGroup),
+            (L10n.tr("System"), AppSection.systemGroup)
         ]
     }
 
@@ -91,9 +98,9 @@ struct CommandCenterSidebar: View {
                         }
                     }
 
-                    SidebarSectionTitle("Favorites")
+                    SidebarSectionTitle(L10n.tr("Favorites"))
                     VStack(spacing: 10) {
-                        FavoriteRow(color: VQTheme.amber, title: store.workspace.projectName)
+                        FavoriteRow(color: VQTheme.amber, title: VQDisplay.workspaceName(store.workspace))
                         FavoriteRow(color: VQTheme.accent, title: store.workspace.branchLabel)
                         FavoriteRow(color: VQTheme.violet, title: store.workspace.cleanlinessLabel)
                     }
@@ -102,6 +109,31 @@ struct CommandCenterSidebar: View {
             }
 
             Spacer(minLength: 12)
+
+            Menu {
+                Picker(L10n.tr("App Language"), selection: $store.appLanguage) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.title).tag(language)
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "globe")
+                    Text(store.appLanguage.title)
+                        .lineLimit(1)
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2.weight(.semibold))
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VQTheme.secondaryText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(VQTheme.control.opacity(0.42))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
 
             HStack(spacing: 10) {
                 Circle()
@@ -113,10 +145,10 @@ struct CommandCenterSidebar: View {
                             .foregroundStyle(VQTheme.ink)
                     }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Local Operator")
+                    Text(L10n.tr("Local Operator"))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(VQTheme.ink)
-                    Text(store.workspace.deviceName)
+                    Text(VQDisplay.hostName(store))
                         .font(.caption2)
                         .foregroundStyle(VQTheme.secondaryText)
                         .lineLimit(1)
@@ -156,6 +188,7 @@ struct CommandCenterRunView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    HostConnectionStrip()
                     CommandSubmitPanel()
 
                     if let run = store.selectedRun {
@@ -207,24 +240,22 @@ struct CommandCenterInspectorView: View {
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Run Inspector")
+                Text(L10n.tr("Run Inspector"))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
                     .padding(.top, 18)
 
-                InspectorPanel(title: "Approvals", count: store.pendingApprovals().count) {
+                InspectorPanel(title: L10n.tr("Approvals"), count: store.pendingApprovals().count) {
                     VStack(spacing: 8) {
                         let pending = store.pendingApprovals(limit: 3)
                         if pending.isEmpty {
-                            ForEach(approvalGuardrails) { guardrail in
-                                InspectorGuardrailRow(guardrail: guardrail)
-                            }
+                            InspectorGuardrailSummary()
                         } else {
                             ForEach(pending) { approval in
                                 InspectorApprovalRow(approval: approval)
                             }
                         }
-                        Button("View all approvals ->") {
+                        Button(L10n.tr("View all approvals ->")) {
                             selection = .approvals
                         }
                             .font(.caption.weight(.semibold))
@@ -234,32 +265,32 @@ struct CommandCenterInspectorView: View {
                     }
                 }
 
-                InspectorPanel(title: "Context Pack", trailing: "Unified") {
+                InspectorPanel(title: L10n.tr("Context Pack"), trailing: L10n.tr("Unified")) {
                     InspectorLinkedRow(
                         symbol: "doc.badge.gearshape",
-                        title: "\(store.workspace.projectName) Pack",
-                        detail: "\(ContextPackage.items.count) items - \(store.workspace.branchLabel)"
+                        title: "\(VQDisplay.workspaceName(store.workspace)) \(L10n.tr("Pack"))",
+                        detail: "\(ContextPackage.items.count) \(L10n.tr("items")) - \(store.workspace.branchLabel)"
                     )
                 }
 
-                InspectorPanel(title: "Assigned Agent") {
+                InspectorPanel(title: L10n.tr("Assigned Agent")) {
                     VStack(spacing: 8) {
-                        InspectorAgentRow(color: VQTheme.accent, title: "Hermes", detail: store.remoteHost.isPaired ? "Mac Host runtime" : "Pairing required", status: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber)
-                        InspectorAgentRow(color: VQTheme.ink, title: "Codex CLI", detail: "Configured through Hermes", status: store.remoteHost.isPaired ? VQTheme.accent : VQTheme.secondaryText)
-                        InspectorAgentRow(color: VQTheme.green, title: "Context", detail: "\(ContextPackage.items.count) package items", status: VQTheme.green)
+                        InspectorAgentRow(color: VQTheme.accent, title: "Hermes", detail: store.remoteHost.isPaired ? L10n.tr("Mac Host runtime") : L10n.tr("Pairing required"), status: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber)
+                        InspectorAgentRow(color: VQTheme.ink, title: "Codex CLI", detail: L10n.tr("Direct history is isolated"), status: store.remoteHost.isPaired ? VQTheme.secondaryText : VQTheme.unavailable)
+                        InspectorAgentRow(color: VQTheme.green, title: L10n.tr("Context"), detail: "\(ContextPackage.items.count) \(L10n.tr("package items"))", status: VQTheme.green)
                     }
                 }
 
-                InspectorPanel(title: "Mac Device") {
-                    InspectorLinkedRow(symbol: "laptopcomputer", title: store.workspace.deviceName, detail: store.workspace.hostName, trailing: store.workspace.canRunLocalCommands ? "Online" : "Waiting")
+                InspectorPanel(title: L10n.tr("Mac Device")) {
+                    InspectorLinkedRow(symbol: "laptopcomputer", title: VQDisplay.hostName(store), detail: store.workspace.hostName, trailing: store.workspace.canRunLocalCommands ? L10n.tr("Online") : L10n.tr("Waiting"))
                 }
 
-                InspectorPanel(title: "Model") {
+                InspectorPanel(title: L10n.tr("Model")) {
                     InspectorLinkedRow(
                         symbol: store.selectedRuntime.symbol,
                         title: store.selectedRuntime.title,
                         detail: store.selectedRuntime == .hermesAgent ? store.workspace.hermesLabel : store.workspace.remoteLabel,
-                        trailing: store.selectedRuntime == .hermesAgent && store.workspace.canRunHermes ? "Ready" : nil
+                        trailing: store.selectedRuntime == .hermesAgent && store.workspace.canRunHermes ? L10n.tr("Ready") : nil
                     )
                 }
             }
@@ -276,46 +307,43 @@ struct CommandCenterPhoneDashboard: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
-                    Text("Command")
+                    Text(L10n.tr("Command"))
                         .font(.system(size: 30, weight: .semibold))
                         .foregroundStyle(VQTheme.ink)
                     Spacer()
                     AppearanceToggleButton()
-                    NavigationLink(value: AppSection.chat) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 18, weight: .medium))
-                            .frame(width: 34, height: 34)
-                            .foregroundStyle(VQTheme.ink)
-                    }
-                    .buttonStyle(.plain)
                 }
                 .padding(.top, 8)
 
-                PhoneSectionHeader(title: "Active Runs", count: nil)
+                HostConnectionStrip()
+
+                let visibleRuns = Array(store.visibleRuns().prefix(5))
+                PhoneSectionHeader(title: L10n.tr("Active Runs"), count: nil, showAction: !visibleRuns.isEmpty)
                 VStack(spacing: 0) {
-                    ForEach(Array(store.runs.prefix(5))) { run in
+                    if visibleRuns.isEmpty {
+                        PhoneEmptyState(symbol: "play.rectangle", text: L10n.tr("No active runs. Send an instruction to start one."))
+                    }
+                    ForEach(visibleRuns) { run in
                         PhoneRunRow(run: run)
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 store.selectRun(run.id)
                             }
-                        if run.id != store.runs.prefix(5).last?.id {
+                        if run.id != visibleRuns.last?.id {
                             Divider().overlay(VQTheme.hairline)
                         }
                     }
                 }
                 .commandPanel()
 
-                PhoneSectionHeader(title: store.selectedRuntime.title, count: nil, showAction: false)
+                PhoneSectionHeader(title: store.selectedRuntime.dashboardSectionTitle, count: nil, showAction: false)
                 PhoneComposer()
 
-                PhoneSectionHeader(title: "Approvals", count: store.pendingApprovals().count)
+                PhoneSectionHeader(title: L10n.tr("Approvals"), count: store.pendingApprovals().count)
                 VStack(spacing: 8) {
                     let pending = store.pendingApprovals(limit: 3)
                     if pending.isEmpty {
-                        ForEach(approvalGuardrails) { guardrail in
-                            CompactGuardrailStrip(guardrail: guardrail)
-                        }
+                        ProtectionSummaryCard()
                     } else {
                         ForEach(pending) { approval in
                             CompactApprovalStrip(approval: approval)
@@ -323,10 +351,24 @@ struct CommandCenterPhoneDashboard: View {
                     }
                 }
 
-                PhoneSectionHeader(title: "Devices", count: nil, trailing: store.remoteHost.isPaired ? "Connected" : "Pair Host")
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                    PhoneDeviceCard(name: store.remoteHost.name.isEmpty ? store.workspace.deviceName : store.remoteHost.name, detail: store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : "Not paired", isOnline: store.remoteHost.isPaired)
-                    PhoneDeviceCard(name: store.workspace.projectName, detail: store.workspace.statusSummary, isOnline: store.workspace.errorMessage == nil)
+                let visibleDevices = Array(store.visibleRemoteDevices.prefix(4))
+                PhoneSectionHeader(title: L10n.tr("Devices"), count: visibleDevices.count, trailing: store.remoteHost.isPaired ? L10n.tr("Connected") : L10n.tr("Pair Mac Host"))
+                if visibleDevices.isEmpty {
+                    PhoneEmptyState(
+                        symbol: "iphone.slash",
+                        text: store.remoteHost.isPaired ? L10n.tr("No other paired devices yet.") : L10n.tr("Pair a Mac Host to list trusted iPhone/iPad clients.")
+                    )
+                    .commandPanel()
+                } else {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                        ForEach(visibleDevices) { device in
+                            PhoneDeviceCard(
+                                name: device.name,
+                                detail: device.lastSeenAt == nil ? L10n.tr("Paired") : L10n.tr("Seen"),
+                                status: device.lastSeenAt == nil ? .offline : .online
+                            )
+                        }
+                    }
                 }
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
@@ -365,6 +407,10 @@ private enum WorkSurface: String, CaseIterable, Identifiable {
         case .preview: "eye"
         }
     }
+
+    var title: String {
+        L10n.tr(rawValue)
+    }
 }
 
 private struct ApprovalGuardrail: Identifiable {
@@ -376,10 +422,59 @@ private struct ApprovalGuardrail: Identifiable {
 }
 
 private let approvalGuardrails = [
-    ApprovalGuardrail(id: "delete", title: "File deletion guarded", detail: "rm, git clean, reset --hard", risk: "Risk: High", tint: VQTheme.red),
-    ApprovalGuardrail(id: "secrets", title: "Secrets require review", detail: ".env, token, keychain, private key", risk: "Risk: Medium", tint: VQTheme.amber),
-    ApprovalGuardrail(id: "screen", title: "Screen control paused", detail: "open, osascript, screenshot", risk: "Risk: Medium", tint: VQTheme.red)
+    ApprovalGuardrail(id: "delete", title: L10n.tr("File deletion"), detail: "rm, git clean, reset --hard", risk: L10n.tr("High risk only"), tint: VQTheme.red),
+    ApprovalGuardrail(id: "secrets", title: L10n.tr("Secrets"), detail: ".env, token, keychain, private key", risk: L10n.tr("Review required"), tint: VQTheme.amber),
+    ApprovalGuardrail(id: "screen", title: L10n.tr("Screen control"), detail: "open, osascript, screenshot", risk: L10n.tr("Review required"), tint: VQTheme.amber)
 ]
+
+private struct ProtectionSummaryCard: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield")
+                    .foregroundStyle(VQTheme.secondaryText)
+                Text(L10n.tr("Protection active"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                StatusPill(title: L10n.tr("No pending approvals."), tint: VQTheme.unavailable)
+            }
+            Text(L10n.tr("File deletion, secrets, screen control, billing, and production changes pause for review."))
+                .font(.caption2)
+                .foregroundStyle(VQTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .background(VQTheme.control.opacity(0.42))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
+        }
+    }
+}
+
+private struct PhoneEmptyState: View {
+    let symbol: String
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: symbol)
+                .font(.caption)
+                .frame(width: 24, height: 24)
+                .foregroundStyle(VQTheme.secondaryText)
+                .background(VQTheme.control.opacity(0.58))
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(VQTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+        }
+        .padding(10)
+    }
+}
 
 private struct SidebarActionRow: View {
     let title: String
@@ -396,12 +491,12 @@ private struct SidebarActionRow: View {
                     .font(.system(size: 15, weight: .medium))
                     .frame(width: 22)
                     .foregroundStyle(isSelected ? VQTheme.accent : VQTheme.ink)
-                Text(title)
+                Text(L10n.tr(title))
                     .font(.subheadline.weight(isSelected ? .semibold : .medium))
                     .foregroundStyle(isSelected ? VQTheme.ink : VQTheme.secondaryText)
                     .lineLimit(1)
                 Spacer()
-                if let count {
+                if let count, count > 0 {
                     Text("\(count)")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.white)
@@ -478,25 +573,25 @@ private struct RunHeader: View {
                         store.selectRun(newest)
                     }
                 } label: {
-                    Label("Back to Active Runs", systemImage: "chevron.left")
+                    Label(L10n.tr("Back to Active Runs"), systemImage: "chevron.left")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(VQTheme.accent)
                 }
                 .buttonStyle(.plain)
                 Spacer()
                 Button(action: store.pauseOrResumeSelectedRun) {
-                    Label(run.status == .waiting ? "Resume" : "Pause", systemImage: run.status == .waiting ? "play" : "pause")
+                    Label(L10n.tr(run.status == .waiting ? "Resume" : "Pause"), systemImage: run.status == .waiting ? "play" : "pause")
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(CommandButtonStyle())
                 Menu {
-                    Button("Refresh workspace") {
+                    Button(L10n.tr("Refresh workspace")) {
                         store.refreshWorkspace()
                     }
-                    Button(run.status == .waiting ? "Resume run" : "Pause run") {
+                    Button(L10n.tr(run.status == .waiting ? "Resume run" : "Pause run")) {
                         store.pauseOrResumeSelectedRun()
                     }
-                    Button("Show latest run") {
+                    Button(L10n.tr("Show latest run")) {
                         if let newest = store.runs.first?.id {
                             store.selectRun(newest)
                         }
@@ -519,16 +614,104 @@ private struct RunHeader: View {
             }
 
             HStack(spacing: 10) {
-                Label(store.workspace.projectName, systemImage: "doc.text")
+                Label(VQDisplay.workspaceName(store.workspace), systemImage: "doc.text")
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(run.runtimeOrDefault.title)
-                Text("Started \(run.elapsedLabel)")
-                Text("Run ID \(run.shortID)")
+                Text("\(L10n.tr("Started")) \(run.elapsedLabel)")
+                Text("\(L10n.tr("Run ID")) \(run.shortID)")
                 Image(systemName: "doc.on.doc")
             }
             .font(.caption)
             .foregroundStyle(VQTheme.secondaryText)
+
+            if let usage = run.usage, usage.hasDisplayValues {
+                RunUsageSummary(usage: usage)
+            }
+
+            if let approval = store.pendingApproval(for: run.id) {
+                RunApprovalCallout(approval: approval)
+            }
+        }
+    }
+}
+
+private struct RunUsageSummary: View {
+    let usage: CommandRunUsage
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                if let input = usage.inputTokens {
+                    RunUsageChip(title: L10n.tr("Input Tokens"), value: formatTokens(input), symbol: "arrow.down.left")
+                }
+                if let output = usage.outputTokens {
+                    RunUsageChip(title: L10n.tr("Output Tokens"), value: formatTokens(output), symbol: "arrow.up.right")
+                }
+                if let reasoning = usage.reasoningTokens {
+                    RunUsageChip(title: L10n.tr("Reasoning Tokens"), value: formatTokens(reasoning), symbol: "brain")
+                }
+                if let total = usage.totalTokensOrDerived {
+                    RunUsageChip(title: L10n.tr("Total Tokens"), value: formatTokens(total), symbol: "sum")
+                }
+                if let cacheRead = usage.cacheReadTokens {
+                    RunUsageChip(title: L10n.tr("Cache Read"), value: formatTokens(cacheRead), symbol: "externaldrive")
+                }
+                if let cacheWrite = usage.cacheWriteTokens {
+                    RunUsageChip(title: L10n.tr("Cache Write"), value: formatTokens(cacheWrite), symbol: "square.and.pencil")
+                }
+                if let cost = usage.costUSD {
+                    RunUsageChip(
+                        title: L10n.tr(usage.actualCostUSD == nil ? "Estimated Cost" : "Actual Cost"),
+                        value: formatCost(cost),
+                        symbol: "dollarsign.circle"
+                    )
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .accessibilityLabel(L10n.tr("Run Usage"))
+    }
+
+    private func formatTokens(_ value: Int) -> String {
+        Self.tokenFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+
+    private func formatCost(_ value: Double) -> String {
+        value < 0.0001 ? String(format: "$%.6f", value) : String(format: "$%.4f", value)
+    }
+
+    private static let tokenFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        return formatter
+    }()
+}
+
+private struct RunUsageChip: View {
+    let title: String
+    let value: String
+    let symbol: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.caption2.weight(.semibold))
+            Text(title)
+            Text(value)
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+        }
+        .font(.caption)
+        .foregroundStyle(VQTheme.secondaryText)
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .background(VQTheme.control)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
         }
     }
 }
@@ -538,11 +721,11 @@ private struct RunPhaseTracker: View {
 
     private var steps: [(String, String, Color, Bool)] {
         [
-            ("Plan", run.progress > 0.0 ? "Ready" : "Pending", VQTheme.green, true),
-            ("Implement", run.status == .failed ? "Failed" : "In Progress", run.status == .failed ? VQTheme.red : VQTheme.green, run.progress > 0.1),
-            ("Test", run.status == .complete ? "Complete" : "In Progress", run.status == .complete ? VQTheme.green : VQTheme.accent, run.progress > 0.55),
-            ("Review", run.status == .approval ? "Approval" : "Pending", run.status == .approval ? VQTheme.amber : VQTheme.mutedText, run.status == .approval),
-            ("Complete", run.status == .complete ? "Done" : "Pending", run.status == .complete ? VQTheme.green : VQTheme.mutedText, run.status == .complete)
+            (L10n.tr("Plan"), run.progress > 0.0 ? L10n.tr("Ready") : L10n.tr("Pending"), VQTheme.green, true),
+            (L10n.tr("Implementation"), run.status == .failed ? L10n.tr("Failed") : L10n.tr("In Progress"), run.status == .failed ? VQTheme.red : VQTheme.green, run.progress > 0.1),
+            (L10n.tr("Testing"), run.status == .complete ? L10n.tr("Complete") : L10n.tr("In Progress"), run.status == .complete ? VQTheme.green : VQTheme.accent, run.progress > 0.55),
+            (L10n.tr("Review"), run.status == .approval ? L10n.tr("Approval") : L10n.tr("Pending"), run.status == .approval ? VQTheme.amber : VQTheme.mutedText, run.status == .approval),
+            (L10n.tr("Complete"), run.status == .complete ? L10n.tr("Done") : L10n.tr("Pending"), run.status == .complete ? VQTheme.green : VQTheme.mutedText, run.status == .complete)
         ]
     }
 
@@ -595,13 +778,14 @@ private struct RunPhaseTracker: View {
 
 private struct CommandSubmitPanel: View {
     @EnvironmentObject private var store: CommandCenterStore
+    @State private var isVoiceInputPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             RuntimeSegmentedControl()
 
             HStack(spacing: 10) {
-                TextField(store.selectedRuntime == .hermesAgent ? "Ask Hermes to build, test, review, or explain..." : "Run a shell command on this Mac", text: $store.commandDraft, axis: .vertical)
+                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.subheadline)
                     .lineLimit(1...3)
@@ -612,21 +796,30 @@ private struct CommandSubmitPanel: View {
                         store.submitDraft()
                     }
 
+                Button {
+                    isVoiceInputPresented = true
+                } label: {
+                    Image(systemName: "mic")
+                        .font(.system(size: 15, weight: .bold))
+                }
+                .buttonStyle(CommandButtonStyle(tint: VQTheme.ink))
+                .help(L10n.tr("Voice input"))
+
                 Button(action: store.submitDraft) {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 15, weight: .bold))
                 }
                 .buttonStyle(CommandButtonStyle(tint: VQTheme.accent))
-                .help("Run")
+                .help(L10n.tr("Run"))
             }
 
             #if targetEnvironment(macCatalyst)
             HStack(spacing: 8) {
                 Image(systemName: store.selectedRuntime.symbol)
                 Text(store.selectedRuntime.title)
-                Text("in")
+                Text(L10n.tr("in"))
                 Image(systemName: "folder")
-                TextField("Working directory", text: $store.workingDirectory)
+                TextField(L10n.tr("Working directory"), text: $store.workingDirectory)
                     .textFieldStyle(.plain)
                     .font(.caption.monospaced())
                     .onSubmit {
@@ -636,15 +829,87 @@ private struct CommandSubmitPanel: View {
             .foregroundStyle(VQTheme.secondaryText)
             .padding(.horizontal, 4)
             #else
-            Text("On iPhone and iPad this creates a run. Execution starts after a Mac Host is connected.")
+            Text(L10n.tr("On iPhone and iPad this creates a run. Execution starts after a Mac Host is connected."))
                 .font(.caption)
                 .foregroundStyle(VQTheme.secondaryText)
             #endif
 
+            SavedCommandDraftBar(compact: false)
             CommandAttachmentControls()
+            CommandRequirementMemo()
         }
         .padding(12)
         .commandPanel()
+        .sheet(isPresented: $isVoiceInputPresented) {
+            VoiceCommandSheet()
+                .environmentObject(store)
+        }
+    }
+}
+
+private struct CommandRequirementMemo: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @EnvironmentObject private var store: CommandCenterStore
+
+    private var selectedRunText: String {
+        guard let run = store.selectedRun else {
+            return L10n.tr("No run selected")
+        }
+        return run.title
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Label(L10n.tr("Requirement Memo"), systemImage: "checklist")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                StatusPill(title: store.selectedRuntime.shortTitle, tint: VQTheme.accent)
+            }
+
+            Text(selectedRunText)
+                .font(.caption)
+                .foregroundStyle(VQTheme.secondaryText)
+                .lineLimit(2)
+
+            HStack(spacing: 8) {
+                Button {
+                    store.commandDraft = L10n.tr("Summarize requirements, acceptance criteria, and risks for this work before implementing.")
+                } label: {
+                    Label(L10n.tr("Requirements"), systemImage: "text.badge.checkmark")
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                memoryControl
+
+                Spacer()
+            }
+            .font(.caption.weight(.semibold))
+        }
+        .padding(10)
+        .background(VQTheme.control.opacity(0.38))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var memoryControl: some View {
+        if horizontalSizeClass == .compact {
+            NavigationLink(value: AppSection.memory) {
+                Label(L10n.tr("Memory"), systemImage: "brain.head.profile")
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+        } else {
+            Button {
+                store.requestedSection = .memory
+            } label: {
+                Label(L10n.tr("Memory"), systemImage: "brain.head.profile")
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+        }
     }
 }
 
@@ -662,7 +927,7 @@ private struct WorkSurfacePicker: View {
                             .frame(width: 30, height: 30)
                             .background(selectedSurface == surface ? VQTheme.control : Color.clear)
                             .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        Text(surface.rawValue)
+                        Text(surface.title)
                     }
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(selectedSurface == surface ? VQTheme.accent : VQTheme.secondaryText)
@@ -724,7 +989,7 @@ private struct TerminalTranscript: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             if logs.isEmpty {
-                Text("まだログはありません。Commandを送るとここに表示されます。")
+                Text(L10n.tr("まだログはありません。Commandを送るとここに表示されます。"))
                     .foregroundStyle(VQTheme.secondaryText)
             }
             ForEach(logs) { line in
@@ -766,10 +1031,10 @@ private struct DiffListPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Diff")
+                    Text(L10n.tr("Diff"))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(VQTheme.ink)
-                    Text("\(diffs.count) files changed")
+                    Text("\(diffs.count) \(L10n.tr("files changed"))")
                         .font(.caption)
                         .foregroundStyle(VQTheme.secondaryText)
                 }
@@ -780,7 +1045,7 @@ private struct DiffListPanel: View {
             }
 
             if diffs.isEmpty {
-                Text("No git diff yet. Point the Mac build at a git workspace to collect changed files.")
+                Text(L10n.tr("No git diff yet. Point the Mac build at a git workspace to collect changed files."))
                     .font(.caption)
                     .foregroundStyle(VQTheme.secondaryText)
             }
@@ -822,10 +1087,10 @@ private struct PreviewEmptyState: View {
             Image(systemName: "safari")
                 .font(.system(size: 48, weight: .light))
                 .foregroundStyle(VQTheme.accent)
-            Text("Preview is waiting for a local web target")
+            Text(L10n.tr("Preview is waiting for a local web target"))
                 .font(.headline)
                 .foregroundStyle(VQTheme.ink)
-            Text("After a Mac Host connects, screenshots and web previews appear here.")
+            Text(L10n.tr("After a Mac Host connects, screenshots and web previews appear here."))
                 .font(.caption)
                 .foregroundStyle(VQTheme.secondaryText)
                 .multilineTextAlignment(.center)
@@ -842,17 +1107,17 @@ private struct RunStatusBar: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 16) {
-                Label(run?.model ?? "Local Shell", systemImage: "asterisk.circle.fill")
+                Label(run?.model ?? L10n.tr("Local Shell"), systemImage: "asterisk.circle.fill")
                     .foregroundStyle(VQTheme.amber)
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
-                Label(run?.agent ?? "Local Mac", systemImage: "person.crop.circle")
+                Label(run?.agent ?? L10n.tr("Local Mac"), systemImage: "person.crop.circle")
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
-                Label(run?.elapsedLabel ?? "Waiting", systemImage: "timer")
+                Label(run?.elapsedLabel ?? L10n.tr("Waiting"), systemImage: "timer")
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
                 Label("\(Int((run?.progress ?? 0) * 100))%", systemImage: "gearshape")
                 Divider().frame(height: 20).overlay(VQTheme.hairline)
                 Circle().fill((run?.status ?? .waiting).tint).frame(width: 7, height: 7)
-                Text(run?.status.title ?? "Waiting")
+                Text(run?.status.title ?? L10n.tr("Waiting"))
             }
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
@@ -888,7 +1153,7 @@ private struct InspectorPanel<Content: View>: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(VQTheme.secondaryText)
                 Spacer()
-                if let count {
+                if let count, count > 0 {
                     Text("\(count)")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.white)
@@ -909,7 +1174,6 @@ private struct InspectorPanel<Content: View>: View {
 }
 
 private struct InspectorApprovalRow: View {
-    @EnvironmentObject private var store: CommandCenterStore
     let approval: CommandApproval
 
     private var tint: Color {
@@ -929,19 +1193,7 @@ private struct InspectorApprovalRow: View {
                 }
                 Spacer()
             }
-            HStack {
-                Spacer()
-                Button("Reject") {
-                    store.reject(approval)
-                }
-                    .buttonStyle(CommandButtonStyle())
-                Button {
-                    store.approve(approval)
-                } label: {
-                    Label("Approve", systemImage: "checkmark")
-                }
-                .buttonStyle(CommandButtonStyle(tint: VQTheme.accent))
-            }
+            ApprovalActionButtons(approval: approval, compact: true)
         }
         .padding(9)
         .background(tint.opacity(0.08))
@@ -974,7 +1226,7 @@ private struct InspectorGuardrailRow: View {
             }
             HStack(spacing: 6) {
                 Image(systemName: "lock.shield")
-                Text("Approval gate ready")
+                Text(L10n.tr("Approval gate ready"))
             }
             .font(.caption2.weight(.semibold))
             .foregroundStyle(VQTheme.secondaryText)
@@ -986,6 +1238,30 @@ private struct InspectorGuardrailRow: View {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .stroke(guardrail.tint.opacity(0.58), lineWidth: 1)
         }
+    }
+}
+
+private struct InspectorGuardrailSummary: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "lock.shield")
+                .frame(width: 28, height: 28)
+                .foregroundStyle(VQTheme.secondaryText)
+                .background(VQTheme.control.opacity(0.58))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(L10n.tr("Protection active"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Text(L10n.tr("High-risk actions pause here only when a real request appears."))
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+            }
+            Spacer()
+        }
+        .padding(9)
+        .background(VQTheme.control.opacity(0.42))
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
@@ -1069,7 +1345,7 @@ private struct PhoneSectionHeader: View {
             Text(title.uppercased())
                 .font(.caption.weight(.bold))
                 .foregroundStyle(VQTheme.secondaryText)
-            if let count {
+            if let count, count > 0 {
                 Text("\(count)")
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.white)
@@ -1088,32 +1364,39 @@ private struct PhoneSectionHeader: View {
 }
 
 private struct PhoneRunRow: View {
+    @EnvironmentObject private var store: CommandCenterStore
     let run: CommandRun
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "doc.badge.gearshape")
-                .font(.caption)
-                .frame(width: 24, height: 24)
-                .foregroundStyle(run.status.tint)
-                .background(run.status.tint.opacity(0.14))
-                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(run.title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(VQTheme.ink)
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    Circle().stroke(run.status.tint, lineWidth: 1).frame(width: 8, height: 8)
-                Text(run.phase.commandTitle)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.badge.gearshape")
+                    .font(.caption)
+                    .frame(width: 24, height: 24)
+                    .foregroundStyle(run.status.tint)
+                    .background(run.status.tint.opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(run.title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Circle().stroke(run.status.tint, lineWidth: 1).frame(width: 8, height: 8)
+                        Text(run.phase.commandTitle)
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
                 }
-                .font(.caption2)
-                .foregroundStyle(VQTheme.secondaryText)
+                Spacer()
+                Text(elapsed)
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
             }
-            Spacer()
-            Text(elapsed)
-                .font(.caption2)
-                .foregroundStyle(VQTheme.secondaryText)
+
+            if let approval = store.pendingApproval(for: run.id) {
+                RunApprovalCallout(approval: approval, compact: true)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
@@ -1126,18 +1409,30 @@ private struct PhoneRunRow: View {
 
 private struct PhoneComposer: View {
     @EnvironmentObject private var store: CommandCenterStore
+    @State private var isVoiceInputPresented = false
 
     var body: some View {
         VStack(spacing: 8) {
             RuntimeSegmentedControl()
 
             HStack(spacing: 8) {
-                TextField(store.selectedRuntime == .hermesAgent ? "Ask Hermes to build..." : "Run a shell command...", text: $store.commandDraft)
+                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft)
                     .font(.caption)
                     .textFieldStyle(.plain)
                     .onSubmit {
                         store.submitDraft()
                     }
+                Button {
+                    isVoiceInputPresented = true
+                } label: {
+                    Image(systemName: "mic")
+                        .font(.caption.weight(.bold))
+                        .frame(width: 28, height: 28)
+                        .foregroundStyle(VQTheme.ink)
+                        .background(VQTheme.control)
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(.plain)
                 Button(action: store.submitDraft) {
                     Image(systemName: "arrow.up")
                         .font(.caption.weight(.bold))
@@ -1154,16 +1449,22 @@ private struct PhoneComposer: View {
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             HStack {
-                CommandChip(title: "Implement", symbol: "chevron.left.forwardslash.chevron.right", command: "Implement the current approved requirements.")
-                CommandChip(title: "Test", symbol: "flask", command: "Run the relevant tests and fix failures if they are in scope.")
+                CommandChip(title: L10n.tr("Implementation"), symbol: "chevron.left.forwardslash.chevron.right", command: "Implement the current approved requirements.")
+                CommandChip(title: L10n.tr("Testing"), symbol: "flask", command: "Run the relevant tests and fix failures if they are in scope.")
                 CommandChip(title: "", symbol: "ellipsis", command: "Show available next actions for this project.")
                 Spacer()
             }
 
+            SavedCommandDraftBar(compact: true)
             CommandAttachmentControls()
+            CommandRequirementMemo()
         }
         .padding(8)
         .commandPanel()
+        .sheet(isPresented: $isVoiceInputPresented) {
+            VoiceCommandSheet()
+                .environmentObject(store)
+        }
     }
 }
 
@@ -1194,8 +1495,516 @@ private struct CommandChip: View {
     }
 }
 
-private struct CompactApprovalStrip: View {
+private struct VoiceCommandSheet: View {
     @EnvironmentObject private var store: CommandCenterStore
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var session = VoiceCommandSession()
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: session.phase.symbol)
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(session.phase.tint)
+                        .frame(width: 40, height: 40)
+                        .background(session.phase.tint.opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(session.phase.title)
+                            .font(.headline)
+                            .foregroundStyle(VQTheme.ink)
+                        Text(session.statusMessage)
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(L10n.tr("Raw Dictation"), systemImage: "waveform")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    Text(session.rawText.isEmpty ? L10n.tr("Listening text appears here.") : session.rawText)
+                        .font(.subheadline)
+                        .foregroundStyle(session.rawText.isEmpty ? VQTheme.secondaryText : VQTheme.ink)
+                        .frame(maxWidth: .infinity, minHeight: 78, alignment: .topLeading)
+                        .padding(10)
+                        .background(VQTheme.control.opacity(0.38))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(L10n.tr("Cleaned Command"), systemImage: "text.badge.checkmark")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    TextEditor(text: $session.cleanedText)
+                        .font(.subheadline)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 96)
+                        .padding(8)
+                        .background(VQTheme.control.opacity(0.38))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
+                if !session.cleanupNote.isEmpty {
+                    Text(session.cleanupNote)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 10) {
+                    Button(role: .cancel) {
+                        session.cancel()
+                        dismiss()
+                    } label: {
+                        Label(L10n.tr("Discard"), systemImage: "xmark")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Spacer()
+
+                    if session.phase == .listening {
+                        Button {
+                            stopAndClean()
+                        } label: {
+                            Label(L10n.tr("Stop"), systemImage: "stop.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    } else {
+                        Button {
+                            session.startListening()
+                        } label: {
+                            Label(L10n.tr(session.phase == .ready ? "Record Again" : "Start Recording"), systemImage: "mic.fill")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(session.phase == .cleaning)
+                    }
+
+                    Button {
+                        sendCleanedCommand()
+                    } label: {
+                        Label(L10n.tr("Send"), systemImage: "arrow.up")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!session.canSend)
+                }
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .font(.footnote.weight(.semibold))
+            }
+            .padding(18)
+            .frame(minWidth: 360, minHeight: 520)
+            .background(VQTheme.canvas.ignoresSafeArea())
+            .navigationTitle(L10n.tr("Voice Command"))
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(L10n.tr("Cancel")) {
+                        session.cancel()
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear {
+                if session.phase == .idle {
+                    session.startListening()
+                }
+            }
+            .onDisappear {
+                session.cancel()
+            }
+        }
+    }
+
+    private func stopAndClean() {
+        session.stopListening()
+        Task {
+            await cleanupWithAgent()
+        }
+    }
+
+    @MainActor
+    private func cleanupWithAgent() async {
+        let ruleBased = session.ruleBasedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ruleBased.isEmpty else { return }
+        session.beginCleaning()
+        guard store.remoteHost.isEnabled, store.remoteHost.isPaired else {
+            session.finishCleaning(text: ruleBased, note: L10n.tr("Mac Host is not connected. Using rule-based cleanup."))
+            return
+        }
+
+        do {
+            let response = try await RemoteHostClient(configuration: store.remoteHost).cleanupVoiceCommand(
+                RemoteVoiceCleanupRequest(
+                    rawText: session.rawText,
+                    ruleBasedText: ruleBased,
+                    preferredEngine: store.selectedRuntime.remoteEngine,
+                    workingDirectory: store.workingDirectory,
+                    provider: store.selectedRuntime == .hermesAgent ? store.selectedHermesProvider : nil,
+                    model: store.selectedRuntime == .hermesAgent ? store.selectedHermesModel : nil
+                )
+            )
+            let responseText = response.cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleaned = responseText.isEmpty ? ruleBased : responseText
+            let note = response.fallbackUsed ? L10n.tr("LLM cleanup was unavailable. Using rule-based cleanup.") : L10n.tr("LLM cleanup finished. Review before sending.")
+            session.finishCleaning(text: cleaned, note: note)
+        } catch {
+            session.finishCleaning(text: ruleBased, note: "\(L10n.tr("LLM cleanup failed. Using rule-based cleanup.")) \(error.localizedDescription)")
+        }
+    }
+
+    private func sendCleanedCommand() {
+        let cleaned = session.cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        store.commandDraft = cleaned
+        store.submitDraft()
+        dismiss()
+    }
+}
+
+@MainActor
+private final class VoiceCommandSession: NSObject, ObservableObject {
+    enum Phase: Equatable {
+        case idle
+        case listening
+        case cleaning
+        case ready
+        case error(String)
+
+        var title: String {
+            switch self {
+            case .idle:
+                L10n.tr("Voice Command")
+            case .listening:
+                L10n.tr("Listening")
+            case .cleaning:
+                L10n.tr("Cleaning")
+            case .ready:
+                L10n.tr("Ready")
+            case .error:
+                L10n.tr("Voice Error")
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .idle:
+                "mic"
+            case .listening:
+                "waveform"
+            case .cleaning:
+                "sparkles"
+            case .ready:
+                "checkmark.circle"
+            case .error:
+                "exclamationmark.triangle"
+            }
+        }
+
+        var tint: Color {
+            switch self {
+            case .idle:
+                VQTheme.steel
+            case .listening:
+                VQTheme.accent
+            case .cleaning:
+                VQTheme.amber
+            case .ready:
+                VQTheme.green
+            case .error:
+                VQTheme.red
+            }
+        }
+    }
+
+    @Published var phase: Phase = .idle
+    @Published var rawText: String = ""
+    @Published var ruleBasedText: String = ""
+    @Published var cleanedText: String = ""
+    @Published var cleanupNote: String = ""
+    @Published var statusMessage: String = L10n.tr("Tap stop when you finish speaking.")
+
+    var canSend: Bool {
+        phase == .ready && !cleanedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "ja-JP"))
+    private let audioEngine = AVAudioEngine()
+    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    #endif
+
+    func startListening() {
+        rawText = ""
+        ruleBasedText = ""
+        cleanedText = ""
+        cleanupNote = ""
+        statusMessage = L10n.tr("Requesting microphone and speech recognition permission.")
+
+        #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+        guard speechRecognizer?.isAvailable == true else {
+            fail(L10n.tr("Speech recognition is unavailable."))
+            return
+        }
+        SFSpeechRecognizer.requestAuthorization { [weak self] status in
+            Task { @MainActor in
+                guard let self else { return }
+                switch status {
+                case .authorized:
+                    do {
+                        try self.startAudioRecognition()
+                    } catch {
+                        self.fail(error.localizedDescription)
+                    }
+                case .denied:
+                    self.fail(L10n.tr("Speech recognition permission was denied."))
+                case .restricted:
+                    self.fail(L10n.tr("Speech recognition is restricted on this device."))
+                case .notDetermined:
+                    self.fail(L10n.tr("Speech recognition permission is not decided."))
+                @unknown default:
+                    self.fail(L10n.tr("Speech recognition is unavailable."))
+                }
+            }
+        }
+        #else
+        fail(L10n.tr("Voice input is available on iPhone and iPad."))
+        #endif
+    }
+
+    func stopListening() {
+        #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        recognitionRequest?.endAudio()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
+        ruleBasedText = VoiceCommandRuleCleaner.clean(rawText)
+        cleanedText = ruleBasedText
+        if ruleBasedText.isEmpty {
+            fail(L10n.tr("Dictation was too short."))
+        } else {
+            phase = .ready
+            statusMessage = L10n.tr("Review the command before sending.")
+        }
+    }
+
+    func beginCleaning() {
+        phase = .cleaning
+        statusMessage = L10n.tr("Cleaning dictated text with the selected agent.")
+    }
+
+    func finishCleaning(text: String, note: String) {
+        cleanedText = text
+        cleanupNote = note
+        phase = .ready
+        statusMessage = L10n.tr("Review the command before sending.")
+    }
+
+    func cancel() {
+        #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+        if audioEngine.isRunning {
+            audioEngine.stop()
+            audioEngine.inputNode.removeTap(onBus: 0)
+        }
+        recognitionRequest?.endAudio()
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        recognitionRequest = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
+    }
+
+    private func fail(_ message: String) {
+        cancel()
+        phase = .error(message)
+        statusMessage = message
+    }
+
+    #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+    private func startAudioRecognition() throws {
+        cancel()
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
+        try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        recognitionRequest = request
+
+        let inputNode = audioEngine.inputNode
+        let format = inputNode.outputFormat(forBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            request.append(buffer)
+        }
+
+        audioEngine.prepare()
+        try audioEngine.start()
+        phase = .listening
+        statusMessage = L10n.tr("Listening. Speak your command in Japanese.")
+
+        recognitionTask = speechRecognizer?.recognitionTask(with: request) { [weak self] result, error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let result {
+                    self.rawText = result.bestTranscription.formattedString
+                }
+                if let error {
+                    self.fail(error.localizedDescription)
+                }
+            }
+        }
+    }
+    #endif
+}
+
+private enum VoiceCommandRuleCleaner {
+    static func clean(_ rawText: String) -> String {
+        var text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "" }
+
+        let cancellationMarkers = ["やっぱなし", "今のなし", "さっきのなし", "いや違う", "じゃなくて", "取り消し", "戻して"]
+        if let range = latestRange(of: cancellationMarkers, in: text) {
+            text = String(text[range.upperBound...])
+        }
+
+        let fillerPattern = #"(えー|あー|えっと|うーん|なんか|まあ|その)[、。,\s　]*"#
+        text = text.replacingOccurrences(of: fillerPattern, with: "", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"[\s　]+"#, with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: " 。", with: "。")
+        text = text.replacingOccurrences(of: " 、", with: "、")
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func latestRange(of markers: [String], in text: String) -> Range<String.Index>? {
+        markers
+            .compactMap { text.range(of: $0, options: .backwards) }
+            .max { lhs, rhs in lhs.lowerBound < rhs.lowerBound }
+    }
+}
+
+private struct SavedCommandDraftBar: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let compact: Bool
+
+    private var visibleDrafts: [SavedCommandDraft] {
+        Array(store.savedCommandDrafts.prefix(compact ? 6 : 12))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label(L10n.tr("Saved Commands"), systemImage: "bookmark")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                Button {
+                    store.saveCurrentCommandDraft()
+                } label: {
+                    Image(systemName: "bookmark.badge.plus")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 28, height: 24)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(store.canSaveCurrentCommandDraft ? VQTheme.accent : VQTheme.secondaryText)
+                .disabled(!store.canSaveCurrentCommandDraft)
+                .help(L10n.tr("Save current command as a reusable draft"))
+            }
+
+            if visibleDrafts.isEmpty {
+                Text(L10n.tr("Saved command drafts appear here."))
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(2)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(visibleDrafts) { draft in
+                            SavedCommandDraftChip(draft: draft, compact: compact)
+                        }
+                    }
+                    .padding(.vertical, 1)
+                }
+            }
+
+            if !store.savedCommandDraftMessage.isEmpty {
+                Text(store.savedCommandDraftMessage)
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(1)
+            }
+        }
+        .padding(10)
+        .background(VQTheme.control.opacity(0.34))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct SavedCommandDraftChip: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let draft: SavedCommandDraft
+    let compact: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button {
+                store.insertSavedCommandDraft(draft)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: draft.runtime?.symbol ?? "text.badge.plus")
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(draft.title)
+                            .lineLimit(1)
+                        if !compact, let runtime = draft.runtime {
+                            Text(runtime.shortTitle)
+                                .font(.caption2)
+                                .foregroundStyle(VQTheme.secondaryText)
+                        }
+                    }
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+                .padding(.leading, 9)
+                .padding(.trailing, 7)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+            .help(L10n.tr("Insert saved command draft"))
+
+            Menu {
+                Button {
+                    store.insertSavedCommandDraft(draft)
+                } label: {
+                    Label(L10n.tr("Insert"), systemImage: "arrow.turn.down.left")
+                }
+                Button(role: .destructive) {
+                    store.deleteSavedCommandDraft(draft)
+                } label: {
+                    Label(L10n.tr("Delete"), systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .frame(width: 24, height: compact ? 24 : 30)
+            }
+            .buttonStyle(.plain)
+            .help(L10n.tr("Saved command actions"))
+        }
+        .background(VQTheme.control)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
+        }
+    }
+}
+
+private struct CompactApprovalStrip: View {
     let approval: CommandApproval
 
     private var tint: Color {
@@ -1211,13 +2020,11 @@ private struct CompactApprovalStrip: View {
                     .font(.caption2)
             }
             Spacer()
-            VStack(spacing: 6) {
+            VStack(alignment: .trailing, spacing: 6) {
                 Text(approval.risk)
                     .font(.caption2.weight(.semibold))
-                Button("Approve") {
-                    store.approve(approval)
-                }
-                .font(.caption2.weight(.semibold))
+                ApprovalActionButtons(approval: approval, compact: true)
+                    .frame(minWidth: 150)
             }
         }
         .foregroundStyle(tint)
@@ -1262,7 +2069,7 @@ private struct CompactGuardrailStrip: View {
 private struct PhoneDeviceCard: View {
     let name: String
     let detail: String
-    let isOnline: Bool
+    let status: DeviceStatus
 
     var body: some View {
         HStack(spacing: 9) {
@@ -1276,9 +2083,9 @@ private struct PhoneDeviceCard: View {
                 Text(detail)
                     .font(.caption2)
                     .foregroundStyle(VQTheme.secondaryText)
-                Label(isOnline ? "Online" : "Offline", systemImage: "circle.fill")
+                Label(status.title, systemImage: "circle.fill")
                     .font(.caption2)
-                    .foregroundStyle(isOnline ? VQTheme.green : VQTheme.amber)
+                    .foregroundStyle(status.tint)
             }
             Spacer()
         }
@@ -1293,16 +2100,18 @@ private struct PhoneArtifactsPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Recent Artifacts")
+                Text(L10n.tr("Recent Artifacts"))
                     .font(.caption.weight(.bold))
                     .foregroundStyle(VQTheme.secondaryText)
                 Spacer()
-                Text("View All")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(VQTheme.accent)
+                if !store.remoteArtifacts.isEmpty {
+                    Text(L10n.tr("View All"))
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(VQTheme.accent)
+                }
             }
             if store.remoteArtifacts.isEmpty {
-                Text("No artifacts yet")
+                Text(L10n.tr("No artifacts yet"))
                     .font(.caption2)
                     .foregroundStyle(VQTheme.secondaryText)
             }
@@ -1332,22 +2141,22 @@ private struct PhoneProjectStatusPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Project Status")
+            Text(L10n.tr("Project Status"))
                 .font(.caption.weight(.bold))
                 .foregroundStyle(VQTheme.secondaryText)
             HStack {
-                Text(store.workspace.projectName)
+                Text(VQDisplay.workspaceName(store.workspace))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
                     .lineLimit(1)
                 Spacer()
-                Text(store.workspace.statusSummary)
+                Text(VQDisplay.workspaceStatus(store.workspace))
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(store.workspace.changedFiles == 0 ? VQTheme.green : VQTheme.amber)
+                    .foregroundStyle(VQDisplay.workspaceStatusTint(store.workspace))
                     .lineLimit(1)
             }
             HStack {
-                Text("Branch")
+                Text(L10n.tr("Branch"))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(VQTheme.ink)
                 Spacer()
@@ -1357,7 +2166,7 @@ private struct PhoneProjectStatusPanel: View {
                     .lineLimit(1)
             }
             NavigationLink(value: AppSection.projects) {
-                Text("View All Projects ->")
+                Text(L10n.tr("View All Projects ->"))
                     .frame(maxWidth: .infinity)
             }
                 .font(.caption2.weight(.semibold))
@@ -1392,7 +2201,7 @@ private extension View {
             ZStack {
                 VQTheme.elevated
                 LinearGradient(
-                    colors: [Color.white.opacity(0.052), Color.clear, Color.black.opacity(0.055)],
+                    colors: [Color.white.opacity(0.030), Color.clear, Color.black.opacity(0.040)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
@@ -1443,11 +2252,37 @@ extension Date {
 private extension RunPhase {
     var commandTitle: String {
         switch self {
-        case .requirements: "Requirements"
-        case .implementation: "Implement"
-        case .testing: "Test"
+        case .requirements: L10n.tr("Requirements")
+        case .implementation: L10n.tr("Implementation")
+        case .testing: L10n.tr("Testing")
         case .github: "GitHub"
-        case .deploy: "Deploy"
+        case .deploy: L10n.tr("Deploy")
+        }
+    }
+}
+
+private extension CommandRuntime {
+    var commandPlaceholder: String {
+        switch self {
+        case .hermesAgent:
+            L10n.tr("Send instructions to Hermes...")
+        case .codexDirect:
+            L10n.tr("Send instructions to Codex...")
+        case .claudeDirect:
+            L10n.tr("Send instructions to Claude...")
+        case .localShell:
+            L10n.tr("Enter a shell command...")
+        }
+    }
+
+    var dashboardSectionTitle: String {
+        switch self {
+        case .hermesAgent:
+            L10n.tr("Hermes command")
+        case .codexDirect, .claudeDirect:
+            L10n.tr("Direct run")
+        case .localShell:
+            L10n.tr("Shell command")
         }
     }
 }

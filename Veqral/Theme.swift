@@ -18,6 +18,7 @@ enum VQTheme {
     static let red = Color(red: 0.980, green: 0.315, blue: 0.275)
     static let violet = Color(red: 0.620, green: 0.470, blue: 0.980)
     static let steel = adaptive(light: ui(0.218, 0.258, 0.276), dark: ui(0.720, 0.770, 0.775))
+    static let unavailable = secondaryText
     static let glow = Color(red: 0.110, green: 0.760, blue: 0.735)
 
     private static func ui(_ red: Double, _ green: Double, _ blue: Double, _ alpha: Double = 1) -> UIColor {
@@ -65,9 +66,9 @@ struct PanelBackground: ViewModifier {
                     VQTheme.panel
                     LinearGradient(
                         colors: [
-                            Color.white.opacity(0.060),
-                            Color.white.opacity(0.018),
-                            Color.black.opacity(0.080)
+                            Color.white.opacity(0.034),
+                            Color.white.opacity(0.012),
+                            Color.black.opacity(0.052)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -79,7 +80,6 @@ struct PanelBackground: ViewModifier {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(VQTheme.hairline.opacity(0.92), lineWidth: 1)
             }
-            .shadow(color: .black.opacity(0.20), radius: 18, x: 0, y: 10)
     }
 }
 

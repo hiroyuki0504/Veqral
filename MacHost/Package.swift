@@ -7,7 +7,8 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "VeqralHost", targets: ["VeqralHost"])
+        .executable(name: "VeqralHost", targets: ["VeqralHost"]),
+        .executable(name: "VeqralHostSmoke", targets: ["VeqralHostSmoke"])
     ],
     targets: [
         .executableTarget(
@@ -17,6 +18,9 @@ let package = Package(
                 .linkedFramework("Network"),
                 .linkedFramework("Security")
             ]
+        ),
+        .executableTarget(
+            name: "VeqralHostSmoke"
         )
     ]
 )

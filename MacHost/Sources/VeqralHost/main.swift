@@ -15,6 +15,21 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
     private let state = HostState()
 
     static func main() {
+        if CommandLine.arguments.dropFirst().first == "smoke-discord-notifications" {
+            DiscordNotificationSmoke.runAndExit()
+        }
+        if CommandLine.arguments.dropFirst().first == "smoke-project-memory" {
+            ProjectMemorySmoke.runAndExit()
+        }
+        if CommandLine.arguments.dropFirst().first == "smoke-run-usage" {
+            RunUsageSmoke.runAndExit()
+        }
+        if CommandLine.arguments.dropFirst().first == "smoke-host-telemetry" {
+            HostTelemetrySmoke.runAndExit()
+        }
+        if CommandLine.arguments.dropFirst().first == "smoke-voice-cleanup" {
+            VoiceCleanupSmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -47,6 +62,18 @@ struct HostConfig: Codable, Sendable {
     var maxActiveRuns: Int = 2
     var logRetentionDays: Int = 30
     var auditRetentionDays: Int = 90
+    var pushNotificationsEnabled: Bool = false
+    var apnsKeyID: String?
+    var apnsTeamID: String?
+    var apnsKeyPath: String?
+    var apnsBundleID: String?
+    var apnsEnvironment: String?
+    var portfolioRegistryRepo: String = "git@github.com:hiroyuki0504/veqral-portfolio.git"
+    var portfolioRegistryPath: String?
+    var portfolioEngagementRoots: [String] = []
+    var portfolioCodeRoots: [String] = []
+    var discordWebhook: String?
+    var portfolioDiscordWebhook: String?
 
     static var folder: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -69,6 +96,66 @@ struct HostConfig: Codable, Sendable {
         }
         return config
     }
+
+    var resolvedPushNotificationsEnabled: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return Self.booleanValue(
+            env["VEQRAL_PUSH_ENABLED"]
+                ?? KeychainStore.get(account: "push:enabled")
+                ?? (pushNotificationsEnabled ? "true" : "false")
+        )
+    }
+
+    var resolvedPortfolioRegistryRepo: String {
+        ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_REGISTRY_REPO"]?.nilIfBlank
+            ?? portfolioRegistryRepo
+    }
+
+    var resolvedPortfolioRegistryPath: String {
+        ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_REGISTRY_PATH"]?.nilIfBlank
+            ?? portfolioRegistryPath?.nilIfBlank
+            ?? HostConfig.folder.appendingPathComponent("portfolio-registry", isDirectory: true).path
+    }
+
+    var resolvedPortfolioEngagementRoots: [String] {
+        Self.listValue(ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS"])
+            ?? portfolioEngagementRoots
+    }
+
+    var resolvedPortfolioCodeRoots: [String] {
+        Self.listValue(ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_CODE_ROOTS"])
+            ?? portfolioCodeRoots
+    }
+
+    var resolvedDiscordWebhook: String? {
+        ProcessInfo.processInfo.environment["VEQRAL_DISCORD_WEBHOOK"]?.nilIfBlank
+            ?? ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_DISCORD_WEBHOOK"]?.nilIfBlank
+            ?? KeychainStore.get(account: "discord:webhook")?.nilIfBlank
+            ?? KeychainStore.get(account: "portfolio:discord-webhook")?.nilIfBlank
+            ?? discordWebhook?.nilIfBlank
+            ?? portfolioDiscordWebhook?.nilIfBlank
+    }
+
+    var resolvedPortfolioDiscordWebhook: String? {
+        resolvedDiscordWebhook
+    }
+
+    private static func booleanValue(_ value: String?) -> Bool {
+        switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on", "enabled":
+            true
+        default:
+            false
+        }
+    }
+
+    private static func listValue(_ value: String?) -> [String]? {
+        guard let value = value?.nilIfBlank else { return nil }
+        return value
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).expandingTilde }
+            .filter { !$0.isEmpty }
+    }
 }
 
 struct DeviceRecord: Codable, Sendable, Identifiable {
@@ -76,6 +163,23 @@ struct DeviceRecord: Codable, Sendable, Identifiable {
     var name: String
     var pairedAt: Date
     var lastSeenAt: Date?
+    var pushToken: String? = nil
+    var pushEnvironment: String? = nil
+    var pushBundleID: String? = nil
+    var pushLocale: String? = nil
+    var pushUpdatedAt: Date? = nil
+}
+
+enum PushEventType: String, Codable, Sendable {
+    case approval
+    case question
+    case complete
+    case failed
+}
+
+enum ApprovalSeverity: String, Codable, Sendable {
+    case low
+    case high
 }
 
 enum RunStatusWire: String, Codable, Sendable {
@@ -86,6 +190,26 @@ enum RunStatusWire: String, Codable, Sendable {
     case failed
     case complete
     case needsAttention
+}
+
+enum AgentEngine: String, Codable, Sendable, CaseIterable {
+    case hermes
+    case codex
+    case claude
+    case shell
+
+    var title: String {
+        switch self {
+        case .hermes:
+            "Hermes"
+        case .codex:
+            "Codex"
+        case .claude:
+            "Claude"
+        case .shell:
+            "Shell"
+        }
+    }
 }
 
 struct HostRun: Codable, Sendable, Identifiable {
@@ -99,6 +223,919 @@ struct HostRun: Codable, Sendable, Identifiable {
     var exitCode: Int32?
     var pid: Int32?
     var approvalReason: String?
+    var engine: AgentEngine?
+    var resumeSessionID: String?
+    var projectID: String?
+    var chatID: String?
+    var provider: String?
+    var model: String?
+    var approvalSeverity: ApprovalSeverity? = nil
+    var usage: RunUsage? = nil
+
+    var engineOrDefault: AgentEngine {
+        engine ?? .hermes
+    }
+}
+
+struct RunUsage: Codable, Sendable, Equatable {
+    var inputTokens: Int? = nil
+    var outputTokens: Int? = nil
+    var cacheReadTokens: Int? = nil
+    var cacheWriteTokens: Int? = nil
+    var reasoningTokens: Int? = nil
+    var totalTokens: Int? = nil
+    var estimatedCostUSD: Double? = nil
+    var actualCostUSD: Double? = nil
+    var source: String? = nil
+    var model: String? = nil
+
+    var hasValues: Bool {
+        inputTokens != nil
+            || outputTokens != nil
+            || cacheReadTokens != nil
+            || cacheWriteTokens != nil
+            || reasoningTokens != nil
+            || totalTokens != nil
+            || estimatedCostUSD != nil
+            || actualCostUSD != nil
+    }
+
+    var normalized: RunUsage? {
+        var usage = self
+        if usage.totalTokens == nil {
+            let total = [usage.inputTokens, usage.outputTokens, usage.reasoningTokens]
+                .compactMap { $0 }
+                .reduce(0, +)
+            if total > 0 {
+                usage.totalTokens = total
+            }
+        }
+        return usage.hasValues ? usage : nil
+    }
+
+    func merged(with other: RunUsage) -> RunUsage {
+        var merged = self
+        merged.inputTokens = Self.maxValue(inputTokens, other.inputTokens)
+        merged.outputTokens = Self.maxValue(outputTokens, other.outputTokens)
+        merged.cacheReadTokens = Self.maxValue(cacheReadTokens, other.cacheReadTokens)
+        merged.cacheWriteTokens = Self.maxValue(cacheWriteTokens, other.cacheWriteTokens)
+        merged.reasoningTokens = Self.maxValue(reasoningTokens, other.reasoningTokens)
+        merged.totalTokens = Self.maxValue(totalTokens, other.totalTokens)
+        merged.estimatedCostUSD = Self.maxValue(estimatedCostUSD, other.estimatedCostUSD)
+        merged.actualCostUSD = Self.maxValue(actualCostUSD, other.actualCostUSD)
+        merged.source = other.source?.nilIfBlank ?? source
+        merged.model = other.model?.nilIfBlank ?? model
+        return merged.normalized ?? merged
+    }
+
+    private static func maxValue<T: Comparable>(_ lhs: T?, _ rhs: T?) -> T? {
+        switch (lhs, rhs) {
+        case let (.some(lhs), .some(rhs)):
+            max(lhs, rhs)
+        case let (.some(lhs), .none):
+            lhs
+        case let (.none, .some(rhs)):
+            rhs
+        case (.none, .none):
+            nil
+        }
+    }
+}
+
+enum DiscordWebhookNotifier {
+    static func shouldNotify(event: PushEventType) -> Bool {
+        switch event {
+        case .approval, .complete, .failed:
+            true
+        case .question:
+            false
+        }
+    }
+
+    static func sendRun(config: HostConfig, run: HostRun, event: PushEventType, message: String, severity: ApprovalSeverity) async {
+        guard let webhook = config.resolvedDiscordWebhook else { return }
+        await sendRun(webhook: webhook, run: run, event: event, message: message, severity: severity)
+    }
+
+    static func sendRun(webhook: String, run: HostRun, event: PushEventType, message: String, severity: ApprovalSeverity) async {
+        guard shouldNotify(event: event) else { return }
+        let title = title(for: event)
+        let prompt = firstLine(Redactor.redact(run.prompt), fallback: "指示なし")
+        let directoryName = URL(fileURLWithPath: run.workingDirectory.expandingTilde).lastPathComponent.nilIfBlank ?? "作業場所未設定"
+        let severityLabel = severity == .high ? "高" : "通常"
+        let runID = String(run.id.prefix(8))
+        let details = Redactor.redact(message).nilIfBlank ?? "詳細なし"
+        let content = """
+        \(title)
+        指示: \(clipped(prompt, limit: 180))
+        エージェント: \(run.engineOrDefault.title)
+        作業場所: \(clipped(directoryName, limit: 80))
+        重要度: \(severityLabel)
+        Run: \(runID)
+        \(clipped(details, limit: 600))
+        """
+        await send(webhook: webhook, content: content)
+    }
+
+    static func send(config: HostConfig, content: String) async {
+        guard let webhook = config.resolvedDiscordWebhook else { return }
+        await send(webhook: webhook, content: content)
+    }
+
+    static func send(webhook: String, content: String) async {
+        guard let url = URL(string: webhook) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try? JSONEncoder().encode(["content": clipped(Redactor.redact(content), limit: 1_800)])
+        _ = try? await URLSession.shared.data(for: request)
+    }
+
+    private static func title(for event: PushEventType) -> String {
+        switch event {
+        case .approval:
+            "Veqral 承認待ち"
+        case .complete:
+            "Veqral Run 完了"
+        case .failed:
+            "Veqral Run 失敗"
+        case .question:
+            "Veqral 確認"
+        }
+    }
+
+    private static func firstLine(_ value: String, fallback: String) -> String {
+        value
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+            ?? fallback
+    }
+
+    private static func clipped(_ value: String, limit: Int) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit)) + "\n[truncated]"
+    }
+}
+
+enum DiscordNotificationSmoke {
+    static func runAndExit() -> Never {
+        Task.detached {
+            do {
+                try await run()
+                Foundation.exit(0)
+            } catch {
+                print("FAIL: Discord notification smoke failed: \(error.localizedDescription)")
+                Foundation.exit(1)
+            }
+        }
+        dispatchMain()
+    }
+
+    private static func run() async throws {
+        let receiver = try LocalWebhookReceiver()
+        let webhookURL = try receiver.start()
+        let bearerSample = "Author" + "ization: bearer veqraltestsecret"
+        let tokenSample = "tok" + "en=token-should-hide"
+        let passwordSample = "pass" + "word=password-should-hide"
+
+        let run = HostRun(
+            id: UUID().uuidString,
+            prompt: "\(bearerSample)\n余白を詰めて",
+            workingDirectory: "/Users/hiroyuki/Documents/Veqral",
+            sessionID: nil,
+            status: .waitingApproval,
+            startedAt: Date(),
+            completedAt: nil,
+            exitCode: nil,
+            pid: nil,
+            approvalReason: tokenSample,
+            engine: .codex,
+            resumeSessionID: nil,
+            projectID: nil,
+            chatID: nil,
+            provider: nil,
+            model: nil,
+            approvalSeverity: .high
+        )
+
+        await DiscordWebhookNotifier.sendRun(webhook: webhookURL.absoluteString, run: run, event: .approval, message: tokenSample, severity: .high)
+
+        var completedRun = run
+        completedRun.status = .complete
+        completedRun.exitCode = 0
+        await DiscordWebhookNotifier.sendRun(webhook: webhookURL.absoluteString, run: completedRun, event: .complete, message: "Run complete", severity: .low)
+
+        var failedRun = run
+        failedRun.status = .failed
+        failedRun.exitCode = 2
+        await DiscordWebhookNotifier.sendRun(webhook: webhookURL.absoluteString, run: failedRun, event: .failed, message: "Run failed with exit code 2", severity: .low)
+
+        await DiscordWebhookNotifier.send(webhook: webhookURL.absoluteString, content: "司令塔: Smoke Asset が停止しました。 \(passwordSample)")
+
+        let payloads = try receiver.waitForPayloads(count: 4, timeout: 5)
+        let contents = try payloads.map(contentField(from:))
+        let joined = contents.joined(separator: "\n")
+        try require(joined.contains("Veqral 承認待ち"), "承認待ち通知が届いていません。")
+        try require(joined.contains("Veqral Run 完了"), "Run 完了通知が届いていません。")
+        try require(joined.contains("Veqral Run 失敗"), "Run 失敗通知が届いていません。")
+        try require(joined.contains("司令塔: Smoke Asset が停止しました。"), "司令塔 down 通知が届いていません。")
+        try require(!joined.contains("veqraltestsecret"), "Authorization bearer が redaction されていません。")
+        try require(!joined.contains("token-should-hide"), "token が redaction されていません。")
+        try require(!joined.contains("password-should-hide"), "password が redaction されていません。")
+        print("PASS: Discord notification smoke received \(payloads.count) redacted payloads.")
+    }
+
+    private static func contentField(from payload: String) throws -> String {
+        guard let data = payload.data(using: .utf8),
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let content = object["content"] as? String else {
+            throw SmokeError("Discord payload JSON を読めませんでした。")
+        }
+        return content
+    }
+
+    private static func require(_ condition: Bool, _ message: String) throws {
+        if !condition {
+            throw SmokeError(message)
+        }
+    }
+}
+
+final class LocalWebhookReceiver: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "dev.hiroyuki.veqral.discord-smoke")
+    private let lock = NSLock()
+    private var receivedPayloads: [String] = []
+    private var ready = false
+
+    init() throws {
+        self.listener = try NWListener(using: .tcp, on: 0)
+    }
+
+    func start() throws -> URL {
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handle(connection: connection, buffer: Data())
+        }
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            if case .ready = state {
+                self.lock.lock()
+                self.ready = true
+                self.lock.unlock()
+            }
+        }
+        listener.start(queue: queue)
+        let deadline = Date().addingTimeInterval(5)
+        while (!isReady() || listener.port == nil || listener.port?.rawValue == 0) && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        guard let port = listener.port,
+              let url = URL(string: "http://127.0.0.1:\(port.rawValue)/discord") else {
+            throw SmokeError("ローカル Discord 受信口を開始できませんでした。")
+        }
+        return url
+    }
+
+    func waitForPayloads(count: Int, timeout: TimeInterval) throws -> [String] {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let snapshot = payloads()
+            if snapshot.count >= count {
+                listener.cancel()
+                return snapshot
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        let snapshot = payloads()
+        listener.cancel()
+        throw SmokeError("Discord payload が \(snapshot.count)/\(count) 件しか届きませんでした。")
+    }
+
+    private func handle(connection: NWConnection, buffer: Data) {
+        connection.start(queue: queue)
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self, weak connection] data, _, isComplete, error in
+            guard let self, let connection else { return }
+            var next = buffer
+            if let data {
+                next.append(data)
+            }
+            if let body = Self.body(from: next) {
+                self.append(payload: body)
+                let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
+                return
+            }
+            if isComplete || error != nil {
+                connection.cancel()
+                return
+            }
+            self.handle(connection: connection, buffer: next)
+        }
+    }
+
+    private func append(payload: String) {
+        lock.lock()
+        receivedPayloads.append(payload)
+        lock.unlock()
+    }
+
+    private func payloads() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return receivedPayloads
+    }
+
+    private func isReady() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return ready
+    }
+
+    private static func body(from request: Data) -> String? {
+        let separator = Data("\r\n\r\n".utf8)
+        guard let headerEnd = request.range(of: separator) else { return nil }
+        let headerData = request[..<headerEnd.lowerBound]
+        guard let header = String(data: headerData, encoding: .utf8) else { return nil }
+        let contentLength = header
+            .split(separator: "\r\n")
+            .first { $0.lowercased().hasPrefix("content-length:") }?
+            .split(separator: ":", maxSplits: 1)
+            .last
+            .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            ?? 0
+        let bodyStart = headerEnd.upperBound
+        let bodyData = request[bodyStart...]
+        guard bodyData.count >= contentLength else { return nil }
+        return String(data: bodyData.prefix(contentLength), encoding: .utf8)
+    }
+}
+
+struct SmokeError: LocalizedError {
+    var message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var errorDescription: String? {
+        message
+    }
+}
+
+enum ProjectMemorySmoke {
+    static func runAndExit() -> Never {
+        do {
+            let snapshot = try HermesMemoryStore().projectMemory(projectID: "smoke-project", projectName: "Smoke Project")
+            guard snapshot.source == "veqral-smoke-project" else {
+                throw SmokeError("Hermes source の解決が想定と違います。")
+            }
+            guard snapshot.memoryFile.isEditable == false else {
+                throw SmokeError("Project memory は読み取り専用である必要があります。")
+            }
+            print("PASS: Project memory smoke source=\(snapshot.source) sessions=\(snapshot.sessions.count) bytes=\(snapshot.memoryFile.bytes) warnings=\(snapshot.warnings.count)")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Project memory smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+}
+
+enum RunUsageSmoke {
+    static func runAndExit() -> Never {
+        do {
+            let claude = try requireUsage(
+                from: #"{"type":"result","usage":{"input_tokens":1234,"output_tokens":234,"cache_read_input_tokens":12,"cache_creation_input_tokens":6},"model":"claude-haiku-4.5"}"#,
+                label: "Claude stream JSON"
+            )
+            guard claude.inputTokens == 1_234,
+                  claude.outputTokens == 234,
+                  claude.cacheReadTokens == 12,
+                  claude.cacheWriteTokens == 6,
+                  claude.model == "claude-haiku-4.5" else {
+                throw SmokeError("Claude usage JSON を正しく読めませんでした。")
+            }
+
+            let codex = try requireUsage(
+                from: #"{"usage":{"prompt_tokens":2000,"completion_tokens":300,"reasoning_tokens":50,"total_tokens":2350,"estimated_cost_usd":0.0123},"model":"gpt-5-codex"}"#,
+                label: "Codex usage JSON"
+            )
+            guard codex.inputTokens == 2_000,
+                  codex.outputTokens == 300,
+                  codex.reasoningTokens == 50,
+                  codex.totalTokens == 2_350,
+                  abs((codex.estimatedCostUSD ?? 0) - 0.0123) < 0.000001 else {
+                throw SmokeError("Codex usage JSON を正しく読めませんでした。")
+            }
+
+            let text = try requireUsage(
+                from: "usage: input tokens 100, output tokens 25, total tokens 125, cost $0.0042",
+                label: "usage text"
+            )
+            guard text.inputTokens == 100,
+                  text.outputTokens == 25,
+                  text.totalTokens == 125,
+                  abs((text.estimatedCostUSD ?? 0) - 0.0042) < 0.000001 else {
+                throw SmokeError("usage テキストを正しく読めませんでした。")
+            }
+
+            print("PASS: Run usage smoke parsed Claude, Codex, and text usage samples.")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Run usage smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+
+    private static func requireUsage(from text: String, label: String) throws -> RunUsage {
+        guard let usage = RunUsageParser.parse(text) else {
+            throw SmokeError("\(label) から usage を抽出できませんでした。")
+        }
+        return usage
+    }
+}
+
+enum HostTelemetrySmoke {
+    static func runAndExit() -> Never {
+        Task.detached {
+            do {
+                let collector = HostTelemetryCollector()
+                let first = await collector.snapshot(tailscaleIP: "100.64.0.1")
+                try require(first.uptime.seconds > 0, "稼働時間を取得できません。")
+                try require(first.cpu.loadAverage.count == 3, "load average を取得できません。")
+                try require(!first.cpu.perCorePercent.isEmpty, "per-core CPU を取得できません。")
+                try require((first.memory.totalBytes ?? 0) > 0, "メモリ総量を取得できません。")
+                try require((first.disk.totalBytes ?? 0) > 0, "ディスク総量を取得できません。")
+                try require(!first.thermal.state.isEmpty, "熱状態を取得できません。")
+                try await Task.sleep(nanoseconds: 1_100_000_000)
+                let second = await collector.snapshot(tailscaleIP: "100.64.0.1")
+                try require(second.cpu.totalPercent != nil, "CPU 使用率を計算できません。")
+                print("PASS: Host telemetry smoke cpu=\(String(format: "%.1f", second.cpu.totalPercent ?? 0))% cores=\(second.cpu.perCorePercent.count) thermal=\(second.thermal.state) processes=\(second.topProcesses.count)")
+                Foundation.exit(0)
+            } catch {
+                print("FAIL: Host telemetry smoke failed: \(error.localizedDescription)")
+                Foundation.exit(1)
+            }
+        }
+        dispatchMain()
+    }
+
+    private static func require(_ condition: Bool, _ message: String) throws {
+        if !condition {
+            throw SmokeError(message)
+        }
+    }
+}
+
+actor HostTelemetryCollector {
+    private struct CPUTicks {
+        var user: UInt64
+        var system: UInt64
+        var idle: UInt64
+        var nice: UInt64
+
+        var active: UInt64 { user + system + nice }
+        var total: UInt64 { active + idle }
+    }
+
+    private struct InterfaceBytes {
+        var timestamp: Date
+        var name: String
+        var rx: UInt64
+        var tx: UInt64
+    }
+
+    private var previousCPU: [CPUTicks]?
+    private var previousInterface: InterfaceBytes?
+
+    func snapshot(tailscaleIP: String?) -> HostTelemetryResponse {
+        HostTelemetryResponse(
+            checkedAt: Date(),
+            cpu: cpu(),
+            memory: memory(),
+            disk: disk(),
+            thermal: thermal(),
+            uptime: uptime(),
+            power: power(),
+            network: network(tailscaleIP: tailscaleIP),
+            topProcesses: topProcesses()
+        )
+    }
+
+    private func cpu() -> HostTelemetryCPU {
+        let ticks = cpuTicks()
+        let previous = previousCPU
+        let perCore = percentages(current: ticks, previous: previous)
+        let totalPercent = aggregatePercentage(current: ticks, previous: previous)
+        previousCPU = ticks
+        return HostTelemetryCPU(
+            totalPercent: totalPercent,
+            perCorePercent: perCore,
+            loadAverage: loadAverage()
+        )
+    }
+
+    private func cpuTicks() -> [CPUTicks] {
+        var cpuInfo: processor_info_array_t?
+        var cpuInfoCount = mach_msg_type_number_t(0)
+        var cpuCount = natural_t(0)
+        let result = host_processor_info(
+            mach_host_self(),
+            PROCESSOR_CPU_LOAD_INFO,
+            &cpuCount,
+            &cpuInfo,
+            &cpuInfoCount
+        )
+        guard result == KERN_SUCCESS, let cpuInfo else { return [] }
+        defer {
+            vm_deallocate(
+                mach_task_self_,
+                vm_address_t(UInt(bitPattern: cpuInfo)),
+                vm_size_t(Int(cpuInfoCount) * MemoryLayout<integer_t>.stride)
+            )
+        }
+
+        let stride = Int(CPU_STATE_MAX)
+        return (0..<Int(cpuCount)).map { index in
+            let base = index * stride
+            return CPUTicks(
+                user: UInt64(max(0, Int(cpuInfo[base + Int(CPU_STATE_USER)]))),
+                system: UInt64(max(0, Int(cpuInfo[base + Int(CPU_STATE_SYSTEM)]))),
+                idle: UInt64(max(0, Int(cpuInfo[base + Int(CPU_STATE_IDLE)]))),
+                nice: UInt64(max(0, Int(cpuInfo[base + Int(CPU_STATE_NICE)])))
+            )
+        }
+    }
+
+    private func percentages(current: [CPUTicks], previous: [CPUTicks]?) -> [Double] {
+        current.enumerated().map { index, ticks in
+            if let previous, previous.indices.contains(index) {
+                return percent(current: ticks, previous: previous[index])
+            }
+            return bootAveragePercent(ticks)
+        }
+    }
+
+    private func aggregatePercentage(current: [CPUTicks], previous: [CPUTicks]?) -> Double? {
+        guard !current.isEmpty else { return nil }
+        let currentTotal = current.reduce(CPUTicks(user: 0, system: 0, idle: 0, nice: 0)) { partial, ticks in
+            CPUTicks(
+                user: partial.user + ticks.user,
+                system: partial.system + ticks.system,
+                idle: partial.idle + ticks.idle,
+                nice: partial.nice + ticks.nice
+            )
+        }
+        if let previous, previous.count == current.count {
+            let previousTotal = previous.reduce(CPUTicks(user: 0, system: 0, idle: 0, nice: 0)) { partial, ticks in
+                CPUTicks(
+                    user: partial.user + ticks.user,
+                    system: partial.system + ticks.system,
+                    idle: partial.idle + ticks.idle,
+                    nice: partial.nice + ticks.nice
+                )
+            }
+            return percent(current: currentTotal, previous: previousTotal)
+        }
+        return bootAveragePercent(currentTotal)
+    }
+
+    private func percent(current: CPUTicks, previous: CPUTicks) -> Double {
+        let activeDelta = current.active > previous.active ? current.active - previous.active : 0
+        let totalDelta = current.total > previous.total ? current.total - previous.total : 0
+        guard totalDelta > 0 else { return 0 }
+        return min(100, max(0, Double(activeDelta) / Double(totalDelta) * 100))
+    }
+
+    private func bootAveragePercent(_ ticks: CPUTicks) -> Double {
+        guard ticks.total > 0 else { return 0 }
+        return min(100, max(0, Double(ticks.active) / Double(ticks.total) * 100))
+    }
+
+    private func loadAverage() -> [Double] {
+        var values = [Double](repeating: 0, count: 3)
+        let count = getloadavg(&values, 3)
+        guard count == 3 else { return [] }
+        return values
+    }
+
+    private func memory() -> HostTelemetryMemory {
+        var stats = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let result = withUnsafeMutablePointer(to: &stats) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, rebound, &count)
+            }
+        }
+        var pageSize = vm_size_t(0)
+        host_page_size(mach_host_self(), &pageSize)
+        let total = ProcessInfo.processInfo.physicalMemory
+        guard result == KERN_SUCCESS, pageSize > 0 else {
+            return HostTelemetryMemory(totalBytes: total, usedBytes: nil, freeBytes: nil, pressure: memoryPressure())
+        }
+        let freePages = UInt64(stats.free_count + stats.inactive_count + stats.speculative_count)
+        let free = min(total, freePages * UInt64(pageSize))
+        let used = total > free ? total - free : nil
+        return HostTelemetryMemory(
+            totalBytes: total,
+            usedBytes: used,
+            freeBytes: free,
+            pressure: memoryPressure()
+        )
+    }
+
+    private func memoryPressure() -> String {
+        let output = ProcessRunner.run("/usr/bin/memory_pressure", ["-Q"], timeout: 2).combinedTrimmed
+        return output
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+            ?? "—"
+    }
+
+    private func disk() -> HostTelemetryDisk {
+        let attrs = try? FileManager.default.attributesOfFileSystem(forPath: "/")
+        let total = (attrs?[.systemSize] as? NSNumber)?.uint64Value
+        let free = (attrs?[.systemFreeSize] as? NSNumber)?.uint64Value
+        let usedPercent: Double?
+        if let total, let free, total > 0 {
+            usedPercent = Double(total - free) / Double(total) * 100
+        } else {
+            usedPercent = nil
+        }
+        return HostTelemetryDisk(mountPoint: "/", totalBytes: total, freeBytes: free, usedPercent: usedPercent, smartStatus: nil)
+    }
+
+    private func thermal() -> HostTelemetryThermal {
+        let state: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal:
+            state = "nominal"
+        case .fair:
+            state = "fair"
+        case .serious:
+            state = "serious"
+        case .critical:
+            state = "critical"
+        @unknown default:
+            state = "unknown"
+        }
+        return HostTelemetryThermal(state: state, rawTemperatureC: nil, fanRPM: nil)
+    }
+
+    private func uptime() -> HostTelemetryUptime {
+        HostTelemetryUptime(
+            seconds: ProcessInfo.processInfo.systemUptime,
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            hostName: localHostName(),
+            machineModel: sysctlString("hw.model").nilIfBlank ?? "—"
+        )
+    }
+
+    private func power() -> HostTelemetryPower {
+        let output = ProcessRunner.run("/usr/bin/pmset", ["-g", "batt"], timeout: 2).combinedTrimmed
+        let hasBattery = output.localizedCaseInsensitiveContains("InternalBattery") || output.contains("%;")
+        guard hasBattery else {
+            return HostTelemetryPower(isBatteryAvailable: false, batteryPercent: nil, isCharging: nil, isACPowered: output.localizedCaseInsensitiveContains("AC Power"))
+        }
+        let charging = output.localizedCaseInsensitiveContains("charging") && !output.localizedCaseInsensitiveContains("not charging")
+        return HostTelemetryPower(
+            isBatteryAvailable: true,
+            batteryPercent: firstBatteryPercent(in: output),
+            isCharging: charging,
+            isACPowered: output.localizedCaseInsensitiveContains("AC Power")
+        )
+    }
+
+    private func firstBatteryPercent(in text: String) -> Double? {
+        guard let range = text.range(of: #"([0-9]{1,3})%"#, options: .regularExpression) else { return nil }
+        return Double(text[range].dropLast())
+    }
+
+    private func network(tailscaleIP: String?) -> HostTelemetryNetwork {
+        guard let current = preferredInterfaceBytes() else {
+            previousInterface = nil
+            return HostTelemetryNetwork(tailscaleIP: tailscaleIP, interfaceName: tailscaleIP == nil ? nil : "Tailscale", rxBytesPerSecond: nil, txBytesPerSecond: nil)
+        }
+
+        let previous = previousInterface
+        previousInterface = current
+        let interval = previous.map { current.timestamp.timeIntervalSince($0.timestamp) } ?? 0
+        let rxRate: Double?
+        let txRate: Double?
+        if let previous, previous.name == current.name, interval > 0 {
+            rxRate = Double(current.rx >= previous.rx ? current.rx - previous.rx : 0) / interval
+            txRate = Double(current.tx >= previous.tx ? current.tx - previous.tx : 0) / interval
+        } else {
+            rxRate = nil
+            txRate = nil
+        }
+        return HostTelemetryNetwork(tailscaleIP: tailscaleIP, interfaceName: current.name, rxBytesPerSecond: rxRate, txBytesPerSecond: txRate)
+    }
+
+    private func preferredInterfaceBytes() -> InterfaceBytes? {
+        let interfaces = interfaceBytes()
+        return interfaces.first { $0.name.hasPrefix("utun") }
+            ?? interfaces.first { $0.name == "en0" }
+            ?? interfaces.first
+    }
+
+    private func interfaceBytes() -> [InterfaceBytes] {
+        var pointer: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&pointer) == 0, let pointer else { return [] }
+        defer { freeifaddrs(pointer) }
+
+        var results: [InterfaceBytes] = []
+        var cursor: UnsafeMutablePointer<ifaddrs>? = pointer
+        let now = Date()
+        while let current = cursor {
+            defer { cursor = current.pointee.ifa_next }
+            guard let address = current.pointee.ifa_addr,
+                  Int32(address.pointee.sa_family) == AF_LINK,
+                  (current.pointee.ifa_flags & UInt32(IFF_LOOPBACK)) == 0,
+                  let data = current.pointee.ifa_data else {
+                continue
+            }
+            let name = String(cString: current.pointee.ifa_name)
+            let ifData = data.assumingMemoryBound(to: if_data.self).pointee
+            results.append(InterfaceBytes(timestamp: now, name: name, rx: UInt64(ifData.ifi_ibytes), tx: UInt64(ifData.ifi_obytes)))
+        }
+        return results
+    }
+
+    private func topProcesses() -> [HostTelemetryProcess] {
+        let output = ProcessRunner.run("/bin/ps", ["-axo", "pid=,pcpu=,rss=,comm=", "-r"], timeout: 2)
+        guard output.exitCode == 0 else { return [] }
+        return output.stdout
+            .split(whereSeparator: \.isNewline)
+            .prefix(6)
+            .compactMap { line -> HostTelemetryProcess? in
+                let parts = line.split(whereSeparator: \.isWhitespace)
+                guard parts.count >= 4,
+                      let pid = Int32(parts[0]),
+                      let cpu = Double(parts[1]),
+                      let rssKB = Double(parts[2]) else {
+                    return nil
+                }
+                return HostTelemetryProcess(
+                    pid: pid,
+                    name: String(parts.dropFirst(3).joined(separator: " ")).nilIfBlank ?? "process",
+                    cpuPercent: cpu,
+                    memoryMB: rssKB / 1024.0
+                )
+            }
+    }
+
+    private func sysctlString(_ key: String) -> String {
+        var size = 0
+        guard sysctlbyname(key, nil, &size, nil, 0) == 0, size > 0 else { return "" }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(key, &buffer, &size, nil, 0) == 0 else { return "" }
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+}
+
+enum VoiceCleanupSmoke {
+    static func runAndExit() -> Never {
+        do {
+            let prompt = VoiceCleanupRunner.prompt(rawText: "えっと テストして いや違う ビルドして", ruleBasedText: "ビルドして")
+            guard prompt.contains("ビルドして"), prompt.contains("整形済み本文だけ") else {
+                throw SmokeError("cleanup prompt が想定と違います。")
+            }
+            let cleaned = VoiceCleanupRunner.cleanedOutput(from: "\"ビルドして。\"")
+            guard cleaned == "ビルドして。" else {
+                throw SmokeError("cleanup output の整形が想定と違います。")
+            }
+            print("PASS: Voice cleanup smoke validated prompt and output sanitizing.")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Voice cleanup smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+}
+
+enum VoiceCleanupRunner {
+    static func cleanup(_ request: VoiceCleanupRequest) throws -> VoiceCleanupResponse {
+        let ruleBased = request.ruleBasedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ruleBased.isEmpty else {
+            return VoiceCleanupResponse(cleanedText: "", engine: nil, fallbackUsed: true)
+        }
+
+        let engines = cleanupEngineOrder(preferred: request.preferredEngine)
+        let prompt = prompt(rawText: request.rawText, ruleBasedText: ruleBased)
+        let workingDirectory = request.workingDirectory?.nilIfBlank ?? NSHomeDirectory()
+
+        for engine in engines {
+            guard let executable = CLIAdapterRegistry.status(for: engine).executablePath else { continue }
+            let output = ProcessRunner.run(
+                executable,
+                arguments(for: engine, prompt: prompt, provider: request.provider, model: request.model),
+                workingDirectory: workingDirectory,
+                timeout: 45
+            )
+            guard output.exitCode == 0 else { continue }
+            let cleaned = cleanedOutput(from: output.stdout.nilIfBlank ?? output.combinedTrimmed)
+            if !cleaned.isEmpty {
+                return VoiceCleanupResponse(cleanedText: cleaned, engine: engine, fallbackUsed: false)
+            }
+        }
+
+        return VoiceCleanupResponse(cleanedText: ruleBased, engine: nil, fallbackUsed: true)
+    }
+
+    static func prompt(rawText: String, ruleBasedText: String) -> String {
+        """
+        日本語の音声文字起こしを、Veqral に送る短い実行指令へ整形してください。
+        制約:
+        - フィラーと自己修正を反映する
+        - 意味を追加しない
+        - 削除、本番、課金、token、.env、main merge、force push、deploy、Computer Use などの高リスク語を弱めない
+        - 箇条書き、説明、引用符、前置きは禁止
+        - 整形済み本文だけを出力する
+
+        聞き取り:
+        \(rawText)
+
+        ルール整形後:
+        \(ruleBasedText)
+        """
+    }
+
+    static func cleanedOutput(from text: String) -> String {
+        var cleaned = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "```text", with: "")
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.hasPrefix("\""), cleaned.hasSuffix("\""), cleaned.count >= 2 {
+            cleaned.removeFirst()
+            cleaned.removeLast()
+        }
+        let markerPrefixes = ["整形済み本文:", "指令:", "Command:", "Cleaned:"]
+        for marker in markerPrefixes where cleaned.localizedCaseInsensitiveContains(marker) {
+            cleaned = cleaned.components(separatedBy: marker).last ?? cleaned
+        }
+        return String(cleaned.trimmingCharacters(in: .whitespacesAndNewlines).prefix(2_000))
+    }
+
+    private static func cleanupEngineOrder(preferred: AgentEngine?) -> [AgentEngine] {
+        var order: [AgentEngine] = [.hermes]
+        if let preferred, preferred != .shell, preferred != .hermes {
+            order.append(preferred)
+        }
+        order.append(contentsOf: [.codex, .claude])
+        var seen: Set<AgentEngine> = []
+        return order.filter { seen.insert($0).inserted }
+    }
+
+    private static func arguments(for engine: AgentEngine, prompt: String, provider: String?, model: String?) -> [String] {
+        switch engine {
+        case .hermes:
+            var args = [
+                "chat",
+                "-Q",
+                "--source", "veqral-voice-cleanup",
+                "--max-turns", "1"
+            ]
+            if let provider = provider?.nilIfBlank, provider != "auto" {
+                args.append(contentsOf: ["--provider", provider])
+            }
+            if let model = model?.nilIfBlank {
+                args.append(contentsOf: ["--model", model])
+            }
+            args.append(contentsOf: ["-q", prompt])
+            return args
+        case .codex:
+            var args = ["exec", "--sandbox", "read-only"]
+            if let model = model?.nilIfBlank {
+                args.append(contentsOf: ["--model", model])
+            }
+            args.append(prompt)
+            return args
+        case .claude:
+            var args = ["--print"]
+            if let model = model?.nilIfBlank {
+                args.append(contentsOf: ["--model", model])
+            }
+            args.append(prompt)
+            return args
+        case .shell:
+            return ["-lc", "printf %s \(shellQuoted(prompt))"]
+        }
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
 }
 
 struct HostLogEvent: Codable, Sendable {
@@ -127,6 +1164,7 @@ actor HostState {
     private var processes: [String: pid_t] = [:]
     private var devices: [DeviceRecord] = []
     private var pairingCode: String = String(UUID().uuidString.prefix(8)).uppercased()
+    private var pairingSecret: String = randomToken()
 
     init(config: HostConfig = HostConfig.load()) {
         self.config = config
@@ -157,17 +1195,29 @@ actor HostState {
 
     func rotatePairingCode() -> String {
         pairingCode = String(UUID().uuidString.prefix(8)).uppercased()
+        pairingSecret = randomToken()
         return pairingCode
     }
 
     func pairingURL() -> String {
         let endpoint = "http://\(tailscaleIP() ?? localHostName()):\(config.port)"
-        return "veqral://pair?endpoint=\(endpoint.urlQueryEscaped)&code=\(pairingCode)"
+        let signature = pairingSignature(endpoint: endpoint, code: pairingCode)
+        return "veqral://pair?endpoint=\(endpoint.urlQueryEscaped)&code=\(pairingCode)&signature=\(signature.urlQueryEscaped)"
     }
 
-    func pair(deviceName: String, code: String) throws -> (deviceID: String, token: String) {
+    func pair(deviceName: String, code: String, pairingEndpoint: String? = nil, pairingSignature: String? = nil) throws -> (deviceID: String, token: String) {
         guard code == pairingCode else {
             throw HostError.unauthorized("Invalid pairing code")
+        }
+        if let signature = pairingSignature?.nilIfBlank {
+            let endpoint = pairingEndpoint?.nilIfBlank ?? ""
+            guard !endpoint.isEmpty else {
+                throw HostError.unauthorized("Missing pairing endpoint")
+            }
+            let expected = self.pairingSignature(endpoint: endpoint, code: code)
+            guard secureCompare(signature, expected) else {
+                throw HostError.unauthorized("Invalid pairing signature")
+            }
         }
         let deviceID = UUID().uuidString
         let token = randomToken()
@@ -177,6 +1227,10 @@ actor HostState {
         _ = rotatePairingCode()
         appendAudit("paired device=\(deviceName) id=\(deviceID)")
         return (deviceID, token)
+    }
+
+    private func pairingSignature(endpoint: String, code: String) -> String {
+        HMACSigner.signature(token: pairingSecret, method: "PAIR", path: "/v1/pair", timestamp: code, body: Data(endpoint.utf8))
     }
 
     func validate(deviceID: String, method: String, path: String, timestamp: String, signature: String, body: Data) throws {
@@ -206,6 +1260,23 @@ actor HostState {
 
     func devicesList() -> [DeviceRecord] {
         devices
+    }
+
+    func registerPushToken(deviceID: String, request: PushTokenRequest) {
+        guard config.resolvedPushNotificationsEnabled else {
+            appendAudit("ignored push registration device=\(deviceID) reason=disabled")
+            return
+        }
+        guard let index = devices.firstIndex(where: { $0.id == deviceID }) else { return }
+        devices[index].pushToken = request.deviceToken
+        devices[index].pushEnvironment = request.environment
+        devices[index].pushBundleID = request.bundleID
+        devices[index].pushLocale = request.locale
+        devices[index].pushUpdatedAt = Date()
+        devices[index].lastSeenAt = Date()
+        persistDevices()
+        let suffix = request.deviceToken.suffix(6)
+        appendAudit("registered push device=\(deviceID) env=\(request.environment) tokenSuffix=\(suffix)")
     }
 
     func runsList() -> [HostRun] {
@@ -240,18 +1311,41 @@ actor HostState {
             && activeRuns < config.maxActiveRuns
     }
 
-    func createRun(prompt: String, workingDirectory: String, attachments: [RunAttachmentUpload] = []) throws -> HostRun {
+    func createRun(
+        prompt: String,
+        workingDirectory: String,
+        engine: AgentEngine = .hermes,
+        resumeSessionID: String? = nil,
+        projectID: String? = nil,
+        chatID: String? = nil,
+        provider: String? = nil,
+        model: String? = nil,
+        attachments: [RunAttachmentUpload] = [],
+        forceApprovalReason: String? = nil,
+        forceApprovalSeverity: ApprovalSeverity = .high
+    ) throws -> HostRun {
         let directory = (workingDirectory.isEmpty ? config.defaultWorkingDirectory : workingDirectory).expandingTilde
         guard FileManager.default.fileExists(atPath: directory) else {
             throw HostError.badRequest("Working directory does not exist")
         }
         let risk = RiskClassifier.classify(prompt)
-        let approvalReason: String? = if !budgetAllows(project: directory) {
+        let approvalReason: String? = if let forceApprovalReason = forceApprovalReason?.nilIfBlank {
+            forceApprovalReason
+        } else if !budgetAllows(project: directory) {
             "Budget guard exceeded"
         } else if risk.requiresApproval {
             risk.reason
         } else {
             nil
+        }
+        let approvalSeverity: ApprovalSeverity? = if approvalReason == nil {
+            nil
+        } else if forceApprovalReason?.nilIfBlank != nil {
+            forceApprovalSeverity
+        } else if approvalReason == "Budget guard exceeded" {
+            .high
+        } else {
+            risk.severity
         }
         var run = HostRun(
             id: UUID().uuidString,
@@ -263,7 +1357,14 @@ actor HostState {
             completedAt: nil,
             exitCode: nil,
             pid: nil,
-            approvalReason: approvalReason
+            approvalReason: approvalReason,
+            engine: engine,
+            resumeSessionID: resumeSessionID?.nilIfBlank,
+            projectID: projectID?.nilIfBlank,
+            chatID: chatID?.nilIfBlank,
+            provider: provider?.nilIfBlank,
+            model: model?.nilIfBlank,
+            approvalSeverity: approvalSeverity
         )
         let savedAttachments = try AttachmentStore.save(attachments, runID: run.id)
         if !savedAttachments.isEmpty {
@@ -274,10 +1375,11 @@ actor HostState {
         runs[run.id] = run
         persistRuns()
         if let approvalReason {
-            appendAudit("created approval run id=\(run.id) dir=\(directory) reason=\(approvalReason)")
+            appendAudit("created approval run id=\(run.id) engine=\(engine.rawValue) dir=\(directory) reason=\(approvalReason)")
             publish(HostLogEvent(runID: run.id, kind: .approval, stream: "approval", message: approvalReason, createdAt: Date()))
+            notifyDevices(run: run, event: .approval, message: approvalReason, severity: approvalSeverity ?? .high)
         } else {
-            appendAudit("created run id=\(run.id) dir=\(directory)")
+            appendAudit("created run id=\(run.id) engine=\(engine.rawValue) dir=\(directory)")
         }
         return run
     }
@@ -294,17 +1396,40 @@ actor HostState {
 
     func appendLog(runID: String, stream: String, message: String) {
         let redacted = Redactor.redact(message)
-        if let sessionID = SessionParser.sessionID(from: redacted), var run = runs[runID] {
-            run.sessionID = sessionID
-            runs[runID] = run
-            persistRuns()
+        if var run = runs[runID] {
+            var didUpdate = false
+            if let sessionID = SessionParser.sessionID(from: redacted), run.sessionID != sessionID {
+                run.sessionID = sessionID
+                didUpdate = true
+            }
+            if let usage = RunUsageParser.parse(redacted) {
+                applyUsage(usage, to: &run)
+                didUpdate = true
+            }
+            if didUpdate {
+                runs[runID] = run
+                persistRuns()
+            }
         }
         publish(HostLogEvent(runID: runID, kind: .log, stream: stream, message: redacted, createdAt: Date(), sessionID: runs[runID]?.sessionID))
+    }
+
+    private func applyUsage(_ usage: RunUsage, to run: inout HostRun) {
+        run.usage = run.usage.map { $0.merged(with: usage) } ?? usage
+    }
+
+    private func refreshHermesUsageIfAvailable(for run: inout HostRun) {
+        guard let sessionID = run.sessionID?.nilIfBlank else { return }
+        guard let usage = HermesUsageStore().usage(sessionID: sessionID) else { return }
+        applyUsage(usage, to: &run)
     }
 
     func finish(runID: String, exitCode: Int32) {
         guard var run = runs[runID] else { return }
         guard run.status != .cancelled else { return }
+        if run.engineOrDefault == .hermes {
+            refreshHermesUsageIfAvailable(for: &run)
+        }
         run.status = exitCode == 0 ? .complete : .failed
         run.exitCode = exitCode
         run.completedAt = Date()
@@ -314,20 +1439,26 @@ actor HostState {
         persistRuns()
         appendAudit("finished run id=\(runID) exit=\(exitCode)")
         publish(HostLogEvent(runID: runID, kind: .complete, stream: "host", message: "Exit code: \(exitCode)", createdAt: Date(), sessionID: run.sessionID, exitCode: exitCode))
+        notifyDevices(
+            run: run,
+            event: exitCode == 0 ? .complete : .failed,
+            message: exitCode == 0 ? "Run complete" : "Run failed with exit code \(exitCode)",
+            severity: .low
+        )
     }
 
     func cancel(runID: String) {
+        guard var run = runs[runID] else { return }
+        guard ![RunStatusWire.complete, .failed, .cancelled].contains(run.status) else { return }
         if let pid = processes[runID] {
             kill(pid, SIGTERM)
             usleep(200_000)
             kill(pid, SIGKILL)
         }
-        if var run = runs[runID] {
-            run.status = .cancelled
-            run.completedAt = Date()
-            run.pid = nil
-            runs[runID] = run
-        }
+        run.status = .cancelled
+        run.completedAt = Date()
+        run.pid = nil
+        runs[runID] = run
         processes[runID] = nil
         persistRuns()
         appendAudit("cancelled run id=\(runID)")
@@ -391,6 +1522,36 @@ actor HostState {
         logs[event.runID, default: []].append(event)
         appendLogFile(event)
         subscribers[event.runID]?.values.forEach { $0(event) }
+        if event.kind == .log,
+           let run = runs[event.runID],
+           Self.isQuestionLike(event.message) {
+            notifyDevices(run: run, event: .question, message: event.message, severity: .low)
+        }
+    }
+
+    private func notifyDevices(run: HostRun, event: PushEventType, message: String, severity: ApprovalSeverity) {
+        let redactedMessage = Redactor.redact(message)
+        let config = config
+        if DiscordWebhookNotifier.shouldNotify(event: event) {
+            Task.detached {
+                await DiscordWebhookNotifier.sendRun(config: config, run: run, event: event, message: redactedMessage, severity: severity)
+            }
+        }
+        guard config.resolvedPushNotificationsEnabled else { return }
+        let recipients = devices.filter { $0.pushToken?.nilIfBlank != nil }
+        guard !recipients.isEmpty else { return }
+        Task.detached {
+            await APNsPushService.send(run: run, event: event, message: redactedMessage, severity: severity, devices: recipients, config: config)
+        }
+    }
+
+    private static func isQuestionLike(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("need input")
+            || lower.contains("waiting for user")
+            || lower.contains("question:")
+            || lower.contains("ユーザー確認")
+            || lower.contains("質問:")
     }
 
     private func appendAudit(_ line: String) {
@@ -481,9 +1642,12 @@ final class HostServer: @unchecked Sendable {
     private let config: HostConfig
     private let state: HostState
     private let listener: NWListener
-    private let runner: HermesRunner
+    private let runner: AgentRunner
     private let memoryStore = HermesMemoryStore()
     private let historyStore = AgentHistoryStore()
+    private let telemetryCollector = HostTelemetryCollector()
+    private let portfolioStore: PortfolioRegistryStore
+    private let portfolioMonitor: PortfolioMonitor
     private let connectionLock = NSLock()
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
 
@@ -491,7 +1655,9 @@ final class HostServer: @unchecked Sendable {
         self.config = config
         self.state = state
         self.listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: config.port)!)
-        self.runner = HermesRunner(state: state)
+        self.runner = AgentRunner(state: state)
+        self.portfolioStore = PortfolioRegistryStore(config: config)
+        self.portfolioMonitor = PortfolioMonitor(store: portfolioStore, config: config)
     }
 
     func start() throws {
@@ -499,6 +1665,7 @@ final class HostServer: @unchecked Sendable {
             self?.handle(connection)
         }
         listener.start(queue: .global(qos: .userInitiated))
+        portfolioMonitor.start()
         Task {
             let recoverable = await state.recoverableRunIDs()
             for runID in recoverable {
@@ -556,12 +1723,16 @@ final class HostServer: @unchecked Sendable {
     private func route(_ request: HTTPRequest, connection: NWConnection) async {
         do {
             if request.path == "/v1/health" {
+                let toolStatuses = CLIAdapterRegistry.allStatuses()
+                let currentTailscaleIP = tailscaleIP()
                 let response = HealthResponse(
                     status: "ok",
                     host: localHostName(),
-                    tailscaleIP: tailscaleIP(),
+                    tailscaleIP: currentTailscaleIP,
                     port: config.port,
-                    hermesVersion: HermesRunner.hermesVersion()
+                    hermesVersion: toolStatuses.first { $0.engine == AgentEngine.hermes.rawValue }?.version ?? AgentRunner.hermesVersion(),
+                    toolStatuses: toolStatuses,
+                    telemetry: await telemetryCollector.snapshot(tailscaleIP: currentTailscaleIP)
                 )
                 sendJSON(response, connection: connection)
                 return
@@ -569,7 +1740,12 @@ final class HostServer: @unchecked Sendable {
 
             if request.path == "/v1/pair", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(PairRequest.self, from: request.body)
-                let result = try await state.pair(deviceName: body.deviceName, code: body.pairingCode)
+                let result = try await state.pair(
+                    deviceName: body.deviceName,
+                    code: body.pairingCode,
+                    pairingEndpoint: body.pairingEndpoint,
+                    pairingSignature: body.pairingSignature
+                )
                 sendJSON(PairResponse(deviceID: result.deviceID, token: result.token), connection: connection)
                 return
             }
@@ -581,7 +1757,37 @@ final class HostServer: @unchecked Sendable {
                 return
             }
 
-            try await authenticate(request)
+            let authenticatedDeviceID = try await authenticate(request)
+
+            if request.path == "/v1/telemetry", request.method == "GET" {
+                sendJSON(await telemetryCollector.snapshot(tailscaleIP: tailscaleIP()), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/voice/cleanup", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(VoiceCleanupRequest.self, from: request.body)
+                sendJSON(try VoiceCleanupRunner.cleanup(body), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/notifications/discord/test", request.method == "POST" {
+                guard let webhook = config.resolvedDiscordWebhook else {
+                    throw HostError.badRequest("Discord webhook is not configured.")
+                }
+                let host = localHostName()
+                let content = "Veqral Discord テスト通知: \(host) の Mac Host から送信しました。"
+                await DiscordWebhookNotifier.send(webhook: webhook, content: content)
+                await state.recordAudit("discord test notification requested device=\(authenticatedDeviceID)")
+                sendJSON(NotificationTestResponse(ok: true, message: "Discord test notification sent."), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/push/token", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(PushTokenRequest.self, from: request.body)
+                await state.registerPushToken(deviceID: authenticatedDeviceID, request: body)
+                sendJSON(PushTokenResponse(ok: true), connection: connection)
+                return
+            }
 
             if request.path == "/v1/setup/unattended/status", request.method == "GET" {
                 sendJSON(UnattendedSetupManager.status(), connection: connection)
@@ -617,6 +1823,12 @@ final class HostServer: @unchecked Sendable {
                 return
             }
 
+            if request.path == "/v1/memory/project", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(ProjectMemoryRequest.self, from: request.body)
+                sendJSON(try memoryStore.projectMemory(projectID: body.projectID, projectName: body.projectName), connection: connection)
+                return
+            }
+
             if request.path == "/v1/memory/diff", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(MemoryWriteRequest.self, from: request.body)
                 sendJSON(try memoryStore.diff(id: body.id, proposedContent: body.content), connection: connection)
@@ -632,7 +1844,8 @@ final class HostServer: @unchecked Sendable {
             }
 
             if request.path == "/v1/devices", request.method == "GET" {
-                sendJSON(DeviceListResponse(devices: await state.devicesList()), connection: connection)
+                let devices = await state.devicesList().map { DeviceListRecord(device: $0) }
+                sendJSON(DeviceListResponse(devices: devices), connection: connection)
                 return
             }
 
@@ -679,6 +1892,71 @@ final class HostServer: @unchecked Sendable {
                 return
             }
 
+            if request.path == "/v1/portfolio/assets", request.method == "GET" {
+                sendJSON(PortfolioAssetListResponse(assets: try portfolioStore.list()), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/portfolio/assets", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(PortfolioAssetRequest.self, from: request.body)
+                let asset = try portfolioStore.upsert(body.asset, message: "Create \(body.asset.name)")
+                await state.recordAudit("portfolio created asset id=\(asset.id)")
+                sendJSON(asset, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/portfolio/discover", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(PortfolioDiscoverRequest.self, from: request.body)
+                let assets = try portfolioStore.discover(request: body)
+                await state.recordAudit("portfolio discover assets=\(assets.count)")
+                sendJSON(PortfolioAssetListResponse(assets: assets), connection: connection)
+                return
+            }
+
+            if request.path.hasPrefix("/v1/portfolio/assets/") {
+                let parts = request.path.split(separator: "/").map(String.init)
+                guard parts.count >= 4 else { throw HostError.notFound("Invalid portfolio path") }
+                let assetID = parts[3]
+                if request.method == "PATCH", parts.count == 4 {
+                    let body = try JSONDecoder.dates.decode(PortfolioAssetRequest.self, from: request.body)
+                    let asset = try portfolioStore.upsert(body.asset, message: "Update \(body.asset.name)")
+                    await state.recordAudit("portfolio updated asset id=\(asset.id)")
+                    sendJSON(asset, connection: connection)
+                    return
+                }
+                if request.method == "DELETE", parts.count == 4 {
+                    try portfolioStore.delete(id: assetID)
+                    await state.recordAudit("portfolio deleted asset id=\(assetID)")
+                    sendJSON(SimpleResponse(ok: true), connection: connection)
+                    return
+                }
+                guard parts.count >= 5 else { throw HostError.notFound("Invalid portfolio action") }
+                let action = parts[4]
+                switch (request.method, action) {
+                case ("GET", "status"):
+                    sendJSON(try portfolioStore.status(id: assetID), connection: connection)
+                case ("GET", "logs"):
+                    sendJSON(PortfolioLogsResponse(assetID: assetID, lines: try portfolioStore.logs(id: assetID)), connection: connection)
+                case ("GET", "log-summary"):
+                    let summary = try portfolioStore.logSummary(id: assetID)
+                    sendJSON(PortfolioLogSummaryResponse(assetID: assetID, summary: summary, generatedAt: Date()), connection: connection)
+                case ("GET", "commits"):
+                    sendJSON(PortfolioCommitsResponse(assetID: assetID, commits: try portfolioStore.recentCommits(id: assetID)), connection: connection)
+                case ("POST", "control"):
+                    let body = try JSONDecoder.dates.decode(PortfolioControlRequest.self, from: request.body)
+                    let response = try await portfolioStore.controlRun(assetID: assetID, action: body.action, state: state)
+                    await state.recordAudit("portfolio queued control asset=\(assetID) action=\(body.action) run=\(response.runID)")
+                    sendJSON(response, connection: connection)
+                case ("POST", "promote"):
+                    let response = try await portfolioStore.promoteRun(assetID: assetID, state: state)
+                    await state.recordAudit("portfolio queued promote asset=\(assetID) run=\(response.runID)")
+                    sendJSON(response, connection: connection)
+                default:
+                    throw HostError.notFound("Unknown portfolio action")
+                }
+                return
+            }
+
             if request.headers["upgrade"]?.lowercased() == "websocket",
                request.path.hasPrefix("/v1/runs/"),
                request.path.hasSuffix("/events") {
@@ -694,14 +1972,25 @@ final class HostServer: @unchecked Sendable {
 
             if request.path == "/v1/runs", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(CreateRunRequest.self, from: request.body)
-                let run = try await state.createRun(prompt: body.prompt, workingDirectory: body.workingDirectory, attachments: body.attachments ?? [])
+                let run = try await state.createRun(
+                    prompt: body.prompt,
+                    workingDirectory: body.workingDirectory,
+                    engine: body.engine ?? .hermes,
+                    resumeSessionID: body.resumeSessionID,
+                    projectID: body.projectID,
+                    chatID: body.chatID,
+                    provider: body.provider,
+                    model: body.model,
+                    attachments: body.attachments ?? []
+                )
                 sendJSON(
                     CreateRunResponse(
                         runID: run.id,
                         sessionID: run.sessionID,
                         status: run.status.rawValue,
                         approvalRequired: run.status == .waitingApproval,
-                        approvalReason: run.approvalReason
+                        approvalReason: run.approvalReason,
+                        approvalSeverity: run.approvalSeverity?.rawValue
                     ),
                     connection: connection
                 )
@@ -739,6 +2028,11 @@ final class HostServer: @unchecked Sendable {
                 case ("GET", "artifacts"):
                     guard let run = await state.run(runID: runID) else { throw HostError.notFound("Run not found") }
                     sendJSON(ArtifactListResponse(artifacts: ArtifactScanner.artifacts(for: run)), connection: connection)
+                case ("POST", "artifact-content"):
+                    guard let run = await state.run(runID: runID) else { throw HostError.notFound("Run not found") }
+                    let body = try JSONDecoder.dates.decode(ArtifactContentRequest.self, from: request.body)
+                    let response = try ArtifactScanner.content(run: run, artifactID: body.artifactID)
+                    sendJSON(response, connection: connection)
                 case ("POST", "cancel"):
                     await state.cancel(runID: runID)
                     sendJSON(SimpleResponse(ok: true), connection: connection)
@@ -765,7 +2059,7 @@ final class HostServer: @unchecked Sendable {
         }
     }
 
-    private func authenticate(_ request: HTTPRequest) async throws {
+    private func authenticate(_ request: HTTPRequest) async throws -> String {
         guard let device = request.headers["x-veqral-device"],
               let timestamp = request.headers["x-veqral-timestamp"],
               let signature = request.headers["x-veqral-signature"] else {
@@ -779,6 +2073,7 @@ final class HostServer: @unchecked Sendable {
             signature: signature,
             body: request.body
         )
+        return device
     }
 
     private func upgradeToWebSocket(_ request: HTTPRequest, connection: NWConnection) async throws {
@@ -852,47 +2147,109 @@ final class HostServer: @unchecked Sendable {
     }
 }
 
-final class HermesRunner {
-    private let state: HostState
+struct CLIToolStatus: Codable, Sendable, Equatable {
+    var engine: String
+    var title: String
+    var executablePath: String?
+    var version: String
+    var adapter: String
+    var commandShape: String
+    var isInstalled: Bool
+    var isKnownCompatible: Bool
+    var compatibilityNote: String
 
-    init(state: HostState) {
-        self.state = state
+    var versionSummary: String {
+        version.split(whereSeparator: \.isNewline).first.map(String.init) ?? version
+    }
+}
+
+struct CLIExecutionPlan: Sendable {
+    var executable: String
+    var arguments: [String]
+    var toolStatus: CLIToolStatus
+}
+
+enum CLIAdapterRegistry {
+    static func allStatuses() -> [CLIToolStatus] {
+        AgentEngine.allCases.map { status(for: $0) }
     }
 
-    static func hermesPath() -> String? {
-        let home = NSHomeDirectory()
-        let candidates = [
-            "\(home)/.local/bin/hermes",
-            "\(home)/.hermes/hermes-agent/venv/bin/hermes",
-            "/opt/homebrew/bin/hermes",
-            "/usr/local/bin/hermes"
+    static func status(for engine: AgentEngine) -> CLIToolStatus {
+        let path = executablePath(for: engine)
+        let version = path.map { detectVersion(executable: $0) } ?? "Not installed"
+        let compatibility = compatibility(for: engine, version: version, installed: path != nil)
+        return CLIToolStatus(
+            engine: engine.rawValue,
+            title: engine.title,
+            executablePath: path,
+            version: version,
+            adapter: adapterName(for: engine),
+            commandShape: commandShape(for: engine),
+            isInstalled: path != nil,
+            isKnownCompatible: compatibility.known,
+            compatibilityNote: compatibility.note
+        )
+    }
+
+    static func plan(for run: HostRun) -> CLIExecutionPlan? {
+        let toolStatus = status(for: run.engineOrDefault)
+        guard let executable = toolStatus.executablePath else {
+            return nil
+        }
+        return CLIExecutionPlan(
+            executable: executable,
+            arguments: arguments(for: run),
+            toolStatus: toolStatus
+        )
+    }
+
+    static func adapterDiagnostic(for tool: CLIToolStatus, output: String, exitCode: Int32) -> String? {
+        guard exitCode != 0 else { return nil }
+        let lower = output.lowercased()
+        let flagFailureMarkers = [
+            "unexpected argument",
+            "unknown option",
+            "unrecognized option",
+            "unknown command",
+            "invalid option",
+            "no such option",
+            "unrecognized arguments",
+            "unrecognized subcommand",
+            "unknown subcommand"
         ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+        guard flagFailureMarkers.contains(where: { lower.contains($0) }) else {
+            return nil
+        }
+        return "\(tool.title) \(tool.versionSummary): CLI flags or subcommands were rejected for \(tool.commandShape). Update \(tool.adapter) in MacHost/Sources/VeqralHost/main.swift if the CLI changed."
     }
 
     static func hermesVersion() -> String {
-        guard let path = hermesPath() else { return "Not installed" }
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = ["--version"]
-        process.standardOutput = pipe
-        try? process.run()
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Installed"
+        status(for: .hermes).version
     }
 
-    func start(runID: String) async {
-        guard let run = await state.run(runID: runID) else { return }
-        guard let hermes = Self.hermesPath() else {
-            await state.appendLog(runID: runID, stream: "error", message: "Hermes is not installed")
-            await state.finish(runID: runID, exitCode: 127)
-            return
+    private static func arguments(for run: HostRun) -> [String] {
+        switch run.engineOrDefault {
+        case .hermes:
+            hermesArguments(for: run)
+        case .codex:
+            codexArguments(for: run)
+        case .claude:
+            claudeArguments(for: run)
+        case .shell:
+            ["-lc", run.prompt]
         }
+    }
+
+    private static func hermesArguments(for run: HostRun) -> [String] {
+        let source = "veqral-\(safeTag(run.projectID ?? projectName(for: run.workingDirectory)))"
+        let modelLine = [run.provider, run.model].compactMap { $0?.nilIfBlank }.joined(separator: " / ")
         let prompt = """
         You are Hermes Agent running under Veqral Mac Host.
         Use Codex CLI and other configured CLI tools through Hermes when useful.
+        Project scope: \(run.projectID ?? projectName(for: run.workingDirectory))
+        Chat: \(run.chatID ?? "new")
+        Model/provider selection: \(modelLine.isEmpty ? "Hermes configured default" : modelLine)
+        Use Hermes native persistent memory, skills, checkpoints, and session history. Do not create a separate shared memory store for Veqral.
         Follow Veqral's P0 policy:
         - Use --worktree for repository work.
         - Auto-run implementation, tests, commits, branch creation, non-main push, and draft PR creation when appropriate.
@@ -905,31 +2262,268 @@ final class HermesRunner {
         var args = [
             "chat",
             "-Q",
-            "--source", "veqral",
+            "--source", source,
             "--checkpoints",
             "--worktree",
             "--pass-session-id",
             "--toolsets", "terminal,file,skills,memory,browser",
             "--max-turns", "40"
         ]
-        if let sessionID = run.sessionID {
+        if let provider = run.provider?.nilIfBlank {
+            args.append(contentsOf: ["--provider", provider])
+        }
+        if let model = run.model?.nilIfBlank {
+            args.append(contentsOf: ["--model", model])
+        }
+        if let sessionID = run.resumeSessionID?.nilIfBlank ?? run.sessionID?.nilIfBlank {
             args.append(contentsOf: ["--resume", sessionID])
         }
-        args.append(contentsOf: [
-            "-q", prompt
-        ])
+        args.append(contentsOf: ["-q", prompt])
+        return args
+    }
+
+    private static func codexArguments(for run: HostRun) -> [String] {
+        let prompt = directPrompt(for: run, engineName: "Codex")
+        var args = [
+            "exec",
+            "--cd", run.workingDirectory,
+            "--sandbox", "workspace-write"
+        ]
+        if let model = run.model?.nilIfBlank {
+            args.append(contentsOf: ["--model", model])
+        }
+        if let resumeID = run.resumeSessionID?.nilIfBlank ?? run.sessionID?.nilIfBlank {
+            args.append(contentsOf: ["resume", resumeID, prompt])
+        } else {
+            args.append(prompt)
+        }
+        return args
+    }
+
+    private static func claudeArguments(for run: HostRun) -> [String] {
+        let prompt = directPrompt(for: run, engineName: "Claude")
+        var args = [
+            "--print",
+            "--output-format", "stream-json",
+            "--permission-mode", "auto"
+        ]
+        if let model = run.model?.nilIfBlank {
+            args.append(contentsOf: ["--model", model])
+        }
+        if let resumeID = run.resumeSessionID?.nilIfBlank ?? run.sessionID?.nilIfBlank {
+            args.append(contentsOf: ["--resume", resumeID])
+        }
+        args.append(prompt)
+        return args
+    }
+
+    private static func directPrompt(for run: HostRun, engineName: String) -> String {
+        """
+        You are \(engineName) running directly from Veqral Mac Host.
+        This is direct mode: use your own native session history and memory. Do not write to Hermes memory for this run.
+        Follow Veqral safety: stop and explain before deletion, main/force push, merge, production deploy, billing, secrets, tokens, .env, or Computer Use.
+
+        User request:
+        \(run.prompt)
+        """
+    }
+
+    private static func executablePath(for engine: AgentEngine) -> String? {
+        switch engine {
+        case .hermes:
+            executablePath(
+                named: "hermes",
+                candidates: [
+                    "\(NSHomeDirectory())/.local/bin/hermes",
+                    "\(NSHomeDirectory())/.hermes/hermes-agent/venv/bin/hermes",
+                    "/opt/homebrew/bin/hermes",
+                    "/usr/local/bin/hermes"
+                ]
+            )
+        case .codex:
+            executablePath(
+                named: "codex",
+                candidates: [
+                    "\(NSHomeDirectory())/.local/bin/codex",
+                    "/opt/homebrew/bin/codex",
+                    "/usr/local/bin/codex"
+                ]
+            )
+        case .claude:
+            executablePath(
+                named: "claude",
+                candidates: [
+                    "\(NSHomeDirectory())/.local/bin/claude",
+                    "/opt/homebrew/bin/claude",
+                    "/usr/local/bin/claude"
+                ]
+            )
+        case .shell:
+            "/bin/zsh"
+        }
+    }
+
+    private static func executablePath(named name: String, candidates: [String]) -> String? {
+        if let candidate = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            return candidate
+        }
+        let output = ProcessRunner.run(
+            "/bin/zsh",
+            ["-lc", "PATH=\(shellQuoted("\(NSHomeDirectory())/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")) command -v \(shellQuoted(name))"],
+            timeout: 5
+        )
+        let discovered = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return FileManager.default.isExecutableFile(atPath: discovered) ? discovered : nil
+    }
+
+    private static func detectVersion(executable: String) -> String {
+        let output = ProcessRunner.run(executable, ["--version"], timeout: 15)
+        let text = output.combinedTrimmed
+        return text.isEmpty ? "Installed" : text
+    }
+
+    private static func compatibility(for engine: AgentEngine, version: String, installed: Bool) -> (known: Bool, note: String) {
+        guard installed else {
+            return (false, "\(engine.title) CLI is not installed.")
+        }
+        guard let parsed = SemanticVersion.first(in: version) else {
+            return (false, "Version could not be parsed. The latest known \(adapterName(for: engine)) shape will be used.")
+        }
+        let expected: SemanticVersion
+        switch engine {
+        case .hermes:
+            expected = SemanticVersion(major: 0, minor: 15, patch: 1)
+        case .codex:
+            expected = SemanticVersion(major: 0, minor: 130, patch: 0)
+        case .claude:
+            expected = SemanticVersion(major: 2, minor: 1, patch: 144)
+        case .shell:
+            return (true, "Shell commands run through /bin/zsh with Veqral approval gates.")
+        }
+        if parsed.major == expected.major, parsed.minor == expected.minor {
+            var note = "Known command shape: \(adapterName(for: engine))."
+            if version.localizedCaseInsensitiveContains("update available") {
+                note += " CLI reports an update is available."
+            }
+            return (true, note)
+        }
+        if parsed.major > expected.major || (parsed.major == expected.major && parsed.minor > expected.minor) {
+            return (false, "\(engine.title) is newer than the validated adapter range. Runs still use the latest known command shape.")
+        }
+        return (false, "\(engine.title) is older than the validated adapter range. Upgrade the CLI or adjust \(adapterName(for: engine)).")
+    }
+
+    private static func adapterName(for engine: AgentEngine) -> String {
+        switch engine {
+        case .hermes:
+            "HermesChatAdapter"
+        case .codex:
+            "CodexExecAdapter"
+        case .claude:
+            "ClaudePrintAdapter"
+        case .shell:
+            "ShellPTYAdapter"
+        }
+    }
+
+    private static func commandShape(for engine: AgentEngine) -> String {
+        switch engine {
+        case .hermes:
+            "hermes chat -Q --source veqral-<project> --provider <provider> --model <model> --checkpoints --worktree"
+        case .codex:
+            "codex exec [--model <model>] [resume <session>] <prompt>"
+        case .claude:
+            "claude --print --output-format stream-json [--resume <session>] [--model <model>] <prompt>"
+        case .shell:
+            "zsh -lc <approved command>"
+        }
+    }
+
+    private static func projectName(for path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent.nilIfBlank ?? "project"
+    }
+
+    private static func safeTag(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let scalars = value.lowercased().unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        return String(scalars).trimmingCharacters(in: CharacterSet(charactersIn: "-")).nilIfBlank ?? "project"
+    }
+}
+
+struct SemanticVersion: Sendable, Equatable {
+    var major: Int
+    var minor: Int
+    var patch: Int
+
+    static func first(in text: String) -> SemanticVersion? {
+        guard let regex = try? NSRegularExpression(pattern: #"(\d+)\.(\d+)(?:\.(\d+))?"#) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let majorRange = Range(match.range(at: 1), in: text),
+              let minorRange = Range(match.range(at: 2), in: text),
+              let major = Int(text[majorRange]),
+              let minor = Int(text[minorRange]) else {
+            return nil
+        }
+        let patch: Int
+        if match.range(at: 3).location != NSNotFound,
+           let patchRange = Range(match.range(at: 3), in: text),
+           let parsedPatch = Int(text[patchRange]) {
+            patch = parsedPatch
+        } else {
+            patch = 0
+        }
+        return SemanticVersion(major: major, minor: minor, patch: patch)
+    }
+}
+
+final class AgentRunner {
+    private let state: HostState
+
+    init(state: HostState) {
+        self.state = state
+    }
+
+    static func hermesVersion() -> String {
+        CLIAdapterRegistry.hermesVersion()
+    }
+
+    func start(runID: String) async {
+        guard let run = await state.run(runID: runID) else { return }
+        guard let plan = CLIAdapterRegistry.plan(for: run) else {
+            let status = CLIAdapterRegistry.status(for: run.engineOrDefault)
+            await state.appendLog(runID: runID, stream: "error", message: status.compatibilityNote)
+            await state.finish(runID: runID, exitCode: 127)
+            return
+        }
+        await state.appendLog(runID: runID, stream: "host", message: "Starting \(plan.toolStatus.title) engine with \(plan.toolStatus.adapter) (\(plan.toolStatus.versionSummary))")
+        if !plan.toolStatus.isKnownCompatible {
+            await state.appendLog(runID: runID, stream: "warn", message: plan.toolStatus.compatibilityNote)
+        }
         await PTYProcess.run(
-            executable: hermes,
-            arguments: args,
+            executable: plan.executable,
+            arguments: plan.arguments,
             workingDirectory: run.workingDirectory,
             runID: runID,
-            state: state
+            state: state,
+            toolStatus: plan.toolStatus
         )
     }
 }
 
 enum PTYProcess {
-    static func run(executable: String, arguments: [String], workingDirectory: String, runID: String, state: HostState) async {
+    static func run(
+        executable: String,
+        arguments: [String],
+        workingDirectory: String,
+        runID: String,
+        state: HostState,
+        toolStatus: CLIToolStatus? = nil
+    ) async {
         var master: Int32 = -1
         var slave: Int32 = -1
         guard openpty(&master, &slave, nil, nil, nil) == 0 else {
@@ -944,11 +2538,17 @@ enum PTYProcess {
 
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
-        posix_spawn_file_actions_addchdir_np(&actions, workingDirectory)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        let chdirStatus = posix_spawn_file_actions_addchdir_np(&actions, workingDirectory)
+        guard chdirStatus == 0 else {
+            let reason = String(cString: strerror(chdirStatus))
+            await state.appendLog(runID: runID, stream: "error", message: Redactor.redact("Failed to prepare working directory \(workingDirectory): \(reason) (\(chdirStatus))"))
+            await state.finish(runID: runID, exitCode: 127)
+            return
+        }
         posix_spawn_file_actions_adddup2(&actions, slave, STDIN_FILENO)
         posix_spawn_file_actions_adddup2(&actions, slave, STDOUT_FILENO)
         posix_spawn_file_actions_adddup2(&actions, slave, STDERR_FILENO)
-        defer { posix_spawn_file_actions_destroy(&actions) }
 
         let argStrings = [executable] + arguments
         var argv: [UnsafeMutablePointer<CChar>?] = argStrings.map { strdup($0) }
@@ -956,11 +2556,12 @@ enum PTYProcess {
         defer { argv.forEach { if $0 != nil { free($0) } } }
 
         let home = NSHomeDirectory()
-        let envStrings = [
-            "PATH=\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME=\(home)",
-            "LANG=en_US.UTF-8"
-        ]
+        var mergedEnvironment = ProcessInfo.processInfo.environment
+        mergedEnvironment["PATH"] = launchAgentPath(home: home, inherited: mergedEnvironment["PATH"])
+        mergedEnvironment["HOME"] = home
+        mergedEnvironment["LANG"] = mergedEnvironment["LANG"]?.nilIfBlank ?? "en_US.UTF-8"
+        mergedEnvironment["TERM"] = mergedEnvironment["TERM"]?.nilIfBlank ?? "xterm-256color"
+        let envStrings = mergedEnvironment.map { "\($0.key)=\($0.value)" }.sorted()
         var env: [UnsafeMutablePointer<CChar>?] = envStrings.map { strdup($0) }
         env.append(nil)
         defer { env.forEach { if $0 != nil { free($0) } } }
@@ -976,7 +2577,9 @@ enum PTYProcess {
         close(slave)
         slave = -1
         if status != 0 {
-            await state.appendLog(runID: runID, stream: "error", message: "Failed to spawn Hermes: \(status)")
+            let reason = String(cString: strerror(status))
+            let title = toolStatus?.title ?? "process"
+            await state.appendLog(runID: runID, stream: "error", message: Redactor.redact("Failed to spawn \(title) at \(executable): \(reason) (\(status)). Check the CLI path and working directory."))
             await state.finish(runID: runID, exitCode: 127)
             return
         }
@@ -985,16 +2588,23 @@ enum PTYProcess {
 
         var waitStatus: Int32 = 0
         var lineBuffer = Data()
+        var capturedOutput = ""
         while true {
-            await readAvailable(master: master, buffer: &lineBuffer, runID: runID, state: state)
+            appendCaptured(&capturedOutput, await readAvailable(master: master, buffer: &lineBuffer, runID: runID, state: state))
             let result = waitpid(pid, &waitStatus, WNOHANG)
             if result == pid {
-                await readAvailable(master: master, buffer: &lineBuffer, runID: runID, state: state)
+                appendCaptured(&capturedOutput, await readAvailable(master: master, buffer: &lineBuffer, runID: runID, state: state))
                 if !lineBuffer.isEmpty {
                     let text = String(data: lineBuffer, encoding: .utf8) ?? ""
+                    appendCaptured(&capturedOutput, text)
                     await state.appendLog(runID: runID, stream: "pty", message: text)
                 }
-                await state.finish(runID: runID, exitCode: exitCode(from: waitStatus))
+                let code = exitCode(from: waitStatus)
+                if let toolStatus,
+                   let diagnostic = CLIAdapterRegistry.adapterDiagnostic(for: toolStatus, output: capturedOutput, exitCode: code) {
+                    await state.appendLog(runID: runID, stream: "adapter", message: diagnostic)
+                }
+                await state.finish(runID: runID, exitCode: code)
                 break
             }
             if result == -1 {
@@ -1005,8 +2615,9 @@ enum PTYProcess {
         }
     }
 
-    private static func readAvailable(master: Int32, buffer: inout Data, runID: String, state: HostState) async {
+    private static func readAvailable(master: Int32, buffer: inout Data, runID: String, state: HostState) async -> String {
         var temp = [UInt8](repeating: 0, count: 4096)
+        var emitted = ""
         while true {
             let readCount = Darwin.read(master, &temp, temp.count)
             if readCount > 0 {
@@ -1015,12 +2626,46 @@ enum PTYProcess {
                     let lineData = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
                     buffer.removeSubrange(buffer.startIndex...range.lowerBound)
                     let line = String(data: lineData, encoding: .utf8) ?? ""
+                    emitted += line + "\n"
                     await state.appendLog(runID: runID, stream: "pty", message: line)
                 }
             } else {
                 break
             }
         }
+        return emitted
+    }
+
+    private static func appendCaptured(_ output: inout String, _ text: String) {
+        guard !text.isEmpty else { return }
+        output += text
+        let maxCharacters = 524_288
+        if output.count > maxCharacters {
+            output = String(output.suffix(maxCharacters))
+        }
+    }
+
+    private static func launchAgentPath(home: String, inherited: String?) -> String {
+        var seen = Set<String>()
+        let values = [
+            "\(home)/.local/bin",
+            "\(home)/.cargo/bin",
+            "\(home)/.npm-global/bin",
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+            inherited ?? ""
+        ]
+        return values
+            .flatMap { $0.split(separator: ":").map(String.init) }
+            .filter { !$0.isEmpty }
+            .filter { seen.insert($0).inserted }
+            .joined(separator: ":")
     }
 
     private static func setNonBlocking(_ fd: Int32) {
@@ -1710,8 +3355,22 @@ enum GitDiffInspector {
                       let deletions = Int(parts[1]) else {
                     return nil
                 }
-                return GitDiffEntry(path: parts[2], additions: additions, deletions: deletions)
+                let path = parts[2]
+                return GitDiffEntry(
+                    path: path,
+                    additions: additions,
+                    deletions: deletions,
+                    patch: patch(path: path, workingDirectory: workingDirectory)
+                )
             }
+    }
+
+    private static func patch(path: String, workingDirectory: String) -> String? {
+        let output = runGit("git diff -- \(shellQuoted(path))", workingDirectory: workingDirectory)
+        guard output.exitCode == 0 else { return nil }
+        let trimmed = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(40_000))
     }
 
     static func runGit(_ command: String, workingDirectory: String) -> ProcessOutput {
@@ -1724,6 +3383,8 @@ enum GitDiffInspector {
 }
 
 enum ArtifactScanner {
+    private static let maxInlineArtifactBytes = 12 * 1024 * 1024
+
     static func artifacts(for run: HostRun) -> [HostArtifact] {
         var artifacts = AttachmentStore.artifacts(runID: run.id)
         let root = URL(fileURLWithPath: run.workingDirectory.expandingTilde)
@@ -1754,6 +3415,35 @@ enum ArtifactScanner {
             ))
         }
         return artifacts.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }.prefix(50).map { $0 }
+    }
+
+    static func content(run: HostRun, artifactID: String) throws -> ArtifactContentResponse {
+        guard let artifact = artifacts(for: run).first(where: { $0.id == artifactID }) else {
+            throw HostError.notFound("Artifact not found")
+        }
+        let url = URL(fileURLWithPath: artifact.path)
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values.isRegularFile == true else {
+            throw HostError.notFound("Artifact is not a regular file")
+        }
+        if (values.fileSize ?? 0) > maxInlineArtifactBytes {
+            throw HostError.badRequest("Artifact is too large to preview inline")
+        }
+        let data = try Data(contentsOf: url)
+        return ArtifactContentResponse(artifactID: artifact.id, mimeType: mimeType(for: artifact), data: data)
+    }
+
+    private static func mimeType(for artifact: HostArtifact) -> String {
+        switch artifact.type.lowercased() {
+        case "png", "image/png":
+            "image/png"
+        case "jpg", "jpeg", "image/jpeg":
+            "image/jpeg"
+        case "gif", "image/gif":
+            "image/gif"
+        default:
+            "application/octet-stream"
+        }
     }
 }
 
@@ -1811,6 +3501,625 @@ enum AttachmentStore {
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
         let sanitized = String(base.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" })
         return sanitized.isEmpty ? fallback : sanitized
+    }
+}
+
+enum PortfolioAssetKind: String, Codable, Sendable, CaseIterable {
+    case app
+    case engagement
+    case content
+}
+
+enum PortfolioAssetStatus: String, Codable, Sendable, CaseIterable {
+    case running
+    case stopped
+    case unknown
+    case notApplicable = "n/a"
+}
+
+enum PortfolioBackupState: String, Codable, Sendable {
+    case git
+    case localOnly = "local-only"
+}
+
+struct PortfolioLocalPath: Codable, Sendable, Equatable {
+    var machineId: String
+    var path: String
+}
+
+struct PortfolioSourceRefs: Codable, Sendable, Equatable {
+    var github: String?
+    var driveUrl: String?
+    var localPaths: [PortfolioLocalPath]
+
+    static let empty = PortfolioSourceRefs(github: nil, driveUrl: nil, localPaths: [])
+}
+
+struct PortfolioHealthSpec: Codable, Sendable, Equatable {
+    var type: String
+    var target: String
+}
+
+struct PortfolioLogSource: Codable, Sendable, Equatable {
+    var path: String?
+    var cmd: String?
+}
+
+struct PortfolioControls: Codable, Sendable, Equatable {
+    var start: String?
+    var stop: String?
+    var restart: String?
+    var deploy: String?
+
+    func command(for action: String) -> String? {
+        switch action {
+        case "start": start?.nilIfBlank
+        case "stop": stop?.nilIfBlank
+        case "restart": restart?.nilIfBlank
+        case "deploy": deploy?.nilIfBlank
+        default: nil
+        }
+    }
+}
+
+struct PortfolioDeliverable: Codable, Sendable, Equatable, Identifiable {
+    var id: String { "\(name):\(ref)" }
+    var name: String
+    var ref: String
+}
+
+struct PortfolioAsset: Codable, Sendable, Identifiable, Equatable {
+    var id: String
+    var kind: PortfolioAssetKind
+    var name: String
+    var summary: String
+    var status: PortfolioAssetStatus
+    var sourceRefs: PortfolioSourceRefs
+    var tags: [String]
+    var runtimeHost: String?
+    var healthSpec: PortfolioHealthSpec?
+    var logSource: PortfolioLogSource?
+    var controls: PortfolioControls?
+    var linkedProjectId: String?
+    var backupState: PortfolioBackupState
+    var client: String?
+    var phase: String?
+    var deliverables: [PortfolioDeliverable]
+    var timeline: String?
+    var relatedAssetIds: [String]
+    var createdAt: Date
+    var updatedAt: Date
+}
+
+struct PortfolioAssetListResponse: Codable {
+    var assets: [PortfolioAsset]
+}
+
+struct PortfolioAssetRequest: Codable {
+    var asset: PortfolioAsset
+}
+
+struct PortfolioDiscoverRequest: Codable {
+    var engagementRoots: [String]?
+    var codeRoots: [String]?
+}
+
+struct PortfolioAssetStatusResponse: Codable {
+    var assetID: String
+    var status: PortfolioAssetStatus
+    var health: String
+    var pid: Int32?
+    var cpuPercent: Double?
+    var memoryMB: Double?
+    var checkedAt: Date
+}
+
+struct PortfolioLogsResponse: Codable {
+    var assetID: String
+    var lines: [String]
+}
+
+struct PortfolioLogSummaryResponse: Codable {
+    var assetID: String
+    var summary: String
+    var generatedAt: Date
+}
+
+struct PortfolioRecentCommit: Codable {
+    var sha: String
+    var message: String
+    var author: String
+    var date: Date
+}
+
+struct PortfolioCommitsResponse: Codable {
+    var assetID: String
+    var commits: [PortfolioRecentCommit]
+}
+
+struct PortfolioControlRequest: Codable {
+    var action: String
+}
+
+struct PortfolioControlResponse: Codable {
+    var runID: String
+    var approvalRequired: Bool
+    var status: String
+}
+
+struct PortfolioPromoteResponse: Codable {
+    var runID: String
+    var approvalRequired: Bool
+}
+
+final class PortfolioRegistryStore {
+    private let config: HostConfig
+    private let fileManager = FileManager.default
+
+    init(config: HostConfig) {
+        self.config = config
+    }
+
+    private var rootURL: URL {
+        URL(fileURLWithPath: config.resolvedPortfolioRegistryPath.expandingTilde, isDirectory: true)
+    }
+
+    private var assetsURL: URL {
+        rootURL.appendingPathComponent("assets", isDirectory: true)
+    }
+
+    func list() throws -> [PortfolioAsset] {
+        try ensureRegistry()
+        let files = (try? fileManager.contentsOfDirectory(
+            at: assetsURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return files
+            .filter { $0.pathExtension == "yaml" || $0.pathExtension == "yml" }
+            .compactMap { try? readAsset(url: $0) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    func upsert(_ asset: PortfolioAsset, message: String? = nil) throws -> PortfolioAsset {
+        try ensureRegistry()
+        var saved = asset
+        let now = Date()
+        if saved.createdAt.timeIntervalSince1970 == 0 {
+            saved.createdAt = now
+        }
+        saved.updatedAt = now
+        let url = assetsURL.appendingPathComponent("\(safeID(saved.id)).yaml")
+        try yamlData(for: saved).write(to: url, options: .atomic)
+        try commitAndPush(message: message ?? "Update \(saved.name)")
+        return saved
+    }
+
+    func delete(id: String) throws {
+        try ensureRegistry()
+        let url = assetsURL.appendingPathComponent("\(safeID(id)).yaml")
+        if fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
+            try commitAndPush(message: "Delete \(id)")
+        }
+    }
+
+    func discover(request: PortfolioDiscoverRequest) throws -> [PortfolioAsset] {
+        let existing = try list()
+        var mergedByKey: [String: PortfolioAsset] = Dictionary(uniqueKeysWithValues: existing.map { (dedupKey($0), $0) })
+        var changedAssetIDs: Set<String> = []
+        for asset in discoverGitHubAssets() + discoverLocalCodeAssets(roots: request.codeRoots) + discoverEngagementAssets(roots: request.engagementRoots) {
+            let key = dedupKey(asset)
+            if var current = mergedByKey[key] {
+                let before = current
+                current = merge(current, with: asset)
+                mergedByKey[key] = current
+                if current != before {
+                    changedAssetIDs.insert(current.id)
+                }
+            } else {
+                mergedByKey[key] = asset
+                changedAssetIDs.insert(asset.id)
+            }
+        }
+        let assets = Array(mergedByKey.values).sorted { $0.updatedAt > $1.updatedAt }
+        for asset in assets where changedAssetIDs.contains(asset.id) {
+            _ = try upsert(asset, message: "Discover \(asset.name)")
+        }
+        return assets
+    }
+
+    func asset(id: String) throws -> PortfolioAsset {
+        guard let asset = try list().first(where: { $0.id == id }) else {
+            throw HostError.notFound("Asset not found")
+        }
+        return asset
+    }
+
+    func status(id: String) throws -> PortfolioAssetStatusResponse {
+        let asset = try asset(id: id)
+        let checkedAt = Date()
+        if asset.kind == .content {
+            return PortfolioAssetStatusResponse(assetID: id, status: .notApplicable, health: "n/a", pid: nil, cpuPercent: nil, memoryMB: nil, checkedAt: checkedAt)
+        }
+        if let health = asset.healthSpec {
+            return statusFromHealth(assetID: id, health: health, checkedAt: checkedAt)
+        }
+        if let pid = processID(for: asset.name) {
+            let usage = processUsage(pid: pid)
+            return PortfolioAssetStatusResponse(assetID: id, status: .running, health: "process", pid: pid, cpuPercent: usage.cpu, memoryMB: usage.memoryMB, checkedAt: checkedAt)
+        }
+        return PortfolioAssetStatusResponse(assetID: id, status: asset.status == .running ? .unknown : asset.status, health: "not configured", pid: nil, cpuPercent: nil, memoryMB: nil, checkedAt: checkedAt)
+    }
+
+    func logs(id: String, limit: Int = 160) throws -> [String] {
+        let asset = try asset(id: id)
+        if let path = asset.logSource?.path?.nilIfBlank {
+            let result = ProcessRunner.run("/usr/bin/tail", ["-n", "\(limit)", path.expandingTilde], timeout: 8)
+            return result.combinedTrimmed.split(whereSeparator: \.isNewline).map { Redactor.redact(String($0)) }
+        }
+        if let cmd = asset.logSource?.cmd?.nilIfBlank {
+            let result = ProcessRunner.run("/bin/zsh", ["-lc", cmd], timeout: 12)
+            return result.combinedTrimmed.split(whereSeparator: \.isNewline).suffix(limit).map { Redactor.redact(String($0)) }
+        }
+        return ["ログソース未設定: \(asset.name)"]
+    }
+
+    func logSummary(id: String) throws -> String {
+        let text = try logs(id: id, limit: 220).joined(separator: "\n")
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "ログはまだありません。"
+        }
+        let prompt = "次のログを日本語で短く要約し、異常があれば先頭に書いてください。\n\n\(String(text.suffix(5000)))"
+        if let ollama = commandPath("ollama") {
+            let result = ProcessRunner.run(ollama, ["run", "llama3.2", prompt], timeout: 25)
+            if result.exitCode == 0, let summary = result.stdout.nilIfBlank {
+                return Redactor.redact(summary)
+            }
+        }
+        if text.localizedCaseInsensitiveContains("error") || text.localizedCaseInsensitiveContains("failed"),
+           let claude = commandPath("claude") {
+            let result = ProcessRunner.run(claude, ["--print", prompt], timeout: 35)
+            if result.exitCode == 0, let summary = result.stdout.nilIfBlank {
+                return Redactor.redact(summary)
+            }
+        }
+        return fallbackSummary(text)
+    }
+
+    func recentCommits(id: String) throws -> [PortfolioRecentCommit] {
+        let asset = try asset(id: id)
+        guard let slug = asset.sourceRefs.github?.nilIfBlank,
+              commandPath("gh") != nil else { return [] }
+        let auth = ProcessRunner.run("/bin/zsh", ["-lc", "gh auth status -h github.com >/dev/null 2>&1"], timeout: 10)
+        guard auth.exitCode == 0 else { return [] }
+        let output = ProcessRunner.run("/bin/zsh", ["-lc", "gh api \(shellQuoted("repos/\(slug)/commits")) --method GET -f per_page=5"], timeout: 25)
+        guard output.exitCode == 0, let data = output.stdout.data(using: .utf8) else { return [] }
+        struct GitHubCommit: Decodable {
+            struct CommitPayload: Decodable {
+                struct AuthorPayload: Decodable {
+                    var name: String?
+                    var date: String?
+                }
+                var message: String
+                var author: AuthorPayload?
+            }
+            struct UserPayload: Decodable {
+                var login: String?
+            }
+            var sha: String
+            var commit: CommitPayload
+            var author: UserPayload?
+        }
+        let formatter = ISO8601DateFormatter()
+        let commits = (try? JSONDecoder().decode([GitHubCommit].self, from: data)) ?? []
+        return commits.map { commit in
+            PortfolioRecentCommit(
+                sha: commit.sha,
+                message: Redactor.redact(commit.commit.message),
+                author: Redactor.redact(commit.author?.login ?? commit.commit.author?.name ?? "unknown"),
+                date: commit.commit.author?.date.flatMap { formatter.date(from: $0) } ?? Date(timeIntervalSince1970: 0)
+            )
+        }
+    }
+
+    func controlRun(assetID: String, action: String, state: HostState) async throws -> PortfolioControlResponse {
+        let asset = try asset(id: assetID)
+        guard let command = asset.controls?.command(for: action)?.nilIfBlank else {
+            throw HostError.badRequest("Control command is not configured")
+        }
+        let workingDirectory = asset.sourceRefs.localPaths.first?.path ?? config.defaultWorkingDirectory
+        let run = try await state.createRun(
+            prompt: command,
+            workingDirectory: workingDirectory,
+            engine: .shell,
+            forceApprovalReason: "Portfolio \(action) requires approval: \(asset.name)",
+            forceApprovalSeverity: .high
+        )
+        return PortfolioControlResponse(runID: run.id, approvalRequired: true, status: run.status.rawValue)
+    }
+
+    func promoteRun(assetID: String, state: HostState) async throws -> PortfolioPromoteResponse {
+        let asset = try asset(id: assetID)
+        guard let localPath = asset.sourceRefs.localPaths.first?.path.nilIfBlank else {
+            throw HostError.badRequest("Local path is not configured")
+        }
+        let repoName = safeID(asset.name)
+        let command = [
+            "cd \(shellQuoted(localPath.expandingTilde))",
+            "git init",
+            "gh repo create \(shellQuoted(repoName)) --private --source . --remote origin --push"
+        ].joined(separator: " && ")
+        let run = try await state.createRun(
+            prompt: command,
+            workingDirectory: localPath,
+            engine: .shell,
+            forceApprovalReason: "Portfolio private repo promotion requires approval: \(asset.name)",
+            forceApprovalSeverity: .high
+        )
+        return PortfolioPromoteResponse(runID: run.id, approvalRequired: true)
+    }
+
+    private func ensureRegistry() throws {
+        try fileManager.createDirectory(at: assetsURL, withIntermediateDirectories: true)
+        if !fileManager.fileExists(atPath: rootURL.appendingPathComponent(".git").path) {
+            _ = ProcessRunner.run("/usr/bin/git", ["init"], workingDirectory: rootURL.path, timeout: 20)
+        }
+        let remotes = ProcessRunner.run("/usr/bin/git", ["remote"], workingDirectory: rootURL.path, timeout: 10).stdout
+        if !config.resolvedPortfolioRegistryRepo.isEmpty, !remotes.split(whereSeparator: \.isNewline).contains("origin") {
+            _ = ProcessRunner.run("/usr/bin/git", ["remote", "add", "origin", config.resolvedPortfolioRegistryRepo], workingDirectory: rootURL.path, timeout: 10)
+        }
+    }
+
+    private func commitAndPush(message: String) throws {
+        _ = ProcessRunner.run("/usr/bin/git", ["add", "assets"], workingDirectory: rootURL.path, timeout: 20)
+        let commit = ProcessRunner.run("/usr/bin/git", ["commit", "-m", message], workingDirectory: rootURL.path, timeout: 30)
+        if commit.exitCode != 0, !commit.combinedTrimmed.localizedCaseInsensitiveContains("nothing to commit") {
+            throw HostError.badRequest(Redactor.redact(commit.combinedTrimmed))
+        }
+        guard !config.resolvedPortfolioRegistryRepo.isEmpty else { return }
+        _ = ProcessRunner.run("/usr/bin/git", ["push", "-u", "origin", "HEAD"], workingDirectory: rootURL.path, timeout: 45)
+    }
+
+    private func readAsset(url: URL) throws -> PortfolioAsset {
+        let text = try String(contentsOf: url, encoding: .utf8)
+        guard let range = text.range(of: "json: |") else {
+            throw HostError.badRequest("Unsupported asset format")
+        }
+        let jsonBlock = text[range.upperBound...]
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in
+                let text = String(line)
+                return text.hasPrefix("  ") ? String(text.dropFirst(2)) : text
+            }
+            .joined(separator: "\n")
+        return try JSONDecoder.dates.decode(PortfolioAsset.self, from: Data(jsonBlock.utf8))
+    }
+
+    private func yamlData(for asset: PortfolioAsset) throws -> Data {
+        let json = String(data: try JSONEncoder.pretty.encode(asset), encoding: .utf8) ?? "{}"
+        let indented = json.split(separator: "\n", omittingEmptySubsequences: false).map { "  \($0)" }.joined(separator: "\n")
+        return Data("# Veqral portfolio asset\njson: |\n\(indented)\n".utf8)
+    }
+
+    private func discoverGitHubAssets() -> [PortfolioAsset] {
+        guard commandPath("gh") != nil else { return [] }
+        let auth = ProcessRunner.run("/bin/zsh", ["-lc", "gh auth status -h github.com >/dev/null 2>&1"], timeout: 10)
+        guard auth.exitCode == 0 else { return [] }
+        let output = ProcessRunner.run("/bin/zsh", ["-lc", "gh repo list hiroyuki0504 --json nameWithOwner,description,url --limit 100"], timeout: 30)
+        guard output.exitCode == 0, let data = output.stdout.data(using: .utf8) else { return [] }
+        struct Repo: Decodable { var nameWithOwner: String; var description: String?; var url: String? }
+        let repos = (try? JSONDecoder().decode([Repo].self, from: data)) ?? []
+        return repos.map { repo in
+            makeAsset(
+                kind: .app,
+                name: repo.nameWithOwner.split(separator: "/").last.map(String.init) ?? repo.nameWithOwner,
+                summary: repo.description ?? "",
+                github: repo.nameWithOwner,
+                localPath: nil,
+                tags: ["GitHub"],
+                backupState: .git
+            )
+        }
+    }
+
+    private func discoverLocalCodeAssets(roots: [String]?) -> [PortfolioAsset] {
+        let roots = (roots?.isEmpty == false ? roots! : config.resolvedPortfolioCodeRoots).map(\.expandingTilde)
+        return roots.flatMap { root in
+            scanDirectories(root: root, maxDepth: 3, limit: 160).compactMap { url in
+                guard isCodeDirectory(url) else { return nil }
+                let github = gitHubSlug(path: url.path)
+                return makeAsset(
+                    kind: .app,
+                    name: url.lastPathComponent,
+                    summary: "",
+                    github: github,
+                    localPath: url.path,
+                    tags: codeTags(path: url.path),
+                    backupState: github == nil ? .localOnly : .git
+                )
+            }
+        }
+    }
+
+    private func discoverEngagementAssets(roots: [String]?) -> [PortfolioAsset] {
+        let roots = (roots?.isEmpty == false ? roots! : config.resolvedPortfolioEngagementRoots).map(\.expandingTilde)
+        return roots.flatMap { root in
+            ((try? fileManager.contentsOfDirectory(at: URL(fileURLWithPath: root), includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []).compactMap { url in
+                guard (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { return nil }
+                var asset = makeAsset(kind: .engagement, name: url.lastPathComponent, summary: "", github: nil, localPath: url.path, tags: ["案件"], backupState: .localOnly)
+                asset.client = url.lastPathComponent
+                asset.phase = "未設定"
+                return asset
+            }
+        }
+    }
+
+    private func makeAsset(kind: PortfolioAssetKind, name: String, summary: String, github: String?, localPath: String?, tags: [String], backupState: PortfolioBackupState) -> PortfolioAsset {
+        let now = Date()
+        let id = safeID(github ?? localPath ?? name)
+        return PortfolioAsset(
+            id: id,
+            kind: kind,
+            name: name,
+            summary: summary,
+            status: kind == .content ? .notApplicable : .unknown,
+            sourceRefs: PortfolioSourceRefs(
+                github: github,
+                driveUrl: nil,
+                localPaths: localPath.map { [PortfolioLocalPath(machineId: localHostName(), path: $0)] } ?? []
+            ),
+            tags: tags,
+            runtimeHost: localHostName(),
+            healthSpec: nil,
+            logSource: nil,
+            controls: PortfolioControls(start: nil, stop: nil, restart: nil, deploy: nil),
+            linkedProjectId: nil,
+            backupState: backupState,
+            client: nil,
+            phase: nil,
+            deliverables: [],
+            timeline: nil,
+            relatedAssetIds: [],
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    private func merge(_ current: PortfolioAsset, with draft: PortfolioAsset) -> PortfolioAsset {
+        var merged = current
+        merged.summary = current.summary.nilIfBlank ?? draft.summary
+        merged.sourceRefs.github = current.sourceRefs.github ?? draft.sourceRefs.github
+        let paths = current.sourceRefs.localPaths + draft.sourceRefs.localPaths.filter { !current.sourceRefs.localPaths.contains($0) }
+        merged.sourceRefs.localPaths = paths
+        merged.tags = Array(Set(current.tags + draft.tags)).sorted()
+        merged.backupState = merged.sourceRefs.github == nil ? .localOnly : .git
+        if merged != current {
+            merged.updatedAt = Date()
+        }
+        return merged
+    }
+
+    private func dedupKey(_ asset: PortfolioAsset) -> String {
+        asset.sourceRefs.github?.lowercased() ?? asset.sourceRefs.localPaths.first?.path.lowercased() ?? asset.id
+    }
+
+    private func statusFromHealth(assetID: String, health: PortfolioHealthSpec, checkedAt: Date) -> PortfolioAssetStatusResponse {
+        switch health.type {
+        case "http":
+            let result = ProcessRunner.run("/usr/bin/curl", ["-fsS", "--max-time", "5", health.target], timeout: 8)
+            let status: PortfolioAssetStatus = result.exitCode == 0 ? .running : .stopped
+            return PortfolioAssetStatusResponse(assetID: assetID, status: status, health: result.exitCode == 0 ? "http ok" : "http failed", pid: nil, cpuPercent: nil, memoryMB: nil, checkedAt: checkedAt)
+        case "cmd":
+            let result = ProcessRunner.run("/bin/zsh", ["-lc", health.target], timeout: 12)
+            let status: PortfolioAssetStatus = result.exitCode == 0 ? .running : .stopped
+            return PortfolioAssetStatusResponse(assetID: assetID, status: status, health: Redactor.redact(result.combinedTrimmed.nilIfBlank ?? "cmd exit \(result.exitCode)"), pid: nil, cpuPercent: nil, memoryMB: nil, checkedAt: checkedAt)
+        default:
+            return PortfolioAssetStatusResponse(assetID: assetID, status: .unknown, health: "unknown health type", pid: nil, cpuPercent: nil, memoryMB: nil, checkedAt: checkedAt)
+        }
+    }
+
+    private func processID(for name: String) -> Int32? {
+        let output = ProcessRunner.run("/usr/bin/pgrep", ["-f", name], timeout: 5)
+        return output.stdout.split(whereSeparator: \.isNewline).first.flatMap { Int32(String($0).trimmingCharacters(in: .whitespaces)) }
+    }
+
+    private func processUsage(pid: Int32) -> (cpu: Double?, memoryMB: Double?) {
+        let output = ProcessRunner.run("/bin/ps", ["-o", "%cpu=", "-o", "rss=", "-p", "\(pid)"], timeout: 5)
+        let parts = output.stdout.split(whereSeparator: \.isWhitespace)
+        let cpu = parts.first.flatMap { Double(String($0)) }
+        let memory = parts.dropFirst().first.flatMap { Double(String($0)).map { $0 / 1024.0 } }
+        return (cpu, memory)
+    }
+
+    private func scanDirectories(root: String, maxDepth: Int, limit: Int) -> [URL] {
+        let rootURL = URL(fileURLWithPath: root)
+        var results: [URL] = []
+        let skip = Set(["node_modules", ".git", "DerivedData", "Library", ".build", "Pods", "vendor"])
+        func walk(_ url: URL, depth: Int) {
+            guard depth <= maxDepth, results.count < limit else { return }
+            guard let children = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
+            for child in children where results.count < limit {
+                guard (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+                guard !skip.contains(child.lastPathComponent) else { continue }
+                results.append(child)
+                walk(child, depth: depth + 1)
+            }
+        }
+        walk(rootURL, depth: 0)
+        return results
+    }
+
+    private func isCodeDirectory(_ url: URL) -> Bool {
+        [".git", "package.json", "requirements.txt", "pyproject.toml", "Cargo.toml", "go.mod", "Package.swift", "Gemfile"].contains {
+            fileManager.fileExists(atPath: url.appendingPathComponent($0).path)
+        }
+    }
+
+    private func codeTags(path: String) -> [String] {
+        let url = URL(fileURLWithPath: path)
+        var tags: [String] = []
+        if fileManager.fileExists(atPath: url.appendingPathComponent("package.json").path) { tags.append("Node") }
+        if fileManager.fileExists(atPath: url.appendingPathComponent("Package.swift").path) { tags.append("Swift") }
+        if fileManager.fileExists(atPath: url.appendingPathComponent("pyproject.toml").path) { tags.append("Python") }
+        if fileManager.fileExists(atPath: url.appendingPathComponent("Cargo.toml").path) { tags.append("Rust") }
+        if fileManager.fileExists(atPath: url.appendingPathComponent("go.mod").path) { tags.append("Go") }
+        return tags.isEmpty ? ["App"] : tags
+    }
+
+    private func gitHubSlug(path: String) -> String? {
+        let output = ProcessRunner.run("/usr/bin/git", ["-C", path, "remote", "get-url", "origin"], timeout: 8)
+        guard output.exitCode == 0 else { return nil }
+        return GitHubInspector.githubSlug(from: output.stdout)
+    }
+
+    private func fallbackSummary(_ text: String) -> String {
+        let lines = text.split(whereSeparator: \.isNewline).suffix(8).map(String.init)
+        return Redactor.redact(lines.joined(separator: "\n")).nilIfBlank ?? "要約できるログがありません。"
+    }
+
+    private func commandPath(_ name: String) -> String? {
+        let output = ProcessRunner.run("/bin/zsh", ["-lc", "command -v \(shellQuoted(name))"], timeout: 5)
+        return output.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+    }
+
+    private func safeID(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let mapped = value.lowercased().unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        return String(mapped).trimmingCharacters(in: CharacterSet(charactersIn: "-")).nilIfBlank ?? UUID().uuidString.lowercased()
+    }
+}
+
+final class PortfolioMonitor: @unchecked Sendable {
+    private let store: PortfolioRegistryStore
+    private let config: HostConfig
+    private var lastStatuses: [String: PortfolioAssetStatus] = [:]
+
+    init(store: PortfolioRegistryStore, config: HostConfig) {
+        self.store = store
+        self.config = config
+    }
+
+    func start() {
+        Task.detached { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                await self.tick()
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+            }
+        }
+    }
+
+    private func tick() async {
+        guard config.resolvedDiscordWebhook != nil else { return }
+        guard let assets = try? store.list() else { return }
+        for asset in assets {
+            guard let status = try? store.status(id: asset.id).status else { continue }
+            if lastStatuses[asset.id] == .running, status == .stopped {
+                await DiscordWebhookNotifier.send(config: config, content: "司令塔: \(asset.name) が停止しました。")
+            }
+            lastStatuses[asset.id] = status
+        }
     }
 }
 
@@ -1999,7 +4308,7 @@ enum GitHubInspector {
         return (url, state, "\(checks.count) passing")
     }
 
-    private static func githubSlug(from remote: String) -> String? {
+    static func githubSlug(from remote: String) -> String? {
         let trimmed = remote.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let path: String
@@ -2168,6 +4477,33 @@ struct MemoryFileContentResponse: Codable {
     var content: String
 }
 
+struct ProjectMemoryRequest: Codable {
+    var projectID: String
+    var projectName: String?
+}
+
+struct ProjectMemorySessionRecord: Codable, Identifiable {
+    var id: String
+    var model: String?
+    var title: String?
+    var startedAt: Date?
+    var endedAt: Date?
+    var messageCount: Int
+    var inputTokens: Int
+    var outputTokens: Int
+    var estimatedCostUSD: Double?
+}
+
+struct ProjectMemorySnapshotResponse: Codable {
+    var projectID: String
+    var projectName: String
+    var source: String
+    var memoryFile: MemoryFileRecord
+    var memoryContent: String
+    var sessions: [ProjectMemorySessionRecord]
+    var warnings: [String]
+}
+
 struct MemoryDiffResponse: Codable {
     var id: String
     var diff: String
@@ -2211,6 +4547,7 @@ struct HistorySessionDetailRequest: Codable {
 struct HistorySessionSummary: Codable, Identifiable {
     var id: String
     var tool: HistoryTool
+    var resumeID: String?
     var project: String
     var projectPath: String
     var startedAt: Date?
@@ -2229,6 +4566,7 @@ struct HistorySessionListResponse: Codable {
     var limit: Int
     var projects: [String]
     var tools: [HistoryTool]
+    var warnings: [String]
 }
 
 struct HistoryTurn: Codable, Identifiable {
@@ -2251,6 +4589,8 @@ struct HermesMemoryStore {
         .appendingPathComponent(".hermes/memories", isDirectory: true)
     private let skillsFolder = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".hermes/skills", isDirectory: true)
+    private let stateDBURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".hermes/state.db")
     private let maxReadableBytes = 1_048_576
 
     func list() throws -> MemoryListResponse {
@@ -2270,6 +4610,43 @@ struct HermesMemoryStore {
         let url = try url(for: id)
         let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         return MemoryFileContentResponse(file: file, content: content)
+    }
+
+    func projectMemory(projectID: String, projectName: String?) throws -> ProjectMemorySnapshotResponse {
+        let cleanProjectID = projectID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanProjectID.isEmpty else {
+            throw HostError.badRequest("Project ID is required.")
+        }
+        let source = "veqral-\(Self.safeTag(cleanProjectID))"
+        let displayName = projectName?.nilIfBlank ?? cleanProjectID
+        var warnings: [String] = []
+        let file = record(
+            id: "project-memory:\(source)",
+            kind: "project-memory",
+            title: "MEMORY.md",
+            url: memoryURL,
+            relativePath: "~/.hermes/memories/MEMORY.md",
+            isEditable: false
+        )
+        let memoryContent: String
+        if file.bytes > maxReadableBytes {
+            memoryContent = ""
+            warnings.append("MEMORY.md が大きすぎるため、画面表示を省略しました。")
+        } else {
+            let rawContent = (try? String(contentsOf: memoryURL, encoding: .utf8)) ?? ""
+            memoryContent = Redactor.redact(rawContent)
+        }
+        let sessionResult = projectSessions(source: source)
+        warnings.append(contentsOf: sessionResult.warnings)
+        return ProjectMemorySnapshotResponse(
+            projectID: cleanProjectID,
+            projectName: displayName,
+            source: source,
+            memoryFile: file,
+            memoryContent: memoryContent,
+            sessions: sessionResult.sessions,
+            warnings: warnings
+        )
     }
 
     func diff(id: String, proposedContent: String) throws -> MemoryDiffResponse {
@@ -2396,6 +4773,78 @@ struct HermesMemoryStore {
         return String(path.dropFirst(base.count + 1))
     }
 
+    private struct SQLiteProjectSessionRow: Decodable {
+        var id: String
+        var model: String?
+        var title: String?
+        var startedAt: Double?
+        var endedAt: Double?
+        var messageCount: Int?
+        var inputTokens: Int?
+        var outputTokens: Int?
+        var estimatedCostUSD: Double?
+    }
+
+    private func projectSessions(source: String) -> (sessions: [ProjectMemorySessionRecord], warnings: [String]) {
+        guard FileManager.default.fileExists(atPath: stateDBURL.path) else {
+            return ([], ["Hermes state.db が見つかりません。"])
+        }
+        let query = """
+        SELECT
+          id,
+          model,
+          title,
+          started_at AS startedAt,
+          ended_at AS endedAt,
+          message_count AS messageCount,
+          input_tokens AS inputTokens,
+          output_tokens AS outputTokens,
+          estimated_cost_usd AS estimatedCostUSD
+        FROM sessions
+        WHERE source = \(Self.sqliteLiteral(source))
+        ORDER BY started_at DESC
+        LIMIT 50;
+        """
+        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", "-json", stateDBURL.path, query], timeout: 10)
+        guard output.exitCode == 0 else {
+            return ([], ["Hermes session 一覧を読めませんでした: \(Redactor.redact(output.combinedTrimmed))"])
+        }
+        let json = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !json.isEmpty else {
+            return ([], [])
+        }
+        guard let data = json.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([SQLiteProjectSessionRow].self, from: data) else {
+            return ([], ["Hermes session 一覧の形式を読めませんでした。"])
+        }
+        let sessions = rows.map { row in
+            ProjectMemorySessionRecord(
+                id: row.id,
+                model: row.model?.nilIfBlank,
+                title: row.title?.nilIfBlank,
+                startedAt: row.startedAt.map(Date.init(timeIntervalSince1970:)),
+                endedAt: row.endedAt.map(Date.init(timeIntervalSince1970:)),
+                messageCount: row.messageCount ?? 0,
+                inputTokens: row.inputTokens ?? 0,
+                outputTokens: row.outputTokens ?? 0,
+                estimatedCostUSD: row.estimatedCostUSD
+            )
+        }
+        return (sessions, [])
+    }
+
+    private static func sqliteLiteral(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "''"))'"
+    }
+
+    private static func safeTag(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let scalars = value.lowercased().unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        return String(scalars).trimmingCharacters(in: CharacterSet(charactersIn: "-")).nilIfBlank ?? "project"
+    }
+
     private func unifiedDiff(original: String, proposed: String, label: String) throws -> String {
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("VeqralMemoryDiff-\(UUID().uuidString)", isDirectory: true)
@@ -2420,6 +4869,88 @@ struct HermesMemoryStore {
     }
 }
 
+struct HermesUsageStore {
+    private let stateDBURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".hermes/state.db")
+
+    func usage(sessionID: String) -> RunUsage? {
+        let cleanSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanSessionID.isEmpty,
+              FileManager.default.fileExists(atPath: stateDBURL.path) else {
+            return nil
+        }
+        let columns = sessionColumns()
+        let query = """
+        SELECT
+          \(selectColumn("model", alias: "model", columns: columns)),
+          \(selectColumn("input_tokens", alias: "inputTokens", columns: columns)),
+          \(selectColumn("output_tokens", alias: "outputTokens", columns: columns)),
+          \(selectColumn("cache_read_tokens", alias: "cacheReadTokens", columns: columns)),
+          \(selectColumn("cache_write_tokens", alias: "cacheWriteTokens", columns: columns)),
+          \(selectColumn("reasoning_tokens", alias: "reasoningTokens", columns: columns)),
+          \(selectColumn("estimated_cost_usd", alias: "estimatedCostUSD", columns: columns)),
+          \(selectColumn("actual_cost_usd", alias: "actualCostUSD", columns: columns))
+        FROM sessions
+        WHERE id = \(Self.sqliteLiteral(cleanSessionID))
+        LIMIT 1;
+        """
+        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", "-json", stateDBURL.path, query], timeout: 10)
+        guard output.exitCode == 0,
+              let json = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+              let data = json.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([SQLiteHermesUsageRow].self, from: data),
+              let row = rows.first else {
+            return nil
+        }
+        let usage = RunUsage(
+            inputTokens: row.inputTokens,
+            outputTokens: row.outputTokens,
+            cacheReadTokens: row.cacheReadTokens,
+            cacheWriteTokens: row.cacheWriteTokens,
+            reasoningTokens: row.reasoningTokens,
+            totalTokens: nil,
+            estimatedCostUSD: row.estimatedCostUSD,
+            actualCostUSD: row.actualCostUSD,
+            source: "hermes-state",
+            model: row.model?.nilIfBlank
+        )
+        return usage.normalized
+    }
+
+    private struct SQLiteHermesUsageRow: Decodable {
+        var model: String?
+        var inputTokens: Int?
+        var outputTokens: Int?
+        var cacheReadTokens: Int?
+        var cacheWriteTokens: Int?
+        var reasoningTokens: Int?
+        var estimatedCostUSD: Double?
+        var actualCostUSD: Double?
+    }
+
+    private struct SQLiteTableColumn: Decodable {
+        var name: String
+    }
+
+    private func sessionColumns() -> Set<String> {
+        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", "-json", stateDBURL.path, "PRAGMA table_info(sessions);"], timeout: 10)
+        guard output.exitCode == 0,
+              let data = output.stdout.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([SQLiteTableColumn].self, from: data) else {
+            return []
+        }
+        return Set(rows.map(\.name))
+    }
+
+    private func selectColumn(_ column: String, alias: String, columns: Set<String>) -> String {
+        columns.contains(column) ? "\(column) AS \(alias)" : "NULL AS \(alias)"
+    }
+
+    private static func sqliteLiteral(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "''"))'"
+    }
+}
+
 struct AgentHistoryStore {
     private let fileManager = FileManager.default
     private let listMaxFiles = 240
@@ -2432,6 +4963,7 @@ struct AgentHistoryStore {
         let page = max(0, request.page ?? 0)
         let limit = min(max(1, request.limit ?? 50), 100)
         let query = request.query?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let warnings = historyWarnings(for: request.tool)
         var sessions = try allSessions(tool: request.tool)
 
         if let project = request.project, !project.isEmpty {
@@ -2468,7 +5000,8 @@ struct AgentHistoryStore {
             page: page,
             limit: limit,
             projects: projects,
-            tools: HistoryTool.allCases
+            tools: HistoryTool.allCases,
+            warnings: warnings
         )
     }
 
@@ -2484,11 +5017,18 @@ struct AgentHistoryStore {
 
         try HistoryLineReader.forEachLine(url: url, maxLines: detailScanLines, maxBytes: detailScanBytes) { line in
             lineNumber += 1
-            guard let object = HistoryJSON.object(from: line),
-                  let turn = turn(from: object, tool: request.tool, fallbackID: "\(session.id)-\(lineNumber)") else {
+            let fallbackID = "\(session.id)-\(lineNumber)"
+            guard let object = HistoryJSON.object(from: line) else {
+                if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    turns.append(rawTurn(line: line, fallbackID: fallbackID, reason: "Unrecognized \(request.tool.title) history record: invalid JSONL"))
+                }
                 return
             }
-            turns.append(turn)
+            if let turn = turn(from: object, tool: request.tool, fallbackID: fallbackID) {
+                turns.append(turn)
+            } else if !shouldSkipUnknownRecord(object, tool: request.tool) {
+                turns.append(rawTurn(line: line, fallbackID: fallbackID, reason: unknownRecordReason(object, tool: request.tool)))
+            }
         } onTruncated: {
             truncated = true
         }
@@ -2510,18 +5050,13 @@ struct AgentHistoryStore {
     private func sessionFile(id: String, tool: HistoryTool) -> (url: URL, fallbackProject: String)? {
         switch tool {
         case .claude:
-            let root = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
-            for url in jsonlFiles(under: root, limit: listMaxFiles) where Self.identifier(for: url) == id {
-                return (url, decodeClaudeProject(url.deletingLastPathComponent().lastPathComponent))
+            for root in claudeProjectRoots() {
+                for url in jsonlFiles(under: root, limit: listMaxFiles) where Self.identifier(for: url) == id {
+                    return (url, decodeClaudeProject(url.deletingLastPathComponent().lastPathComponent))
+                }
             }
         case .codex:
-            let home = ProcessInfo.processInfo.environment["CODEX_HOME"].flatMap { URL(fileURLWithPath: $0.expandingTilde) }
-                ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
-            let roots = [
-                home.appendingPathComponent("sessions", isDirectory: true),
-                home.appendingPathComponent("archived_sessions", isDirectory: true)
-            ]
-            for root in roots {
+            for root in codexSessionRoots() {
                 for url in jsonlFiles(under: root, limit: listMaxFiles) where Self.identifier(for: url) == id {
                     return (url, "Codex")
                 }
@@ -2531,21 +5066,77 @@ struct AgentHistoryStore {
     }
 
     private func claudeSessions() -> [HistorySessionSummary] {
-        let root = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
-        return jsonlFiles(under: root, limit: listMaxFiles).compactMap { url in
-            summarize(url: url, tool: .claude, fallbackProject: decodeClaudeProject(url.deletingLastPathComponent().lastPathComponent))
+        let roots = claudeProjectRoots()
+        let perRootLimit = max(1, listMaxFiles / max(1, roots.count))
+        return roots.flatMap { root in
+            jsonlFiles(under: root, limit: perRootLimit).compactMap { url in
+                summarize(url: url, tool: .claude, fallbackProject: decodeClaudeProject(url.deletingLastPathComponent().lastPathComponent))
+            }
         }
     }
 
     private func codexSessions() -> [HistorySessionSummary] {
-        let home = ProcessInfo.processInfo.environment["CODEX_HOME"].flatMap { URL(fileURLWithPath: $0.expandingTilde) }
-            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
-        let roots = [
-            home.appendingPathComponent("sessions", isDirectory: true),
-            home.appendingPathComponent("archived_sessions", isDirectory: true)
-        ]
-        return roots.flatMap { jsonlFiles(under: $0, limit: listMaxFiles / roots.count) }
+        let roots = codexSessionRoots()
+        let perRootLimit = max(1, listMaxFiles / max(1, roots.count))
+        return roots.flatMap { jsonlFiles(under: $0, limit: perRootLimit) }
             .compactMap { summarize(url: $0, tool: .codex, fallbackProject: "Codex") }
+    }
+
+    private func historyWarnings(for tool: HistoryTool?) -> [String] {
+        var warnings: [String] = []
+        if tool == nil || tool == .codex {
+            let roots = codexSessionRoots()
+            if !roots.contains(where: { fileManager.fileExists(atPath: $0.path) }) {
+                warnings.append("Codex history directory not found. Checked: \(roots.map(\.path).joined(separator: ", "))")
+            }
+        }
+        if tool == nil || tool == .claude {
+            let roots = claudeProjectRoots()
+            if !roots.contains(where: { fileManager.fileExists(atPath: $0.path) }) {
+                warnings.append("Claude history directory not found. Checked: \(roots.map(\.path).joined(separator: ", "))")
+            }
+        }
+        return warnings
+    }
+
+    private func codexSessionRoots() -> [URL] {
+        let defaultHome = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        var homes: [URL] = []
+        if let envHome = ProcessInfo.processInfo.environment["CODEX_HOME"]?.nilIfBlank {
+            homes.append(URL(fileURLWithPath: envHome.expandingTilde, isDirectory: true))
+        }
+        if !homes.contains(where: { $0.standardizedFileURL.path == defaultHome.standardizedFileURL.path }) {
+            homes.append(defaultHome)
+        }
+        return uniqueURLs(homes.flatMap {
+            [
+                $0.appendingPathComponent("sessions", isDirectory: true),
+                $0.appendingPathComponent("archived_sessions", isDirectory: true)
+            ]
+        })
+    }
+
+    private func claudeProjectRoots() -> [URL] {
+        let defaultRoot = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
+        var roots: [URL] = []
+        if let configDir = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]?.nilIfBlank {
+            roots.append(URL(fileURLWithPath: configDir.expandingTilde, isDirectory: true).appendingPathComponent("projects", isDirectory: true))
+        }
+        if let homeDir = ProcessInfo.processInfo.environment["CLAUDE_HOME"]?.nilIfBlank {
+            roots.append(URL(fileURLWithPath: homeDir.expandingTilde, isDirectory: true).appendingPathComponent("projects", isDirectory: true))
+        }
+        roots.append(defaultRoot)
+        return uniqueURLs(roots)
+    }
+
+    private func uniqueURLs(_ urls: [URL]) -> [URL] {
+        var seen = Set<String>()
+        return urls.filter { url in
+            let path = url.standardizedFileURL.path
+            guard !seen.contains(path) else { return false }
+            seen.insert(path)
+            return true
+        }
     }
 
     private func jsonlFiles(under root: URL, limit: Int) -> [URL] {
@@ -2610,6 +5201,7 @@ struct AgentHistoryStore {
         return HistorySessionSummary(
             id: Self.identifier(for: url),
             tool: tool,
+            resumeID: resumeIdentifier(for: url, tool: tool),
             project: projectName(from: projectPath, fallback: fallbackProject),
             projectPath: projectPath,
             startedAt: startedAt,
@@ -2620,6 +5212,22 @@ struct AgentHistoryStore {
             filePath: url.path,
             bytes: values?.fileSize ?? 0
         )
+    }
+
+    private func resumeIdentifier(for url: URL, tool: HistoryTool) -> String {
+        let stem = url.deletingPathExtension().lastPathComponent
+        switch tool {
+        case .claude:
+            return stem
+        case .codex:
+            if let range = stem.range(
+                of: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#,
+                options: .regularExpression
+            ) {
+                return String(stem[range])
+            }
+            return stem
+        }
     }
 
     private func turn(from object: [String: Any], tool: HistoryTool, fallbackID: String) -> HistoryTurn? {
@@ -2677,6 +5285,38 @@ struct AgentHistoryStore {
         }
 
         return nil
+    }
+
+    private func rawTurn(line: String, fallbackID: String, reason: String) -> HistoryTurn {
+        HistoryTurn(
+            id: fallbackID,
+            role: "unknown",
+            kind: "raw",
+            timestamp: nil,
+            text: clipped(Redactor.redact(line), limit: 8_000),
+            metadata: reason
+        )
+    }
+
+    private func shouldSkipUnknownRecord(_ object: [String: Any], tool: HistoryTool) -> Bool {
+        if tool == .codex, object["type"] as? String == "session_meta" {
+            return true
+        }
+        if tool == .claude, object["isMeta"] as? Bool == true {
+            return true
+        }
+        return false
+    }
+
+    private func unknownRecordReason(_ object: [String: Any], tool: HistoryTool) -> String {
+        if let type = object["type"] as? String {
+            return "Unrecognized \(tool.title) history record: \(type)"
+        }
+        if let payload = object["payload"] as? [String: Any],
+           let type = payload["type"] as? String {
+            return "Unrecognized \(tool.title) history payload: \(type)"
+        }
+        return "Unrecognized \(tool.title) history record schema"
     }
 
     private func fileContains(_ path: String, query: String) -> Bool {
@@ -2869,12 +5509,12 @@ struct ProcessOutput {
 }
 
 enum ProcessRunner {
-    static func run(_ executable: String, _ arguments: [String], timeout: TimeInterval = 30) -> ProcessOutput {
+    static func run(_ executable: String, _ arguments: [String], workingDirectory: String = "/", timeout: TimeInterval = 30) -> ProcessOutput {
         let process = Process()
         let stdout = Pipe()
         let stderr = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
-        process.currentDirectoryURL = URL(fileURLWithPath: "/")
+        process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory.expandingTilde)
         process.arguments = arguments
         process.standardOutput = stdout
         process.standardError = stderr
@@ -2932,6 +5572,310 @@ enum ProcessRunner {
                 break
             }
         }
+    }
+}
+
+struct APNsConfiguration: Sendable {
+    var keyID: String
+    var teamID: String
+    var keyPath: String
+    var bundleID: String
+    var environment: String
+
+    var endpointHost: String {
+        environment.lowercased().contains("prod") ? "api.push.apple.com" : "api.sandbox.push.apple.com"
+    }
+
+    static func load(from config: HostConfig) -> APNsConfiguration? {
+        guard config.resolvedPushNotificationsEnabled else { return nil }
+        let env = ProcessInfo.processInfo.environment
+        func configured(_ envKey: String, _ keychainAccount: String, _ configValue: String?) -> String? {
+            env[envKey]?.nilIfBlank
+                ?? KeychainStore.get(account: keychainAccount)?.nilIfBlank
+                ?? configValue?.nilIfBlank
+        }
+
+        guard let keyID = configured("VEQRAL_APNS_KEY_ID", "apns:key-id", config.apnsKeyID),
+              let teamID = configured("VEQRAL_APNS_TEAM_ID", "apns:team-id", config.apnsTeamID),
+              let keyPath = configured("VEQRAL_APNS_KEY_PATH", "apns:key-path", config.apnsKeyPath),
+              let bundleID = configured("VEQRAL_APNS_BUNDLE_ID", "apns:bundle-id", config.apnsBundleID) else {
+            return nil
+        }
+        let environment = configured("VEQRAL_APNS_ENVIRONMENT", "apns:environment", config.apnsEnvironment) ?? "development"
+        return APNsConfiguration(
+            keyID: keyID,
+            teamID: teamID,
+            keyPath: keyPath.expandingTilde,
+            bundleID: bundleID,
+            environment: environment
+        )
+    }
+}
+
+enum APNsPushService {
+    private static let lowApprovalCategory = "VEQRAL_APPROVAL_LOW"
+    private static let highApprovalCategory = "VEQRAL_APPROVAL_HIGH"
+    private static let statusCategory = "VEQRAL_STATUS"
+
+    static func send(
+        run: HostRun,
+        event: PushEventType,
+        message: String,
+        severity: ApprovalSeverity,
+        devices: [DeviceRecord],
+        config: HostConfig
+    ) async {
+        guard let apns = APNsConfiguration.load(from: config),
+              let token = APNsJWTSigner.token(configuration: apns) else {
+            return
+        }
+
+        for device in devices {
+            guard let deviceToken = device.pushToken?.nilIfBlank else { continue }
+            await sendOne(
+                deviceToken: deviceToken,
+                token: token,
+                run: run,
+                event: event,
+                message: message,
+                severity: severity,
+                device: device,
+                apns: apns
+            )
+        }
+    }
+
+    private static func sendOne(
+        deviceToken: String,
+        token: String,
+        run: HostRun,
+        event: PushEventType,
+        message: String,
+        severity: ApprovalSeverity,
+        device: DeviceRecord,
+        apns: APNsConfiguration
+    ) async {
+        guard let payload = payloadData(
+            run: run,
+            event: event,
+            message: message,
+            severity: severity,
+            locale: device.pushLocale
+        ),
+        let url = URL(string: "https://\(apns.endpointHost)/3/device/\(deviceToken)") else {
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = payload
+        request.setValue("bearer \(token)", forHTTPHeaderField: "authorization")
+        request.setValue(device.pushBundleID?.nilIfBlank ?? apns.bundleID, forHTTPHeaderField: "apns-topic")
+        request.setValue("alert", forHTTPHeaderField: "apns-push-type")
+        request.setValue("10", forHTTPHeaderField: "apns-priority")
+        request.setValue("veqral-\(run.id)-\(event.rawValue)", forHTTPHeaderField: "apns-collapse-id")
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return
+            }
+        } catch {
+            return
+        }
+    }
+
+    private static func payloadData(
+        run: HostRun,
+        event: PushEventType,
+        message: String,
+        severity: ApprovalSeverity,
+        locale: String?
+    ) -> Data? {
+        let title = title(for: event, locale: locale)
+        let body = body(for: run, event: event, message: message, locale: locale)
+        let category: String = if event == .approval {
+            severity == .low ? lowApprovalCategory : highApprovalCategory
+        } else {
+            statusCategory
+        }
+        let aps: [String: Any] = [
+            "alert": [
+                "title": title,
+                "body": body
+            ],
+            "sound": "default",
+            "category": category,
+            "thread-id": "veqral-\(run.id)"
+        ]
+        let payload: [String: Any] = [
+            "aps": aps,
+            "veqral_run_id": run.id,
+            "veqral_event": event.rawValue,
+            "veqral_severity": severity.rawValue,
+            "veqral_engine": run.engineOrDefault.rawValue
+        ]
+        return try? JSONSerialization.data(withJSONObject: payload)
+    }
+
+    private static func title(for event: PushEventType, locale: String?) -> String {
+        let japanese = locale?.lowercased().hasPrefix("ja") == true
+        switch event {
+        case .approval:
+            return japanese ? "承認が必要です" : "Approval required"
+        case .question:
+            return japanese ? "確認が必要です" : "Agent question"
+        case .complete:
+            return japanese ? "Run 完了" : "Run complete"
+        case .failed:
+            return japanese ? "Run 失敗" : "Run failed"
+        }
+    }
+
+    private static func body(for run: HostRun, event: PushEventType, message: String, locale: String?) -> String {
+        let firstPromptLine = run.prompt
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+        let prompt = firstPromptLine ?? run.engineOrDefault.title
+        let cleanMessage = Redactor.redact(message)
+            .split(whereSeparator: \.isNewline)
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfBlank
+        let detail = cleanMessage ?? (locale?.lowercased().hasPrefix("ja") == true ? "Veqral を確認してください" : "Open Veqral to review")
+        let text = event == .complete || event == .failed ? "\(prompt): \(detail)" : "\(detail): \(prompt)"
+        return String(text.prefix(180))
+    }
+}
+
+enum APNsJWTSigner {
+    static func token(configuration: APNsConfiguration) -> String? {
+        let issuedAt = Int(Date().timeIntervalSince1970)
+        guard let header = jsonBase64URL(["alg": "ES256", "kid": configuration.keyID]),
+              let claims = jsonBase64URL(["iss": configuration.teamID, "iat": issuedAt]) else {
+            return nil
+        }
+        let signingInput = "\(header).\(claims)"
+        guard let derSignature = OpenSSLSigner.sign(Data(signingInput.utf8), keyPath: configuration.keyPath),
+              let rawSignature = ECDSASignatureDER.rawSignature(from: derSignature) else {
+            return nil
+        }
+        return "\(signingInput).\(base64URL(rawSignature))"
+    }
+
+    private static func jsonBase64URL(_ object: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
+            return nil
+        }
+        return base64URL(data)
+    }
+
+    private static func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+enum OpenSSLSigner {
+    static func sign(_ data: Data, keyPath: String) -> Data? {
+        guard let openssl = opensslPath() else { return nil }
+        let process = Process()
+        let input = Pipe()
+        let output = Pipe()
+        let error = Pipe()
+        process.executableURL = URL(fileURLWithPath: openssl)
+        process.currentDirectoryURL = URL(fileURLWithPath: "/")
+        process.arguments = ["dgst", "-sha256", "-sign", keyPath]
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = error
+        do {
+            try process.run()
+            input.fileHandleForWriting.write(data)
+            try? input.fileHandleForWriting.close()
+            let signature = output.fileHandleForReading.readDataToEndOfFile()
+            _ = error.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0, !signature.isEmpty else { return nil }
+            return signature
+        } catch {
+            return nil
+        }
+    }
+
+    private static func opensslPath() -> String? {
+        ["/usr/bin/openssl", "/opt/homebrew/bin/openssl", "/usr/local/bin/openssl"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+}
+
+enum ECDSASignatureDER {
+    static func rawSignature(from der: Data) -> Data? {
+        var reader = DERReader(data: Array(der))
+        guard reader.readByte() == 0x30,
+              reader.readLength() != nil,
+              reader.readByte() == 0x02,
+              let rLength = reader.readLength(),
+              let r = reader.readBytes(rLength),
+              reader.readByte() == 0x02,
+              let sLength = reader.readLength(),
+              let s = reader.readBytes(sLength) else {
+            return nil
+        }
+        return normalizeInteger(r) + normalizeInteger(s)
+    }
+
+    private static func normalizeInteger(_ bytes: [UInt8]) -> Data {
+        var trimmed = bytes
+        while trimmed.count > 1, trimmed.first == 0 {
+            trimmed.removeFirst()
+        }
+        if trimmed.count > 32 {
+            trimmed = Array(trimmed.suffix(32))
+        }
+        if trimmed.count < 32 {
+            trimmed = Array(repeating: 0, count: 32 - trimmed.count) + trimmed
+        }
+        return Data(trimmed)
+    }
+}
+
+struct DERReader {
+    var data: [UInt8]
+    var index: Int = 0
+
+    mutating func readByte() -> UInt8? {
+        guard index < data.count else { return nil }
+        defer { index += 1 }
+        return data[index]
+    }
+
+    mutating func readLength() -> Int? {
+        guard let first = readByte() else { return nil }
+        if first < 0x80 {
+            return Int(first)
+        }
+        let byteCount = Int(first & 0x7f)
+        guard byteCount > 0, byteCount <= 4 else { return nil }
+        var length = 0
+        for _ in 0..<byteCount {
+            guard let byte = readByte() else { return nil }
+            length = (length << 8) | Int(byte)
+        }
+        return length
+    }
+
+    mutating func readBytes(_ count: Int) -> [UInt8]? {
+        guard count >= 0, index + count <= data.count else { return nil }
+        let slice = Array(data[index..<(index + count)])
+        index += count
+        return slice
     }
 }
 
@@ -2993,6 +5937,80 @@ struct HealthResponse: Codable {
     var tailscaleIP: String?
     var port: UInt16
     var hermesVersion: String
+    var toolStatuses: [CLIToolStatus]
+    var telemetry: HostTelemetryResponse?
+}
+
+struct NotificationTestResponse: Codable {
+    var ok: Bool
+    var message: String
+}
+
+struct HostTelemetryResponse: Codable {
+    var checkedAt: Date
+    var cpu: HostTelemetryCPU
+    var memory: HostTelemetryMemory
+    var disk: HostTelemetryDisk
+    var thermal: HostTelemetryThermal
+    var uptime: HostTelemetryUptime
+    var power: HostTelemetryPower
+    var network: HostTelemetryNetwork
+    var topProcesses: [HostTelemetryProcess]
+}
+
+struct HostTelemetryCPU: Codable {
+    var totalPercent: Double?
+    var perCorePercent: [Double]
+    var loadAverage: [Double]
+}
+
+struct HostTelemetryMemory: Codable {
+    var totalBytes: UInt64?
+    var usedBytes: UInt64?
+    var freeBytes: UInt64?
+    var pressure: String
+}
+
+struct HostTelemetryDisk: Codable {
+    var mountPoint: String
+    var totalBytes: UInt64?
+    var freeBytes: UInt64?
+    var usedPercent: Double?
+    var smartStatus: String?
+}
+
+struct HostTelemetryThermal: Codable {
+    var state: String
+    var rawTemperatureC: Double?
+    var fanRPM: Double?
+}
+
+struct HostTelemetryUptime: Codable {
+    var seconds: TimeInterval
+    var osVersion: String
+    var hostName: String
+    var machineModel: String
+}
+
+struct HostTelemetryPower: Codable {
+    var isBatteryAvailable: Bool
+    var batteryPercent: Double?
+    var isCharging: Bool?
+    var isACPowered: Bool?
+}
+
+struct HostTelemetryNetwork: Codable {
+    var tailscaleIP: String?
+    var interfaceName: String?
+    var rxBytesPerSecond: Double?
+    var txBytesPerSecond: Double?
+}
+
+struct HostTelemetryProcess: Codable {
+    var pid: Int32
+    var name: String
+    var cpuPercent: Double?
+    var memoryMB: Double?
 }
 
 struct PairingStatus: Codable {
@@ -3003,6 +6021,8 @@ struct PairingStatus: Codable {
 struct PairRequest: Codable {
     var deviceName: String
     var pairingCode: String
+    var pairingEndpoint: String?
+    var pairingSignature: String?
 }
 
 struct PairResponse: Codable {
@@ -3010,9 +6030,26 @@ struct PairResponse: Codable {
     var token: String
 }
 
+struct PushTokenRequest: Codable {
+    var deviceToken: String
+    var environment: String
+    var bundleID: String
+    var locale: String?
+}
+
+struct PushTokenResponse: Codable {
+    var ok: Bool
+}
+
 struct CreateRunRequest: Codable {
     var prompt: String
     var workingDirectory: String
+    var engine: AgentEngine?
+    var resumeSessionID: String?
+    var projectID: String?
+    var chatID: String?
+    var provider: String?
+    var model: String?
     var attachments: [RunAttachmentUpload]?
 }
 
@@ -3023,12 +6060,28 @@ struct RunAttachmentUpload: Codable {
     var data: Data
 }
 
+struct VoiceCleanupRequest: Codable {
+    var rawText: String
+    var ruleBasedText: String
+    var preferredEngine: AgentEngine?
+    var workingDirectory: String?
+    var provider: String?
+    var model: String?
+}
+
+struct VoiceCleanupResponse: Codable {
+    var cleanedText: String
+    var engine: AgentEngine?
+    var fallbackUsed: Bool
+}
+
 struct CreateRunResponse: Codable {
     var runID: String
     var sessionID: String?
     var status: String
     var approvalRequired: Bool
     var approvalReason: String?
+    var approvalSeverity: String?
 }
 
 struct RunListResponse: Codable {
@@ -3046,8 +6099,30 @@ struct RunSnapshotResponse: Codable {
     var artifacts: [HostArtifact]
 }
 
+struct DeviceListRecord: Codable {
+    var id: String
+    var name: String
+    var pairedAt: Date
+    var lastSeenAt: Date?
+    var pushEnvironment: String?
+    var pushBundleID: String?
+    var pushLocale: String?
+    var pushUpdatedAt: Date?
+
+    init(device: DeviceRecord) {
+        self.id = device.id
+        self.name = device.name
+        self.pairedAt = device.pairedAt
+        self.lastSeenAt = device.lastSeenAt
+        self.pushEnvironment = device.pushEnvironment
+        self.pushBundleID = device.pushBundleID
+        self.pushLocale = device.pushLocale
+        self.pushUpdatedAt = device.pushUpdatedAt
+    }
+}
+
 struct DeviceListResponse: Codable {
-    var devices: [DeviceRecord]
+    var devices: [DeviceListRecord]
 }
 
 struct AuditLogResponse: Codable {
@@ -3058,6 +6133,7 @@ struct GitDiffEntry: Codable {
     var path: String
     var additions: Int
     var deletions: Int
+    var patch: String?
 }
 
 struct GitDiffResponse: Codable {
@@ -3075,6 +6151,16 @@ struct HostArtifact: Codable, Identifiable {
 
 struct ArtifactListResponse: Codable {
     var artifacts: [HostArtifact]
+}
+
+struct ArtifactContentRequest: Codable {
+    var artifactID: String
+}
+
+struct ArtifactContentResponse: Codable {
+    var artifactID: String
+    var mimeType: String
+    var data: Data
 }
 
 struct GitHubStatusRequest: Codable {
@@ -3140,6 +6226,7 @@ enum HostError: Error, CustomStringConvertible {
 struct RiskResult {
     var requiresApproval: Bool
     var reason: String
+    var severity: ApprovalSeverity
 }
 
 enum RiskClassifier {
@@ -3152,9 +6239,9 @@ enum RiskClassifier {
             "computer use", "screen control"
         ]
         if let hit = highRisk.first(where: { lower.contains($0.lowercased()) }) {
-            return RiskResult(requiresApproval: true, reason: "Approval required for \(hit)")
+            return RiskResult(requiresApproval: true, reason: "Approval required for \(hit)", severity: .high)
         }
-        return RiskResult(requiresApproval: false, reason: "auto")
+        return RiskResult(requiresApproval: false, reason: "auto", severity: .low)
     }
 }
 
@@ -3179,7 +6266,9 @@ enum SessionParser {
     static func sessionID(from line: String) -> String? {
         let patterns = [
             #"session_id:\s*([A-Za-z0-9_\-]+)"#,
-            #"Session ID:\s*([A-Za-z0-9_\-]+)"#
+            #"Session ID:\s*([A-Za-z0-9_\-]+)"#,
+            #""session_id"\s*:\s*"([A-Za-z0-9_\-]+)""#,
+            #""sessionId"\s*:\s*"([A-Za-z0-9_\-]+)""#
         ]
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
@@ -3190,6 +6279,206 @@ enum SessionParser {
             }
         }
         return nil
+    }
+}
+
+enum RunUsageParser {
+    static func parse(_ text: String) -> RunUsage? {
+        var merged: RunUsage?
+        for candidate in candidates(from: text) {
+            if let usage = jsonUsage(from: candidate) ?? textUsage(from: candidate) {
+                merged = merged.map { $0.merged(with: usage) } ?? usage
+            }
+        }
+        return merged?.normalized
+    }
+
+    private static func candidates(from text: String) -> [String] {
+        let stripped = stripANSI(text)
+        let lines = stripped
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return lines.isEmpty ? [stripped.trimmingCharacters(in: .whitespacesAndNewlines)].filter { !$0.isEmpty } : lines
+    }
+
+    private static func jsonUsage(from text: String) -> RunUsage? {
+        var merged: RunUsage?
+        for candidate in jsonCandidates(from: text) {
+            guard let data = candidate.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) else {
+                continue
+            }
+            guard let usage = usage(from: object)?.normalized else { continue }
+            merged = merged.map { $0.merged(with: usage) } ?? usage
+        }
+        return merged?.normalized
+    }
+
+    private static func jsonCandidates(from text: String) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        var candidates: [String] = [trimmed]
+        if let start = trimmed.firstIndex(of: "{"), let end = trimmed.lastIndex(of: "}"), start < end {
+            candidates.append(String(trimmed[start...end]))
+        }
+        return Array(Set(candidates))
+    }
+
+    private static func usage(from object: Any) -> RunUsage? {
+        if let dictionary = object as? [String: Any] {
+            var merged = usageFromFlatDictionary(dictionary)
+            for value in dictionary.values {
+                guard let nested = usage(from: value) else { continue }
+                merged = merged.map { $0.merged(with: nested) } ?? nested
+            }
+            guard var usage = merged else { return nil }
+            usage.model = usage.model?.nilIfBlank ?? stringValue(dictionary, keys: ["model", "model_name", "modelName"])
+            return usage.normalized
+        }
+        if let array = object as? [Any] {
+            var merged: RunUsage?
+            for item in array {
+                guard let nested = usage(from: item) else { continue }
+                merged = merged.map { $0.merged(with: nested) } ?? nested
+            }
+            return merged?.normalized
+        }
+        return nil
+    }
+
+    private static func usageFromFlatDictionary(_ dictionary: [String: Any]) -> RunUsage? {
+        var usage = RunUsage(source: "json")
+        usage.inputTokens = intValue(dictionary, keys: [
+            "input_tokens", "inputTokens", "prompt_tokens", "promptTokens",
+            "prompt_token_count", "input_token_count"
+        ])
+        usage.outputTokens = intValue(dictionary, keys: [
+            "output_tokens", "outputTokens", "completion_tokens", "completionTokens",
+            "completion_token_count", "output_token_count"
+        ])
+        usage.cacheReadTokens = intValue(dictionary, keys: [
+            "cache_read_tokens", "cacheReadTokens", "cache_read_input_tokens",
+            "cached_input_tokens", "cachedInputTokens"
+        ])
+        usage.cacheWriteTokens = intValue(dictionary, keys: [
+            "cache_write_tokens", "cacheWriteTokens", "cache_creation_input_tokens",
+            "cacheCreationInputTokens"
+        ])
+        usage.reasoningTokens = intValue(dictionary, keys: [
+            "reasoning_tokens", "reasoningTokens", "reasoning_output_tokens",
+            "reasoningOutputTokens"
+        ])
+        usage.totalTokens = intValue(dictionary, keys: ["total_tokens", "totalTokens"])
+        usage.estimatedCostUSD = doubleValue(dictionary, keys: [
+            "estimated_cost_usd", "estimatedCostUSD", "cost_usd", "costUSD",
+            "total_cost", "totalCost"
+        ])
+        usage.actualCostUSD = doubleValue(dictionary, keys: ["actual_cost_usd", "actualCostUSD"])
+        usage.model = stringValue(dictionary, keys: ["model", "model_name", "modelName"])
+        return usage.normalized
+    }
+
+    private static func textUsage(from text: String) -> RunUsage? {
+        var usage = RunUsage(source: "text")
+        usage.inputTokens = firstInt(in: text, patterns: [
+            #"(?:input|prompt)[_\s-]*(?:tokens?|token count)\D{0,20}([0-9][0-9,]*)"#,
+            #"([0-9][0-9,]*)\s*(?:input|prompt)[_\s-]*tokens?"#
+        ])
+        usage.outputTokens = firstInt(in: text, patterns: [
+            #"(?:output|completion)[_\s-]*(?:tokens?|token count)\D{0,20}([0-9][0-9,]*)"#,
+            #"([0-9][0-9,]*)\s*(?:output|completion)[_\s-]*tokens?"#
+        ])
+        usage.reasoningTokens = firstInt(in: text, patterns: [
+            #"reasoning[_\s-]*tokens?\D{0,20}([0-9][0-9,]*)"#,
+            #"([0-9][0-9,]*)\s*reasoning[_\s-]*tokens?"#
+        ])
+        usage.totalTokens = firstInt(in: text, patterns: [
+            #"total[_\s-]*tokens?\D{0,20}([0-9][0-9,]*)"#,
+            #"([0-9][0-9,]*)\s*total[_\s-]*tokens?"#
+        ])
+        usage.estimatedCostUSD = firstDouble(in: text, patterns: [
+            #"(?:estimated\s+)?cost(?:\s+usd)?\D{0,12}\$?([0-9]+(?:\.[0-9]+)?)"#,
+            #"\$([0-9]+(?:\.[0-9]+)?)"#
+        ])
+        return usage.normalized
+    }
+
+    private static func intValue(_ dictionary: [String: Any], keys: [String]) -> Int? {
+        for key in keys {
+            guard let value = dictionary[key], let integer = intValue(value) else { continue }
+            return integer
+        }
+        return nil
+    }
+
+    private static func intValue(_ value: Any) -> Int? {
+        if let integer = value as? Int { return integer }
+        if let number = value as? NSNumber { return number.intValue }
+        if let string = value as? String {
+            return Int(string.replacingOccurrences(of: ",", with: ""))
+        }
+        return nil
+    }
+
+    private static func doubleValue(_ dictionary: [String: Any], keys: [String]) -> Double? {
+        for key in keys {
+            guard let value = dictionary[key], let double = doubleValue(value) else { continue }
+            return double
+        }
+        return nil
+    }
+
+    private static func doubleValue(_ value: Any) -> Double? {
+        if let double = value as? Double { return double }
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let string = value as? String {
+            return Double(string.replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: ""))
+        }
+        return nil
+    }
+
+    private static func stringValue(_ dictionary: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            guard let string = dictionary[key] as? String, let clean = string.nilIfBlank else { continue }
+            return clean
+        }
+        return nil
+    }
+
+    private static func firstInt(in text: String, patterns: [String]) -> Int? {
+        for pattern in patterns {
+            guard let value = firstMatch(in: text, pattern: pattern) else { continue }
+            return Int(value.replacingOccurrences(of: ",", with: ""))
+        }
+        return nil
+    }
+
+    private static func firstDouble(in text: String, patterns: [String]) -> Double? {
+        for pattern in patterns {
+            guard let value = firstMatch(in: text, pattern: pattern) else { continue }
+            return Double(value.replacingOccurrences(of: ",", with: ""))
+        }
+        return nil
+    }
+
+    private static func firstMatch(in text: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges > 1,
+              let valueRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        return String(text[valueRange])
+    }
+
+    private static func stripANSI(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "\u{001B}\\[[0-9;?]*[ -/]*[@-~]") else {
+            return text
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "")
     }
 }
 
@@ -3306,6 +6595,11 @@ private extension String {
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~:/")
         return addingPercentEncoding(withAllowedCharacters: allowed) ?? self
+    }
+
+    var nilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
