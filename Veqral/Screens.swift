@@ -2,90 +2,6 @@ import SwiftUI
 import UIKit
 import AVFoundation
 
-struct IntentCaptureView: View {
-    @EnvironmentObject private var store: CommandCenterStore
-    private let columns = [GridItem(.adaptive(minimum: 320), spacing: 14)]
-
-    var body: some View {
-        ScreenScaffold(title: "Intent", systemImage: "text.bubble") {
-            CommandComposer()
-
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
-                VQPanel("Run Intake", systemImage: "bubble.left.and.bubble.right") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if store.runs.isEmpty {
-                            Text(L10n.tr("No command history yet. Send a natural-language instruction above to create the first Hermes run."))
-                                .font(.subheadline)
-                                .foregroundStyle(VQTheme.secondaryText)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        ForEach(store.runs.prefix(4)) { run in
-                            CommandRunListRow(run: run, isSelected: store.selectedRunID == run.id)
-                        }
-                    }
-                }
-
-                VQPanel("Requirement Source", systemImage: "checklist") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        KeyValueLine(key: "Project", value: store.workspace.projectName)
-                        KeyValueLine(key: "Workspace", value: store.workingDirectory)
-                        KeyValueLine(key: "Runtime", value: store.selectedRuntime.title)
-                        KeyValueLine(key: "Mac Host", value: store.remoteHost.isPaired ? VQDisplay.endpoint(store.remoteHost) : L10n.tr("Not Paired"))
-                        Text(L10n.tr("Requirements are produced by the active Hermes run and saved as logs, diffs, artifacts, and memory edits."))
-                            .font(.caption)
-                            .foregroundStyle(VQTheme.secondaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-
-                VQPanel("Memory Candidates", systemImage: "brain.head.profile") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        if store.remoteMemoryFiles.isEmpty {
-                            Text(store.remoteHost.isPaired ? L10n.tr("Refresh Memory to load Hermes USER.md, MEMORY.md, and skills.") : L10n.tr("Pair Mac Host to inspect Hermes memory."))
-                                .font(.subheadline)
-                                .foregroundStyle(VQTheme.secondaryText)
-                        }
-                        ForEach(store.remoteMemoryFiles.prefix(4)) { file in
-                            KeyValueLine(key: file.title, value: file.relativePath)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct RequirementsView: View {
-    @EnvironmentObject private var store: CommandCenterStore
-
-    var body: some View {
-        ScreenScaffold(title: "Requirements", systemImage: "checklist") {
-            VQPanel("Phase Gate", systemImage: "flag.checkered") {
-                PhaseRail(current: .requirements)
-            }
-
-            VQPanel("Current Requirement Context", systemImage: "doc.text.magnifyingglass") {
-                VStack(alignment: .leading, spacing: 12) {
-                    if let run = store.selectedRun {
-                        KeyValueLine(key: "Run", value: run.title)
-                        KeyValueLine(key: "Status", value: run.status.title)
-                        KeyValueLine(key: "Workspace", value: run.workingDirectory)
-                        Text(run.command)
-                            .font(.subheadline)
-                            .foregroundStyle(VQTheme.ink)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Text(L10n.tr("No requirements have been captured yet. Start from Intent or Command to let Hermes create the first requirements run."))
-                            .font(.subheadline)
-                            .foregroundStyle(VQTheme.secondaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-        }
-    }
-}
-
 struct DevicesView: View {
     @EnvironmentObject private var store: CommandCenterStore
     @State private var remoteEndpoint = ""
@@ -721,6 +637,8 @@ struct ProjectsView: View {
                             .foregroundStyle(VQTheme.secondaryText)
                     }
 
+                    HermesChatModelPicker()
+
                     ForEach(store.selectedAgentProject?.chats ?? []) { chat in
                         let isSelected = store.selectedAgentChat?.id == chat.id
                         HStack(spacing: 10) {
@@ -791,236 +709,53 @@ struct ProjectsView: View {
     }
 }
 
-struct AgentsView: View {
+private struct HermesChatModelPicker: View {
     @EnvironmentObject private var store: CommandCenterStore
-    private let columns = [GridItem(.adaptive(minimum: 280), spacing: 14)]
+
+    private var selection: Binding<String> {
+        Binding(
+            get: { store.selectedHermesProvider + "|" + store.selectedHermesModel },
+            set: { value in
+                let parts = value.split(separator: "|", maxSplits: 1).map(String.init)
+                let choice = HermesModelChoice.defaults.first {
+                    $0.provider == parts.first && $0.model == (parts.count > 1 ? parts[1] : "")
+                }
+                if let choice {
+                    store.selectHermesModel(choice)
+                }
+            }
+        )
+    }
 
     var body: some View {
-        ScreenScaffold(title: "Agents", systemImage: "person.3.sequence") {
-            ContextPackageIndicator(
-                subtitle: "PM, implementer, reviewer, tester, and researcher receive the same project memory and safety contract."
-            )
-
-            VQPanel("Organization", systemImage: "point.3.connected.trianglepath.dotted") {
-                OrganizationGraph()
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Label(L10n.tr("Hermes Model"), systemImage: "slider.horizontal.3")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                StatusPill(title: store.selectedHermesChoiceTitle.isEmpty ? "Hermes Auto" : store.selectedHermesChoiceTitle, tint: VQTheme.accent)
             }
 
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
-                VQPanel("Hermes Runtime", systemImage: "sparkles") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text(L10n.tr("Default implementer"))
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            StatusPill(title: store.remoteHost.isPaired ? "Remote Ready" : "Needs Host", tint: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber)
-                        }
-                        KeyValueLine(key: "Model path", value: L10n.tr("Hermes -> configured CLI tools"))
-                        KeyValueLine(key: "Device", value: store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : store.workspace.deviceName)
-                        FlowLayout(items: ["Terminal", "Files", "Memory", "Browser", "Approval gate"])
-                    }
-                }
-
-                VQPanel("Direct CLI Agents", systemImage: "rectangle.3.group.bubble.left") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text(L10n.tr("Native sessions"))
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            StatusPill(title: store.remoteHost.isPaired ? "Host Ready" : "Needs Host", tint: store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber)
-                        }
-                        KeyValueLine(key: "Codex", value: L10n.tr("~/.codex sessions, resumable from History"))
-                        KeyValueLine(key: "Claude", value: L10n.tr("~/.claude sessions, resumable from History"))
-                        FlowLayout(items: ["Siloed memory", "Read-only history", "PTY stream", "Cancel/resume"])
-                    }
-                }
-
-                VQPanel("Local Shell", systemImage: "terminal") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text(L10n.tr("Read-only and approved commands"))
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            StatusPill(title: store.workspace.canRunLocalCommands ? "Mac Ready" : "iOS Remote Only", tint: store.workspace.canRunLocalCommands ? VQTheme.green : VQTheme.amber)
-                        }
-                        KeyValueLine(key: "Workspace", value: store.workspace.workingDirectory)
-                        KeyValueLine(key: "Git", value: store.workspace.statusSummary)
-                        FlowLayout(items: ["Status", "Diff", "Build", "GitHub"])
-                    }
-                }
-
-                if store.visibleRemoteDevices.isEmpty {
-                    VQPanel("Paired Devices", systemImage: "iphone.gen3.radiowaves.left.and.right") {
-                        Text(store.remoteHost.isPaired ? L10n.tr("No other paired devices yet.") : L10n.tr("Pair iPhone or iPad with Mac Host to show trusted devices."))
-                            .font(.subheadline)
-                            .foregroundStyle(VQTheme.secondaryText)
-                    }
-                } else {
-                    ForEach(store.visibleRemoteDevices) { device in
-                        VQPanel(device.name, systemImage: "iphone.gen3") {
-                            VStack(alignment: .leading, spacing: 10) {
-                                HStack {
-                                    Text(L10n.tr("Trusted client"))
-                                        .font(.subheadline.weight(.semibold))
-                                    Spacer()
-                                    StatusPill(title: device.lastSeenAt == nil ? "Paired" : "Seen", tint: device.lastSeenAt == nil ? VQTheme.amber : VQTheme.green)
-                                }
-                                KeyValueLine(key: "Device ID", value: device.id)
-                                KeyValueLine(key: "Last seen", value: device.lastSeenAt.map(Self.deviceDateFormatter.string(from:)) ?? L10n.tr("Never"))
-                            }
-                        }
-                    }
+            Picker(L10n.tr("Hermes Model"), selection: selection) {
+                ForEach(HermesModelChoice.defaults) { choice in
+                    Text(choice.title).tag(choice.provider + "|" + choice.model)
                 }
             }
-        }
-    }
+            .pickerStyle(.segmented)
 
-    private static let deviceDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter
-    }()
-}
-
-struct ModelAssignmentView: View {
-    @EnvironmentObject private var store: CommandCenterStore
-    private let columns = [GridItem(.adaptive(minimum: 300), spacing: 14)]
-
-    var body: some View {
-        ScreenScaffold(title: "Models", systemImage: "cpu") {
-            ContextPackageIndicator(
-                title: "Model-independent Context",
-                subtitle: "Provider prompts can differ, but every role is generated from the same Context Package."
-            )
-
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
-                ForEach(CommandRuntime.allCases) { runtime in
-                    VQPanel(runtime.title, systemImage: runtime.symbol) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack(alignment: .top) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(L10n.tr(runtime.contextModeDescription))
-                                        .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(VQTheme.ink)
-                                    Text(L10n.tr(runtime == store.selectedRuntime ? "Selected runtime" : "Available runtime"))
-                                        .font(.caption)
-                                        .foregroundStyle(VQTheme.secondaryText)
-                                }
-                                Spacer()
-                                StatusPill(title: runtime == .hermesAgent && store.remoteHost.isPaired ? "Mac Host" : store.workspace.deviceName, tint: VQTheme.accent)
-                            }
-
-                            HStack(spacing: 8) {
-                                ModelTrait(label: "Execution", value: runtime.usesRemoteAgent ? "Mac Host" : "Local", tint: runtime.usesRemoteAgent ? VQTheme.accent : VQTheme.steel)
-                                ModelTrait(label: "Approvals", value: "Host gated", tint: VQTheme.amber)
-                                ModelTrait(label: "Context", value: runtime == .hermesAgent ? "Unified" : "Siloed", tint: runtime == .hermesAgent ? VQTheme.green : VQTheme.steel)
-                            }
-
-                            Text(L10n.tr(runtimeDescription(runtime)))
-                                .font(.caption)
-                                .foregroundStyle(VQTheme.secondaryText)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            FlowLayout(items: runtimeTraits(runtime))
-                        }
-                    }
-                }
+            VStack(spacing: 6) {
+                KeyValueLine(key: "Provider", value: store.selectedHermesProvider)
+                KeyValueLine(key: "Model", value: store.selectedHermesModel.isEmpty ? L10n.tr("Hermes default") : store.selectedHermesModel)
             }
 
-            VQPanel("Hermes Provider Routing", systemImage: "slider.horizontal.3") {
-                VStack(alignment: .leading, spacing: 12) {
-                    Picker("Model", selection: Binding(
-                        get: { store.selectedHermesProvider + "|" + store.selectedHermesModel },
-                        set: { value in
-                            let parts = value.split(separator: "|", maxSplits: 1).map(String.init)
-                            let choice = HermesModelChoice.defaults.first { $0.provider == parts.first && $0.model == (parts.count > 1 ? parts[1] : "") }
-                            if let choice {
-                                store.selectHermesModel(choice)
-                            }
-                        }
-                    )) {
-                        ForEach(HermesModelChoice.defaults) { choice in
-                            Text(choice.title).tag(choice.provider + "|" + choice.model)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    KeyValueLine(key: "Provider", value: store.selectedHermesProvider)
-                    KeyValueLine(key: "Model", value: store.selectedHermesModel.isEmpty ? L10n.tr("Hermes default") : store.selectedHermesModel)
-                    Text(L10n.tr("Only Hermes mode uses provider routing here. Codex and Claude direct modes keep their own CLI model/profile settings."))
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            VQPanel("Runtime Engines", systemImage: "bolt.horizontal") {
-                VStack(alignment: .leading, spacing: 12) {
-                    KeyValueLine(key: "Selected runtime", value: store.selectedRuntime.title)
-                    KeyValueLine(key: "Hermes", value: store.workspace.hermesLabel)
-                    KeyValueLine(key: "Local shell", value: store.workspace.canRunLocalCommands ? L10n.tr("Available on Mac") : L10n.tr("Requires Mac Host"))
-                    KeyValueLine(key: "Output contract", value: L10n.tr("Logs, diffs, artifacts, approvals"))
-                }
-            }
-        }
-    }
-
-    private func modelSymbol(for role: String) -> String {
-        let lower = role.lowercased()
-        if lower.contains("pm") || lower.contains("manager") { return "person.badge.key" }
-        if lower.contains("architect") { return "square.stack.3d.up" }
-        if lower.contains("implementer") { return "hammer" }
-        if lower.contains("reviewer") { return "checkmark.seal" }
-        if lower.contains("tester") { return "testtube.2" }
-        return "magnifyingglass"
-    }
-
-    private func runtimeDescription(_ runtime: CommandRuntime) -> String {
-        switch runtime {
-        case .hermesAgent:
-            "Uses Hermes native memory, skills, checkpoints, and provider routing on the paired Mac Host."
-        case .codexDirect:
-            "Spawns Codex CLI directly and resumes Codex sessions from ~/.codex without going through Hermes."
-        case .claudeDirect:
-            "Spawns Claude Code directly and resumes Claude sessions from ~/.claude without going through Hermes."
-        case .localShell:
-            "Runs local shell commands only where local command execution is available."
-        }
-    }
-
-    private func runtimeTraits(_ runtime: CommandRuntime) -> [String] {
-        switch runtime {
-        case .hermesAgent:
-            ["Hermes memory", "Provider routing", "Skills", "Worktree", "PTY stream"]
-        case .codexDirect:
-            ["Codex CLI", "~/.codex", "Resume", "Siloed"]
-        case .claudeDirect:
-            ["Claude Code", "~/.claude", "Resume", "Siloed"]
-        case .localShell:
-            ["Shell", "Git", "Build", "Diff"]
-        }
-    }
-}
-
-private struct ModelTrait: View {
-    let label: String
-    let value: String
-    let tint: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(L10n.tr(label))
-                .font(.caption2)
+            Text(L10n.tr("Codex and Claude direct modes keep their own CLI model settings."))
+                .font(.caption)
                 .foregroundStyle(VQTheme.secondaryText)
-            Text(L10n.tr(value))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(tint)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(8)
-        .background(tint.opacity(0.08))
+        .padding(10)
+        .background(VQTheme.control.opacity(0.32))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
@@ -1128,125 +863,6 @@ private struct CompactApprovalDecisionRow: View {
                 .frame(minWidth: 190)
         }
         .font(.footnote.weight(.semibold))
-    }
-}
-
-struct TerminalView: View {
-    @EnvironmentObject private var store: CommandCenterStore
-
-    var body: some View {
-        ScreenScaffold(title: "Terminal", systemImage: "terminal") {
-            VQPanel("Command", systemImage: "paperplane") {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 10) {
-                        RuntimeSegmentedControl()
-                    }
-
-                    HStack(spacing: 10) {
-                        TextField(L10n.tr("Command to run on Mac"), text: $store.commandDraft, axis: .vertical)
-                            .textFieldStyle(.plain)
-                            .lineLimit(1...3)
-                            .font(.body.monospaced())
-                            .onSubmit {
-                                store.submitDraft()
-                            }
-                        Button(action: store.submitDraft) {
-                            Label(L10n.tr("Run"), systemImage: "arrow.up")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .buttonBorderShape(.roundedRectangle(radius: 8))
-                    }
-
-                    CommandAttachmentControls()
-
-                    #if targetEnvironment(macCatalyst)
-                    HStack(spacing: 8) {
-                        Image(systemName: "folder")
-                        TextField(L10n.tr("Working directory"), text: $store.workingDirectory)
-                            .textFieldStyle(.plain)
-                            .font(.caption.monospaced())
-                            .onSubmit {
-                                store.refreshWorkspace()
-                            }
-                    }
-                    .foregroundStyle(VQTheme.secondaryText)
-                    HStack {
-                        StatusPill(title: store.workspace.statusSummary, tint: store.workspace.changedFiles == 0 ? VQTheme.green : VQTheme.amber)
-                        Text(store.workspace.branchLabel)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(VQTheme.secondaryText)
-                            .lineLimit(1)
-                    }
-                    #else
-                    Text(L10n.tr("On iPhone and iPad this saves the run. Local execution happens from the Mac build."))
-                        .font(.caption)
-                        .foregroundStyle(VQTheme.secondaryText)
-                    #endif
-                }
-            }
-
-            VQPanel("Session", systemImage: "terminal", actionImage: "arrow.clockwise") {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        StatusPill(title: store.selectedRun?.status.title ?? "Waiting", tint: store.selectedRun?.status.tint ?? VQTheme.secondaryText)
-                        Spacer()
-                        Text(store.selectedRun?.title ?? L10n.tr("No run selected."))
-                            .font(.caption.monospaced())
-                            .foregroundStyle(VQTheme.secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-
-                    if let approval = store.pendingApproval(for: store.selectedRun?.id) {
-                        RunApprovalCallout(approval: approval)
-                    }
-
-                    VStack(alignment: .leading, spacing: 7) {
-                        let logs = store.logEntries(for: store.selectedRun?.id)
-                        if logs.isEmpty {
-                            Text(L10n.tr("まだログはありません。"))
-                                .foregroundStyle(VQTheme.secondaryText)
-                        }
-                        ForEach(logs) { line in
-                            HStack(alignment: .top, spacing: 8) {
-                                Text(line.time.commandTime)
-                                    .foregroundStyle(VQTheme.secondaryText)
-                                Text(line.stream)
-                                    .foregroundStyle(VQTheme.amber)
-                                    .frame(width: 58, alignment: .leading)
-                                Text(line.message)
-                                    .foregroundStyle(Color(red: 0.85, green: 0.90, blue: 0.88))
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                    }
-                    .font(.caption.monospaced())
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(red: 0.06, green: 0.07, blue: 0.07))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-                    HStack {
-                        Text("$ \(store.selectedRun?.command ?? "pwd")")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(VQTheme.secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer()
-                        Button {
-                            if let run = store.selectedRun {
-                                store.submitCommand(run.command, runtime: run.runtimeOrDefault)
-                            }
-                        } label: {
-                            Image(systemName: "paperplane")
-                        }
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.roundedRectangle(radius: 8))
-                        .help(L10n.tr("Send command"))
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -2157,52 +1773,6 @@ private struct PhaseRail: View {
             ProgressView(value: Double(RunPhase.allCases.firstIndex(of: current) ?? 0), total: Double(RunPhase.allCases.count - 1))
                 .tint(VQTheme.accent)
         }
-    }
-}
-
-private struct OrganizationGraph: View {
-    var body: some View {
-        VStack(spacing: 14) {
-                AgentNode(name: "Command", role: "iPhone/iPad", tint: VQTheme.accent)
-            Rectangle()
-                .fill(VQTheme.hairline)
-                .frame(width: 1, height: 18)
-            HStack(spacing: 10) {
-                AgentNode(name: "Mac Host", role: "Tailscale", tint: VQTheme.green)
-                AgentNode(name: "Hermes", role: "Agent", tint: VQTheme.amber)
-                AgentNode(name: "Codex", role: "CLI", tint: VQTheme.violet)
-            }
-            Rectangle()
-                .fill(VQTheme.hairline)
-                .frame(width: 1, height: 18)
-            AgentNode(name: "Outputs", role: "Logs/Diff", tint: VQTheme.ink)
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
-private struct AgentNode: View {
-    let name: String
-    let role: String
-    let tint: Color
-
-    var body: some View {
-        VStack(spacing: 4) {
-            Image(systemName: "person.crop.circle")
-                .font(.title3)
-                .foregroundStyle(tint)
-            Text(name)
-                .font(.caption.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-            Text(role)
-                .font(.caption2)
-                .foregroundStyle(VQTheme.secondaryText)
-        }
-        .padding(10)
-        .frame(maxWidth: 110)
-        .background(tint.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 

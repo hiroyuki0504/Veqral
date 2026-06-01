@@ -305,13 +305,6 @@ struct CommandCenterPhoneDashboard: View {
                         .foregroundStyle(VQTheme.ink)
                     Spacer()
                     AppearanceToggleButton()
-                    NavigationLink(value: AppSection.chat) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 18, weight: .medium))
-                            .frame(width: 34, height: 34)
-                            .foregroundStyle(VQTheme.ink)
-                    }
-                    .buttonStyle(.plain)
                 }
                 .padding(.top, 8)
 
@@ -741,9 +734,76 @@ private struct CommandSubmitPanel: View {
             #endif
 
             CommandAttachmentControls()
+            CommandRequirementMemo()
         }
         .padding(12)
         .commandPanel()
+    }
+}
+
+private struct CommandRequirementMemo: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @EnvironmentObject private var store: CommandCenterStore
+
+    private var selectedRunText: String {
+        guard let run = store.selectedRun else {
+            return L10n.tr("No run selected")
+        }
+        return run.title
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Label(L10n.tr("Requirement Memo"), systemImage: "checklist")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                StatusPill(title: store.selectedRuntime.shortTitle, tint: VQTheme.accent)
+            }
+
+            Text(selectedRunText)
+                .font(.caption)
+                .foregroundStyle(VQTheme.secondaryText)
+                .lineLimit(2)
+
+            HStack(spacing: 8) {
+                Button {
+                    store.commandDraft = L10n.tr("Summarize requirements, acceptance criteria, and risks for this work before implementing.")
+                } label: {
+                    Label(L10n.tr("Requirements"), systemImage: "text.badge.checkmark")
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                memoryControl
+
+                Spacer()
+            }
+            .font(.caption.weight(.semibold))
+        }
+        .padding(10)
+        .background(VQTheme.control.opacity(0.38))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var memoryControl: some View {
+        if horizontalSizeClass == .compact {
+            NavigationLink(value: AppSection.memory) {
+                Label(L10n.tr("Memory"), systemImage: "brain.head.profile")
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+        } else {
+            Button {
+                store.requestedSection = .memory
+            } label: {
+                Label(L10n.tr("Memory"), systemImage: "brain.head.profile")
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+        }
     }
 }
 
@@ -1278,6 +1338,7 @@ private struct PhoneComposer: View {
             }
 
             CommandAttachmentControls()
+            CommandRequirementMemo()
         }
         .padding(8)
         .commandPanel()
