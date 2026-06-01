@@ -639,6 +639,15 @@ struct DevicesView: View {
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
                             .disabled(!store.remoteHost.isPaired || store.isRefreshingRemoteHost)
+
+                            Button {
+                                store.sendDiscordTestNotification()
+                            } label: {
+                                Label("Discord テスト", systemImage: "paperplane")
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                            .disabled(!store.remoteHost.isPaired)
                         }
                         .font(.footnote.weight(.semibold))
 
@@ -653,6 +662,13 @@ struct DevicesView: View {
                             Text(remoteStatusMessage)
                                 .font(.caption)
                                 .foregroundStyle(remoteStatusMessage.contains("failed") || remoteStatusMessage.contains("失敗") ? VQTheme.amber : VQTheme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        if !store.discordTestMessage.isEmpty {
+                            Text(store.discordTestMessage)
+                                .font(.caption)
+                                .foregroundStyle(store.discordTestMessage.contains("失敗") || store.discordTestMessage.localizedCaseInsensitiveContains("failed") ? VQTheme.amber : VQTheme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -677,7 +693,11 @@ struct DevicesView: View {
                 }
 
                 VQPanel("Host Status", systemImage: "waveform.path.ecg") {
-                    HostTelemetryPanel(telemetry: store.remoteHostTelemetry, isPaired: store.remoteHost.isPaired)
+                    HostTelemetryPanel(
+                        telemetry: store.remoteHostTelemetry,
+                        isPaired: store.remoteHost.isPaired,
+                        message: store.remoteHostTelemetryMessage
+                    )
                 }
 
                 VQPanel("Run Agent on This Mac", systemImage: "switch.2") {
@@ -998,6 +1018,7 @@ struct DevicesView: View {
 private struct HostTelemetryPanel: View {
     let telemetry: RemoteHostTelemetry?
     let isPaired: Bool
+    let message: String
 
     private let columns = [GridItem(.adaptive(minimum: 150), spacing: 10)]
 
@@ -1061,6 +1082,13 @@ private struct HostTelemetryPanel: View {
                 Text(isPaired ? L10n.tr("Refresh Host to load telemetry.") : L10n.tr("Host telemetry appears after pairing."))
                     .font(.subheadline)
                     .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !message.isEmpty {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(message.contains("失敗") || message.localizedCaseInsensitiveContains("failed") ? VQTheme.amber : VQTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -2597,6 +2625,9 @@ private struct ProjectMemoryReadOnlyView: View {
                 if let snapshot = displayedSnapshot {
                     StatusPill(title: "\(snapshot.sessions.count) セッション", tint: snapshot.sessions.isEmpty ? VQTheme.secondaryText : VQTheme.accent)
                 }
+                if let fetchedAt = store.remoteProjectMemoryLastFetchedAt {
+                    StatusPill(title: "最終取得 \(Self.projectMemoryDateFormatter.string(from: fetchedAt))", tint: VQTheme.steel)
+                }
                 Spacer()
                 Button {
                     store.refreshRemoteProjectMemory()
@@ -2631,6 +2662,13 @@ private struct ProjectMemoryReadOnlyView: View {
             }
         }
     }
+
+    private static let projectMemoryDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }()
 
     @ViewBuilder
     private func snapshotView(_ snapshot: RemoteProjectMemoryResponse) -> some View {

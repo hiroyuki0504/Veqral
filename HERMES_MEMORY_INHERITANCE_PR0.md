@@ -1,47 +1,18 @@
 # Hermes Memory Inheritance PR0
 
-- Source: `veqral-memtest-20260601-004957-5048483f`
-- Hermes home: `/var/folders/_0/zjtv21fj10q6qwf1g4vjyd480000gn/T/veqral-memtest-20260601-004957-5048483f/hermes-home`
-- Chat A: `copilot/gpt-4o-mini`
-- Chat B: `copilot/claude-haiku-4.5`
-- Code name: `Tachibana-7-8D645DCA`
+- Source: `veqral-memtest-20260601-031522-57257ec1`
+- Hermes home: isolated temporary home (`hermes-home`)
+- Chat A: `custom/qwen2.5:7b`
+- Chat B: `openrouter/google/gemini-2.5-flash`
+- Chat A credential source: local Ollama placeholder (`OPENAI_API_KEY=ollama`)
+- Chat B credential source: missing env `OPENROUTER_API_KEY` / Keychain account `openrouter:api-key`
+- Code name: `Tachibana-7-87F08337`
 
-## Chat A Transcript
+## Credential / Provider Preflight
 
-```text
-⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
-
-Error: unauthorized: not licensed to use Copilot
-
-session_id: 20260601_094958_0a181f
-```
-
-## Native Memory Check
-
-- `MEMORY.md` exists: no
-- `MEMORY.md` contains code name: no
-- `state.db` session store: state.db, sessions for source=0
-
-## Chat B Transcript
-
-```text
-Error: unauthorized: not licensed to use Copilot
-
-session_id: 20260601_095027_208797
-```
-
-## Findings
-
-- Chat A reached Copilot, but the account is not authorized for the requested Copilot model/API feature.
-- Hermes native `MEMORY.md` was not created for the disposable source.
-- Chat B reached Copilot, but the account is not authorized for the requested Copilot model/API feature.
-- Chat B did not return the test code name from Hermes native memory/context.
+- Chat A points at local Ollama, but `http://127.0.0.1:11434/api/tags` is not reachable. Start Ollama and pull the configured model before rerunning.
+- Chat B uses `openrouter`, but `OPENROUTER_API_KEY` is not set and Keychain account `openrouter:api-key` is empty.
 
 ## Result
 
-FAIL: Hermes memory inheritance was not proven.
-
-- Chat A exit: 1
-- Chat B exit: 1
-- Native memory contains fact: false
-- Chat B response contains fact: false
+FAIL: Hermes memory inheritance was not run because at least one real provider/model route is not ready. 偽 pass は作っていません。
