@@ -462,6 +462,7 @@ struct ApprovalActionButtons: View {
     @EnvironmentObject private var store: CommandCenterStore
     let approval: CommandApproval
     var compact = false
+    @State private var isReviewingApproval = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -474,7 +475,11 @@ struct ApprovalActionButtons: View {
             .buttonStyle(.bordered)
 
             Button {
-                store.approve(approval)
+                if approval.requiresPreApprovalReview {
+                    isReviewingApproval = true
+                } else {
+                    store.approve(approval)
+                }
             } label: {
                 Label(L10n.tr("Approve"), systemImage: "checkmark")
                     .frame(maxWidth: .infinity)
@@ -484,10 +489,196 @@ struct ApprovalActionButtons: View {
         .buttonBorderShape(.roundedRectangle(radius: 8))
         .controlSize(compact ? .small : .regular)
         .font((compact ? Font.caption2 : Font.footnote).weight(.semibold))
+        .sheet(isPresented: $isReviewingApproval) {
+            ApprovalReviewSheet(
+                approval: approval,
+                diffs: store.diffEntries(for: approval.runID),
+                onReject: {
+                    isReviewingApproval = false
+                    store.reject(approval)
+                },
+                onApprove: {
+                    isReviewingApproval = false
+                    store.approve(approval)
+                }
+            )
+        }
+    }
+}
+
+private struct ApprovalReviewSheet: View {
+    let approval: CommandApproval
+    let diffs: [CommandDiffEntry]
+    let onReject: () -> Void
+    let onApprove: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: approval.symbolName)
+                    .font(.title3.weight(.semibold))
+                    .frame(width: 36, height: 36)
+                    .foregroundStyle(approval.tint)
+                    .background(approval.tint.opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(L10n.tr("Review Before Approving"))
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    Text(approval.detail)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer()
+            }
+
+            ScrollView {
+                ApprovalImpactPreview(approval: approval, diffs: diffs, compact: false, includePatch: true)
+                    .padding(.vertical, 2)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    dismiss()
+                    onReject()
+                } label: {
+                    Label(L10n.tr("Reject"), systemImage: "xmark")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    dismiss()
+                    onApprove()
+                } label: {
+                    Label(L10n.tr("Confirm Approval"), systemImage: "checkmark.shield")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+        }
+        .padding(20)
+        .frame(maxWidth: 620, maxHeight: 680)
+        .background(VQTheme.canvas)
+    }
+}
+
+struct ApprovalImpactPreview: View {
+    let approval: CommandApproval
+    let diffs: [CommandDiffEntry]
+    var compact = false
+    var includePatch = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 8 : 12) {
+            ImpactSectionTitle(title: L10n.tr("What Will Run"), symbol: "terminal")
+            Text(approval.command.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank ?? L10n.tr("Command is not available."))
+                .font((compact ? Font.caption2 : Font.caption).monospaced())
+                .foregroundStyle(VQTheme.ink)
+                .textSelection(.enabled)
+                .lineLimit(compact ? 4 : 12)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(VQTheme.terminal.opacity(0.92))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            ImpactSectionTitle(title: L10n.tr("Affected Files"), symbol: "doc.text.magnifyingglass")
+            if diffs.isEmpty {
+                Text(L10n.tr("No diff collected for this approval yet."))
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(VQTheme.control.opacity(0.42))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("\(diffs.count) \(L10n.tr("files changed"))")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(VQTheme.ink)
+                        Spacer()
+                        Text("+\(diffs.map(\.additions).reduce(0, +))  -\(diffs.map(\.deletions).reduce(0, +))")
+                            .font(.caption.monospaced().weight(.semibold))
+                            .foregroundStyle(VQTheme.secondaryText)
+                    }
+
+                    ForEach(diffs.prefix(compact ? 3 : 8)) { diff in
+                        ApprovalDiffRow(diff: diff, includePatch: includePatch)
+                    }
+                }
+                .padding(10)
+                .background(VQTheme.control.opacity(0.42))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+    }
+}
+
+private struct ImpactSectionTitle: View {
+    let title: String
+    let symbol: String
+
+    var body: some View {
+        Label(title, systemImage: symbol)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(VQTheme.secondaryText)
+    }
+}
+
+private struct ApprovalDiffRow: View {
+    let diff: CommandDiffEntry
+    let includePatch: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: diff.path.hasSuffix("json") ? "curlybraces" : "doc.text")
+                    .font(.caption)
+                    .frame(width: 22, height: 22)
+                    .foregroundStyle(diff.deletions > 12 ? VQTheme.red : VQTheme.accent)
+                    .background((diff.deletions > 12 ? VQTheme.red : VQTheme.accent).opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+
+                Text(diff.path)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(VQTheme.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text("+\(diff.additions)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(VQTheme.green)
+                Text("-\(diff.deletions)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(diff.deletions == 0 ? VQTheme.secondaryText : VQTheme.red)
+            }
+
+            if includePatch,
+               let patch = diff.patch?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !patch.isEmpty {
+                Text(String(patch.prefix(1_500)))
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .textSelection(.enabled)
+                    .lineLimit(18)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(VQTheme.canvas.opacity(0.64))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
     }
 }
 
 struct RunApprovalCallout: View {
+    @EnvironmentObject private var store: CommandCenterStore
     let approval: CommandApproval
     var compact = false
 
@@ -516,6 +707,13 @@ struct RunApprovalCallout: View {
                 }
                 Spacer(minLength: 0)
             }
+
+            ApprovalImpactPreview(
+                approval: approval,
+                diffs: store.diffEntries(for: approval.runID),
+                compact: compact,
+                includePatch: false
+            )
 
             ApprovalActionButtons(approval: approval, compact: compact)
         }

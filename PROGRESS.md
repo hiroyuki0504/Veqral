@@ -11,7 +11,7 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 - [x] #4 通知（Discord webhook） — completed in PR #21 (`codex/backlog-4-discord-notifications`)
 - [x] #5 記憶の可視化（Memory 画面で実 project memory 表示） — completed in PR #22 (`codex/backlog-5-memory-visibility`)
 - [x] #6 Run コスト/トークン表示 — completed in PR #23 (`codex/backlog-6-run-usage`)
-- [ ] #7 承認時に diff/コマンド表示
+- [x] #7 承認時に diff/コマンド表示 — completed in PR #24 (`codex/backlog-7-approval-context`)
 - [ ] #8 定型コマンドの保存/再送
 - [ ] #9 Mac ホストテレメトリ
 - [ ] #10 音声入力 P0
@@ -20,7 +20,7 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 
 ## Current Item
 
-#7 承認時に diff/コマンド表示
+#8 定型コマンドの保存/再送
 
 ## Notes
 
@@ -30,5 +30,6 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 - #4 Discord implementation is documented in `DISCORD_NOTIFICATIONS_PR4.md`. Local Host smoke passed with 4 redacted payloads; external Discord delivery still needs a real webhook URL configured on the paired Host.
 - #5 Memory visibility is documented in `MEMORY_VISIBILITY_PR5.md`. Host smoke passed; paired-device confirmation after a real Hermes Project chat is still needed.
 - #6 Run usage is documented in `RUN_USAGE_PR6.md`. Host parser smoke passed for Claude stream JSON, Codex usage JSON, and usage text. Run details now show input/output/reasoning/cache/total tokens and estimated/actual cost when the Host can derive them.
+- #7 Approval context is documented in `APPROVAL_CONTEXT_PR7.md`. High-risk approve now opens a review sheet with command text and linked diff/file context before approval is sent.
 - #1/#2/#11 are marked done because they already exist as stacked Draft PRs in this repository.
 - #12 must stop at "merge plan ready, waiting for explicit user approval"; no automatic main merge.

@@ -2075,6 +2075,7 @@ struct ApprovalsView: View {
 }
 
 private struct CommandApprovalQueueRow: View {
+    @EnvironmentObject private var store: CommandCenterStore
     let approval: CommandApproval
 
     var body: some View {
@@ -2094,12 +2095,15 @@ private struct CommandApprovalQueueRow: View {
                         .font(.caption)
                         .foregroundStyle(VQTheme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(approval.command)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(VQTheme.steel)
-                        .lineLimit(2)
                 }
             }
+
+            ApprovalImpactPreview(
+                approval: approval,
+                diffs: store.diffEntries(for: approval.runID),
+                compact: false,
+                includePatch: false
+            )
 
             HStack {
                 StatusPill(title: approval.riskLabel, tint: approval.tint)
