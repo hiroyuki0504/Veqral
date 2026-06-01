@@ -1,21 +1,91 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct RootView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @EnvironmentObject private var store: CommandCenterStore
 
     var body: some View {
         Group {
+            #if targetEnvironment(macCatalyst)
+            MacRootView()
+            #else
             if horizontalSizeClass == .compact {
                 CompactRootView()
             } else {
                 RegularRootView()
             }
+            #endif
         }
         .preferredColorScheme(.dark)
+        .environment(\.locale, store.appLanguage.locale)
+        .onAppear {
+            CatalystWindowConfigurator.applyMinimumSize()
+        }
+    }
+}
+
+private enum CatalystWindowConfigurator {
+    @MainActor
+    static func applyMinimumSize() {
+        #if targetEnvironment(macCatalyst)
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .forEach { scene in
+                scene.sizeRestrictions?.minimumSize = CGSize(width: 1180, height: 720)
+            }
+        #endif
+    }
+}
+
+private struct MacRootView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    @State private var selectedSection: AppSection? = .home
+
+    var body: some View {
+        NavigationSplitView {
+            CommandCenterSidebar(selection: $selectedSection)
+                .frame(minWidth: 260, idealWidth: 286, maxWidth: 320)
+        } content: {
+            NavigationStack {
+                sectionDestination(selectedSection ?? .home)
+            }
+            .frame(minWidth: 620)
+        } detail: {
+            CommandCenterInspectorView(selection: $selectedSection)
+                .frame(minWidth: 300, idealWidth: 340, maxWidth: 380)
+        }
+        .navigationSplitViewStyle(.balanced)
+        .background(VQTheme.canvas.ignoresSafeArea())
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    store.refreshRemoteHostStatus()
+                } label: {
+                    Label(L10n.tr("Refresh"), systemImage: "arrow.clockwise")
+                }
+                .help(L10n.tr("Refresh Mac Host"))
+
+                Button {
+                    store.requestedSection = .devices
+                } label: {
+                    Label(L10n.tr("Pair Mac Host"), systemImage: "qrcode.viewfinder")
+                }
+                .help(L10n.tr("Open Devices"))
+            }
+        }
+        .onChange(of: store.requestedSection) { _, section in
+            guard let section else { return }
+            selectedSection = section
+            store.requestedSection = nil
+        }
     }
 }
 
 private struct CompactRootView: View {
+    @EnvironmentObject private var store: CommandCenterStore
     @State private var selectedTab: AppSection = .home
 
     var body: some View {
@@ -30,16 +100,16 @@ private struct CompactRootView: View {
             .tag(AppSection.home)
 
             NavigationStack {
+                PortfolioView()
+            }
+            .tabItem { Label(AppSection.portfolio.title, systemImage: AppSection.portfolio.symbol) }
+            .tag(AppSection.portfolio)
+
+            NavigationStack {
                 ApprovalsView()
             }
             .tabItem { Label(AppSection.approvals.title, systemImage: AppSection.approvals.symbol) }
             .tag(AppSection.approvals)
-
-            NavigationStack {
-                ProjectsView()
-            }
-            .tabItem { Label(AppSection.projects.title, systemImage: AppSection.projects.symbol) }
-            .tag(AppSection.projects)
 
             NavigationStack {
                 DevicesView()
@@ -50,27 +120,26 @@ private struct CompactRootView: View {
             NavigationStack {
                 MoreView()
             }
-            .tabItem { Label("More", systemImage: "ellipsis.circle") }
+            .tabItem { Label(L10n.tr("More"), systemImage: "ellipsis.circle") }
             .tag(AppSection.github)
         }
         .tint(VQTheme.accent)
         .toolbarBackground(VQTheme.canvas, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
+        .onChange(of: store.requestedSection) { _, section in
+            guard let section else { return }
+            selectedTab = AppSection.primaryTabs.contains(section) ? section : .home
+            store.requestedSection = nil
+        }
     }
 }
 
 private struct MoreView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
     var body: some View {
         List {
-            Section("Command") {
-                ForEach(AppSection.commandGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
-                    NavigationLink(value: section) {
-                        Label(section.title, systemImage: section.symbol)
-                    }
-                }
-            }
-
-            Section("Operations") {
+            Section(L10n.tr("Operations")) {
                 ForEach(AppSection.operationGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
                     NavigationLink(value: section) {
                         Label(section.title, systemImage: section.symbol)
@@ -78,12 +147,23 @@ private struct MoreView: View {
                 }
             }
 
-            Section("System") {
+            Section(L10n.tr("System")) {
                 ForEach(AppSection.systemGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
                     NavigationLink(value: section) {
                         Label(section.title, systemImage: section.symbol)
                     }
                 }
+            }
+
+            Section(L10n.tr("Settings")) {
+                Picker(L10n.tr("App Language"), selection: $store.appLanguage) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.title).tag(language)
+                    }
+                }
+                Text(L10n.tr("Japanese UI with English developer terms where useful."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Veqral")
@@ -100,6 +180,7 @@ private struct MoreView: View {
 }
 
 private struct RegularRootView: View {
+    @EnvironmentObject private var store: CommandCenterStore
     @State private var selectedSection: AppSection? = .home
 
     var body: some View {
@@ -136,64 +217,10 @@ private struct RegularRootView: View {
                 .ignoresSafeArea()
             }
         }
-    }
-}
-
-private struct SidebarView: View {
-    @EnvironmentObject private var store: CommandCenterStore
-    @Binding var selection: AppSection?
-
-    var body: some View {
-        List(selection: $selection) {
-            Section("Command") {
-                ForEach(AppSection.commandGroup) { section in
-                    Label(section.title, systemImage: section.symbol)
-                        .tag(section)
-                }
-            }
-
-            Section("Operations") {
-                ForEach(AppSection.operationGroup) { section in
-                    Label(section.title, systemImage: section.symbol)
-                        .tag(section)
-                }
-            }
-
-            Section("System") {
-                ForEach(AppSection.systemGroup) { section in
-                    Label(section.title, systemImage: section.symbol)
-                        .tag(section)
-                }
-            }
-        }
-        .navigationTitle("Veqral")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                SpinningCommandNodeMark(size: 20)
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            VStack(alignment: .leading, spacing: 8) {
-                EmptyDivider()
-                HStack {
-                    Image(systemName: "bolt.horizontal.circle.fill")
-                        .foregroundStyle(VQTheme.green)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Agent Host")
-                            .font(.caption.weight(.semibold))
-                        Text(store.remoteHost.isPaired ? store.remoteHost.displayEndpoint : "Pair a Mac Host")
-                            .font(.caption2)
-                            .foregroundStyle(VQTheme.secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer()
-                }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 10)
-            }
-            .background(.regularMaterial)
+        .onChange(of: store.requestedSection) { _, section in
+            guard let section else { return }
+            selectedSection = section
+            store.requestedSection = nil
         }
     }
 }
@@ -204,22 +231,14 @@ private func sectionDestination(_ section: AppSection) -> some View {
     switch section {
     case .home:
         CommandCenterRunView()
-    case .chat:
-        IntentCaptureView()
-    case .requirements:
-        RequirementsView()
+    case .portfolio:
+        PortfolioView()
     case .projects:
         ProjectsView()
     case .devices:
         DevicesView()
-    case .agents:
-        AgentsView()
-    case .models:
-        ModelAssignmentView()
     case .runs:
         RunsView()
-    case .terminal:
-        TerminalView()
     case .diff:
         DiffView()
     case .artifacts:
