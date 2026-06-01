@@ -30,7 +30,7 @@ Audit/differentiation backlog #A7: Claude login 復旧後の cross-vendor Hermes
 - [x] #A3 コストガバナンス — Draft PR #33 (`codex/a3-cost-governance`), project budget guard
 - [x] #A4 司令塔を実データで — Draft PR #34 (`codex/a4-portfolio-real-data`), isolated sample acceptance when real roots unset
 - [x] #A5 認証オンボーディング — Draft PR #35 (`codex/a5-auth-onboarding`), login readiness and Keychain markers
-- [x] #A6 Apple Watch 承認アプリ — branch `codex/a6-watch-approval`, Draft PR pending. Watch UI scaffolded; watchOS 26.5 SDK/APNs/device connectivity remain environment-limited partials.
+- [x] #A6 Apple Watch 承認アプリ — Draft PR #36 (`codex/a6-watch-approval`). Watch UI scaffolded; watchOS 26.5 SDK/APNs/device connectivity remain environment-limited partials.
 - [ ] #A7 クロスベンダー #0 再実走 — blocked until Hermes can drive Claude/Anthropic login on this Mac
 - [ ] Final main 統合 — waiting for all #A items and explicit user GO
 

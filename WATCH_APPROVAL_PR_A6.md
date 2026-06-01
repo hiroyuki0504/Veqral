@@ -1,7 +1,7 @@
 # Apple Watch Approval PR A6
 
 Branch: `codex/a6-watch-approval`
-Draft PR: pending
+Draft PR: #36
 
 ## Scope
 

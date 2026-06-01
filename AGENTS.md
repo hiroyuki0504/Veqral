@@ -70,7 +70,7 @@ Device(Mac)
 - #33 (`codex/a3-cost-governance`): #A3。Project token/cost budget、Host `/v1/budgets`、Run/司令塔の予算表示、超過 pause/承認再開を追加。
 - #34 (`codex/a4-portfolio-real-data`): #A4。実ルート未設定時の isolated portfolio sample acceptance、`VEQRAL_HOST_HOME`、`includeGitHub`、Discord webhook disable を追加。実資産 roots/registry は未設定。
 - #35 (`codex/a5-auth-onboarding`): #A5。Host auth onboarding API、Devices の認証オンボーディング panel、Keychain readiness marker、`smoke-auth-onboarding` を追加。
-- #A6 (`codex/a6-watch-approval`): Apple Watch 承認 scaffold。`VeqralWatch` target/scheme、Watch HMAC client、Keychain token、approve/reject UI、一言コマンド、complication 用 status view を追加。watchOS 26.5 platform 未インストールのため Watch build/実機/cellular/APNs は partial として `WATCH_APPROVAL_PR_A6.md` に明記。
+- #36 (`codex/a6-watch-approval`): #A6。Apple Watch 承認 scaffold。`VeqralWatch` target/scheme、Watch HMAC client、Keychain token、approve/reject UI、一言コマンド、complication 用 status view を追加。watchOS 26.5 platform 未インストールのため Watch build/実機/cellular/APNs は partial として `WATCH_APPROVAL_PR_A6.md` に明記。
 
 ## 未完了・次の手番
 
