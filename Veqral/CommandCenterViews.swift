@@ -625,6 +625,27 @@ private struct RunHeader: View {
             .font(.caption)
             .foregroundStyle(VQTheme.secondaryText)
 
+            if run.runtimeOrDefault != .hermesAgent {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .center, spacing: 10) {
+                        handoffIntro
+                        Spacer()
+                        handoffButton
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        handoffIntro
+                        handoffButton
+                    }
+                }
+                .padding(10)
+                .background(VQTheme.control.opacity(0.38))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(VQTheme.hairline, lineWidth: 1)
+                }
+            }
+
             if let usage = run.usage, usage.hasDisplayValues {
                 RunUsageSummary(usage: usage)
             }
@@ -633,6 +654,27 @@ private struct RunHeader: View {
                 RunApprovalCallout(approval: approval)
             }
         }
+    }
+
+    private var handoffIntro: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Label("Project 記憶へ引き継ぐ", systemImage: "arrow.triangle.branch")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+            Text("直接モードの履歴は分離されています。Hermes に整理すると別 Chat/別モデルで続けられます。")
+                .font(.caption)
+                .foregroundStyle(VQTheme.secondaryText)
+                .lineLimit(2)
+        }
+    }
+
+    private var handoffButton: some View {
+        Button {
+            store.handoffRunContextToHermes(run)
+        } label: {
+            Label("Hermesへ送る", systemImage: "paperplane")
+        }
+        .buttonStyle(CommandButtonStyle())
     }
 }
 
@@ -1392,6 +1434,17 @@ private struct PhoneRunRow: View {
                 Text(elapsed)
                     .font(.caption2)
                     .foregroundStyle(VQTheme.secondaryText)
+            }
+
+            if run.runtimeOrDefault != .hermesAgent {
+                Button {
+                    store.handoffRunContextToHermes(run)
+                } label: {
+                    Label("Hermesへ引き継ぐ", systemImage: "arrow.triangle.branch")
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .controlSize(.small)
             }
 
             if let approval = store.pendingApproval(for: run.id) {

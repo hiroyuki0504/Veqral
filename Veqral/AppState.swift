@@ -2140,6 +2140,35 @@ final class CommandCenterStore: ObservableObject {
         )
     }
 
+    func askSelectedProjectMemory(_ question: String) {
+        let cleanQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuestion.isEmpty else { return }
+        guard selectedAgentProject != nil else {
+            remoteProjectMemoryMessage = "Hermes Project を選択すると、記憶へ問い合わせできます。"
+            return
+        }
+        createHermesChat(title: "記憶質問 \(Self.shortDateTimeFormatter.string(from: Date()))", select: true)
+        let prompt = """
+        選択中の Hermes Project の native memory と、この source に紐づく session 履歴だけを根拠に答えてください。
+        - Veqral 用の別 memory store は作らない。
+        - 根拠が薄い場合は「記憶からは断定できない」と明記する。
+        - 事実、関連する作業、次に見るべき点を短く整理する。
+
+        質問:
+        \(cleanQuestion)
+        """
+        submitHermesProjectCommand(prompt)
+        remoteProjectMemoryMessage = "記憶への問い合わせを新しい Hermes Chat に送信しました。"
+        requestedSection = .home
+    }
+
+    func handoffRunContextToHermes(_ run: CommandRun) {
+        selectOrCreateAgentProject(workingDirectory: run.workingDirectory, chatTitle: "引き継ぎ \(Self.shortRunID(run))")
+        let prompt = hermesHandoffPrompt(for: run)
+        submitHermesProjectCommand(prompt)
+        requestedSection = .home
+    }
+
     func continueHistorySession(_ session: RemoteHistorySession, command: String? = nil) {
         let text = (command ?? commandDraft).trimmingCharacters(in: .whitespacesAndNewlines)
         let prompt = text.isEmpty ? "Continue this session from Veqral. Briefly orient me to the current state and wait for the next instruction." : text
@@ -2158,6 +2187,143 @@ final class CommandCenterStore: ObservableObject {
             providerModel: session.model
         )
     }
+
+    @discardableResult
+    private func selectOrCreateAgentProject(workingDirectory directory: String, chatTitle: String?) -> AgentProjectSpace? {
+        let cleanDirectory = directory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? NSHomeDirectory() : directory
+        let expanded = NSString(string: cleanDirectory).expandingTildeInPath
+        let id = Self.stableAgentProjectID(for: expanded)
+        if !agentProjects.contains(where: { $0.id == id }) {
+            agentProjects.insert(
+                AgentProjectSpace(
+                    id: id,
+                    name: URL(fileURLWithPath: expanded).lastPathComponent.nilIfBlank ?? "Project",
+                    workingDirectory: expanded,
+                    createdAt: Date(),
+                    chats: []
+                ),
+                at: 0
+            )
+        }
+        selectedAgentProjectID = id
+        if let chatTitle {
+            createHermesChat(title: chatTitle, select: true)
+        } else if let project = selectedAgentProject {
+            if let currentChatID = selectedAgentChatID,
+               project.chats.contains(where: { $0.id == currentChatID }) {
+                return project
+            }
+            if let firstChat = project.chats.first {
+                selectedAgentChatID = firstChat.id
+                selectedHermesProvider = firstChat.provider
+                selectedHermesModel = firstChat.model
+            } else {
+                createHermesChat(select: true)
+            }
+        }
+        persist()
+        return selectedAgentProject
+    }
+
+    private func hermesHandoffPrompt(for run: CommandRun) -> String {
+        let logSummary = handoffLogSummary(for: run.id)
+        let diffSummary = handoffDiffSummary(for: run.id)
+        let usageLine = run.usage.flatMap(Self.handoffUsageLine) ?? "記録なし"
+        return """
+        以下は Veqral の直接モードまたは Shell 実行から Hermes Project へ引き継ぐ文脈です。
+        Hermes native memory / session history の範囲で整理し、同じ Project の別 Chat・別モデル（Claude/Codex など）が続きから作業できるようにしてください。
+        Veqral 用の別 memory store や MCP は作らないでください。
+
+        Run:
+        - ID: \(Self.shortRunID(run))
+        - Runtime: \(run.runtimeOrDefault.title)
+        - Status: \(run.status.title)
+        - Working directory: \(run.workingDirectory)
+        - Model: \(run.model)
+        - Usage: \(usageLine)
+
+        元の指令:
+        \(Self.redactedHandoffText(run.command, limit: 2_000))
+
+        ログ要約:
+        \(logSummary)
+
+        差分要約:
+        \(diffSummary)
+
+        次にやってほしいこと:
+        1. この実行の目的、現在地、未解決事項を Project 文脈として短く整理する。
+        2. 次の Chat/別モデルが続けるための「次の一手」を3つ以内で出す。
+        3. 重要な事実だけを Hermes native memory に残す必要がある場合は、Hermes の memory 機能で保存する。
+        """
+    }
+
+    private func handoffLogSummary(for runID: UUID) -> String {
+        let entries = logEntries(for: runID).suffix(24)
+        guard !entries.isEmpty else { return "ログなし" }
+        let text = entries.map { entry in
+            "[\(entry.stream)] \(entry.message)"
+        }.joined(separator: "\n")
+        return Self.redactedHandoffText(text, limit: 4_000)
+    }
+
+    private func handoffDiffSummary(for runID: UUID) -> String {
+        let entries = diffEntries(for: runID)
+        guard !entries.isEmpty else { return "差分なし" }
+        let text = entries.prefix(20).map { entry in
+            "- \(entry.path): +\(entry.additions) / -\(entry.deletions)"
+        }.joined(separator: "\n")
+        return Self.redactedHandoffText(text, limit: 2_000)
+    }
+
+    private static func handoffUsageLine(_ usage: CommandRunUsage) -> String? {
+        var parts: [String] = []
+        if let input = usage.inputTokens {
+            parts.append("入力 \(input)")
+        }
+        if let output = usage.outputTokens {
+            parts.append("出力 \(output)")
+        }
+        if let reasoning = usage.reasoningTokens {
+            parts.append("推論 \(reasoning)")
+        }
+        if let total = usage.totalTokensOrDerived {
+            parts.append("合計 \(total)")
+        }
+        if let cost = usage.costUSD {
+            parts.append(String(format: "費用 %.4f USD", cost))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " / ")
+    }
+
+    private static func shortRunID(_ run: CommandRun) -> String {
+        String(run.id.uuidString.prefix(8)).lowercased()
+    }
+
+    private static func redactedHandoffText(_ text: String, limit: Int) -> String {
+        var output = text
+        let replacements: [(String, String)] = [
+            (#"(?i)authorization\s*[:=]\s*bearer\s+[^\s'"]+"#, "Authorization: [REDACTED]"),
+            (#"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*['"]?[^'"\s]+"#, "$1=[REDACTED]"),
+            (#"(?i)(OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|VEQRAL_DISCORD_WEBHOOK)\s*=\s*[^\s]+"#, "$1=[REDACTED]"),
+            (#"(?i)sk-[A-Za-z0-9_\-]{12,}"#, "[REDACTED_KEY]")
+        ]
+        for (pattern, replacement) in replacements {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = regex.stringByReplacingMatches(in: output, range: range, withTemplate: replacement)
+        }
+        if output.count > limit {
+            return String(output.prefix(limit)) + "\n...（省略）"
+        }
+        return output
+    }
+
+    private static let shortDateTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd HH:mm"
+        return formatter
+    }()
 
     private func updateAgentChat(_ chat: AgentChatSpace) {
         guard let projectIndex = agentProjects.firstIndex(where: { project in
