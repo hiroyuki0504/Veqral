@@ -673,6 +673,33 @@ struct RemoteMemoryContentResponse: Codable, Sendable {
     var content: String
 }
 
+struct RemoteProjectMemoryRequest: Codable, Sendable {
+    var projectID: String
+    var projectName: String?
+}
+
+struct RemoteProjectMemorySession: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var model: String?
+    var title: String?
+    var startedAt: Date?
+    var endedAt: Date?
+    var messageCount: Int
+    var inputTokens: Int
+    var outputTokens: Int
+    var estimatedCostUSD: Double?
+}
+
+struct RemoteProjectMemoryResponse: Codable, Equatable, Sendable {
+    var projectID: String
+    var projectName: String
+    var source: String
+    var memoryFile: RemoteMemoryFile
+    var memoryContent: String
+    var sessions: [RemoteProjectMemorySession]
+    var warnings: [String]
+}
+
 struct RemoteMemoryDiffResponse: Codable, Sendable {
     var id: String
     var diff: String
@@ -801,6 +828,9 @@ final class CommandCenterStore: ObservableObject {
     @Published var remoteMemoryDiff: String = ""
     @Published var remoteMemoryMessage: String = ""
     @Published var isLoadingRemoteMemory = false
+    @Published var remoteProjectMemory: RemoteProjectMemoryResponse?
+    @Published var remoteProjectMemoryMessage: String = ""
+    @Published var isLoadingRemoteProjectMemory = false
     @Published var remoteHostMessage: String = ""
     @Published var remoteHostHealth: RemoteHealthResponse?
     @Published var remoteStreamStatus: RemoteStreamStatus = .idle
@@ -1597,6 +1627,33 @@ final class CommandCenterStore: ObservableObject {
                 isLoadingRemoteMemory = false
                 remoteMemoryMessage = "Memory load failed: \(error.localizedDescription)"
             }
+        }
+    }
+
+    func refreshRemoteProjectMemory() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            remoteProjectMemoryMessage = "Mac Host とペアリングするとプロジェクト記憶を読み込めます。"
+            return
+        }
+        ensureProjectWithoutChatCreation()
+        guard let project = selectedAgentProject else {
+            remoteProjectMemoryMessage = "Hermes Project がまだありません。"
+            return
+        }
+        isLoadingRemoteProjectMemory = true
+        remoteProjectMemoryMessage = "プロジェクト記憶を読み込み中..."
+        let configuration = remoteHost
+        let request = RemoteProjectMemoryRequest(projectID: project.id, projectName: project.name)
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).projectMemory(request)
+                remoteProjectMemory = response
+                let memoryState = response.memoryContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "記憶ファイルは空です" : "記憶ファイルを読み込みました"
+                remoteProjectMemoryMessage = "\(memoryState)。\(response.sessions.count) 件の Hermes セッション。"
+            } catch {
+                remoteProjectMemoryMessage = "プロジェクト記憶の読み込みに失敗しました: \(error.localizedDescription)"
+            }
+            isLoadingRemoteProjectMemory = false
         }
     }
 
@@ -3811,6 +3868,12 @@ struct RemoteHostClient: Sendable {
         let body = try JSONEncoder.commandCenter.encode(["id": id])
         let data = try await request(path: "/v1/memory/read", method: "POST", body: body)
         return try JSONDecoder.commandCenter.decode(RemoteMemoryContentResponse.self, from: data)
+    }
+
+    func projectMemory(_ requestBody: RemoteProjectMemoryRequest) async throws -> RemoteProjectMemoryResponse {
+        let body = try JSONEncoder.commandCenter.encode(requestBody)
+        let data = try await request(path: "/v1/memory/project", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteProjectMemoryResponse.self, from: data)
     }
 
     func diffMemory(id: String, content: String) async throws -> RemoteMemoryDiffResponse {

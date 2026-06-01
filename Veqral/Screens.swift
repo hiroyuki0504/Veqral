@@ -2124,6 +2124,10 @@ struct MemoryView: View {
 
     var body: some View {
         ScreenScaffold(title: "Memory", systemImage: "brain.head.profile") {
+            VQPanel("Hermes プロジェクト記憶", systemImage: "sparkles.rectangle.stack") {
+                ProjectMemoryReadOnlyView()
+            }
+
             VQPanel("Hermes Memory Files", systemImage: "externaldrive.connected.to.line.below") {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 8) {
@@ -2189,6 +2193,11 @@ struct MemoryView: View {
         .onAppear {
             if store.remoteHost.isEnabled, store.remoteHost.isPaired, store.remoteMemoryFiles.isEmpty {
                 store.refreshRemoteMemory()
+            }
+            if store.remoteHost.isEnabled,
+               store.remoteHost.isPaired,
+               store.remoteProjectMemory?.projectID != store.selectedAgentProject?.id {
+                store.refreshRemoteProjectMemory()
             }
         }
     }
@@ -2345,6 +2354,164 @@ private struct RemoteConnectionField: View {
                         .stroke(VQTheme.hairline, lineWidth: 1)
                 }
         }
+    }
+}
+
+private struct ProjectMemoryReadOnlyView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
+    private var displayedSnapshot: RemoteProjectMemoryResponse? {
+        guard let snapshot = store.remoteProjectMemory else { return nil }
+        guard snapshot.projectID == store.selectedAgentProject?.id else { return nil }
+        return snapshot
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                StatusPill(
+                    title: store.remoteHost.isEnabled && store.remoteHost.isPaired ? "Mac Host 接続済み" : "Mac Host 未接続",
+                    tint: store.remoteHost.isEnabled && store.remoteHost.isPaired ? VQTheme.green : VQTheme.amber
+                )
+                StatusPill(title: "読み取り専用", tint: VQTheme.secondaryText)
+                if let snapshot = displayedSnapshot {
+                    StatusPill(title: "\(snapshot.sessions.count) セッション", tint: snapshot.sessions.isEmpty ? VQTheme.secondaryText : VQTheme.accent)
+                }
+                Spacer()
+                Button {
+                    store.refreshRemoteProjectMemory()
+                } label: {
+                    Label(store.isLoadingRemoteProjectMemory ? "読み込み中" : "更新", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .disabled(store.isLoadingRemoteProjectMemory || !(store.remoteHost.isEnabled && store.remoteHost.isPaired))
+            }
+            .font(.footnote.weight(.semibold))
+
+            if !(store.remoteHost.isEnabled && store.remoteHost.isPaired) {
+                Text("Mac Host とペアリングすると、選択中の Hermes Project が使う native memory とセッションを確認できます。")
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let snapshot = displayedSnapshot {
+                snapshotView(snapshot)
+            } else {
+                Text(store.isLoadingRemoteProjectMemory ? "プロジェクト記憶を読み込み中..." : "更新すると、選択中の Hermes Project の記憶を表示します。")
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !store.remoteProjectMemoryMessage.isEmpty {
+                Text(store.remoteProjectMemoryMessage)
+                    .font(.caption)
+                    .foregroundStyle(store.remoteProjectMemoryMessage.contains("失敗") ? VQTheme.amber : VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func snapshotView(_ snapshot: RemoteProjectMemoryResponse) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(snapshot.projectName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                    .lineLimit(1)
+                Text("Hermes source: \(snapshot.source)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(snapshot.memoryFile.relativePath)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(1)
+            }
+
+            if snapshot.memoryContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text("表示できるプロジェクト記憶はまだありません。Chat で覚えた事実が Hermes native memory に保存されるとここに出ます。")
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ScrollView {
+                    Text(snapshot.memoryContent)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(VQTheme.ink)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .frame(minHeight: 160, maxHeight: 280)
+                .background(VQTheme.control.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(VQTheme.hairline, lineWidth: 1)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Hermes セッション")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.secondaryText)
+                if snapshot.sessions.isEmpty {
+                    Text("このプロジェクトのセッションはまだありません。")
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                } else {
+                    ForEach(snapshot.sessions.prefix(8)) { session in
+                        ProjectMemorySessionRow(session: session)
+                    }
+                }
+            }
+
+            ForEach(snapshot.warnings, id: \.self) { warning in
+                Text(warning)
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.amber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+private struct ProjectMemorySessionRow: View {
+    let session: RemoteProjectMemorySession
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(session.endedAt == nil ? VQTheme.green : VQTheme.secondaryText)
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.title?.vqNilIfBlank ?? session.id)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Text("\(session.messageCount)")
+                .font(.caption.monospaced().weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .background(VQTheme.control.opacity(0.38))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private var detail: String {
+        let date = session.startedAt?.formatted(date: .abbreviated, time: .shortened) ?? "日時不明"
+        let model = session.model?.vqNilIfBlank ?? "モデル未記録"
+        let usage = "入力 \(session.inputTokens) / 出力 \(session.outputTokens)"
+        return "\(date) ・ \(model) ・ \(usage)"
     }
 }
 

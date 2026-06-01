@@ -18,6 +18,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-discord-notifications" {
             DiscordNotificationSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-project-memory" {
+            ProjectMemorySmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -506,6 +509,25 @@ struct SmokeError: LocalizedError {
 
     var errorDescription: String? {
         message
+    }
+}
+
+enum ProjectMemorySmoke {
+    static func runAndExit() -> Never {
+        do {
+            let snapshot = try HermesMemoryStore().projectMemory(projectID: "smoke-project", projectName: "Smoke Project")
+            guard snapshot.source == "veqral-smoke-project" else {
+                throw SmokeError("Hermes source の解決が想定と違います。")
+            }
+            guard snapshot.memoryFile.isEditable == false else {
+                throw SmokeError("Project memory は読み取り専用である必要があります。")
+            }
+            print("PASS: Project memory smoke source=\(snapshot.source) sessions=\(snapshot.sessions.count) bytes=\(snapshot.memoryFile.bytes) warnings=\(snapshot.warnings.count)")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Project memory smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
     }
 }
 
@@ -1142,6 +1164,12 @@ final class HostServer: @unchecked Sendable {
             if request.path == "/v1/memory/read", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(MemoryFileRequest.self, from: request.body)
                 sendJSON(try memoryStore.read(id: body.id), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/memory/project", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(ProjectMemoryRequest.self, from: request.body)
+                sendJSON(try memoryStore.projectMemory(projectID: body.projectID, projectName: body.projectName), connection: connection)
                 return
             }
 
@@ -3793,6 +3821,33 @@ struct MemoryFileContentResponse: Codable {
     var content: String
 }
 
+struct ProjectMemoryRequest: Codable {
+    var projectID: String
+    var projectName: String?
+}
+
+struct ProjectMemorySessionRecord: Codable, Identifiable {
+    var id: String
+    var model: String?
+    var title: String?
+    var startedAt: Date?
+    var endedAt: Date?
+    var messageCount: Int
+    var inputTokens: Int
+    var outputTokens: Int
+    var estimatedCostUSD: Double?
+}
+
+struct ProjectMemorySnapshotResponse: Codable {
+    var projectID: String
+    var projectName: String
+    var source: String
+    var memoryFile: MemoryFileRecord
+    var memoryContent: String
+    var sessions: [ProjectMemorySessionRecord]
+    var warnings: [String]
+}
+
 struct MemoryDiffResponse: Codable {
     var id: String
     var diff: String
@@ -3878,6 +3933,8 @@ struct HermesMemoryStore {
         .appendingPathComponent(".hermes/memories", isDirectory: true)
     private let skillsFolder = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".hermes/skills", isDirectory: true)
+    private let stateDBURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".hermes/state.db")
     private let maxReadableBytes = 1_048_576
 
     func list() throws -> MemoryListResponse {
@@ -3897,6 +3954,43 @@ struct HermesMemoryStore {
         let url = try url(for: id)
         let content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         return MemoryFileContentResponse(file: file, content: content)
+    }
+
+    func projectMemory(projectID: String, projectName: String?) throws -> ProjectMemorySnapshotResponse {
+        let cleanProjectID = projectID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanProjectID.isEmpty else {
+            throw HostError.badRequest("Project ID is required.")
+        }
+        let source = "veqral-\(Self.safeTag(cleanProjectID))"
+        let displayName = projectName?.nilIfBlank ?? cleanProjectID
+        var warnings: [String] = []
+        let file = record(
+            id: "project-memory:\(source)",
+            kind: "project-memory",
+            title: "MEMORY.md",
+            url: memoryURL,
+            relativePath: "~/.hermes/memories/MEMORY.md",
+            isEditable: false
+        )
+        let memoryContent: String
+        if file.bytes > maxReadableBytes {
+            memoryContent = ""
+            warnings.append("MEMORY.md が大きすぎるため、画面表示を省略しました。")
+        } else {
+            let rawContent = (try? String(contentsOf: memoryURL, encoding: .utf8)) ?? ""
+            memoryContent = Redactor.redact(rawContent)
+        }
+        let sessionResult = projectSessions(source: source)
+        warnings.append(contentsOf: sessionResult.warnings)
+        return ProjectMemorySnapshotResponse(
+            projectID: cleanProjectID,
+            projectName: displayName,
+            source: source,
+            memoryFile: file,
+            memoryContent: memoryContent,
+            sessions: sessionResult.sessions,
+            warnings: warnings
+        )
     }
 
     func diff(id: String, proposedContent: String) throws -> MemoryDiffResponse {
@@ -4021,6 +4115,78 @@ struct HermesMemoryStore {
         let path = url.standardizedFileURL.path
         guard path.hasPrefix(base + "/") else { return nil }
         return String(path.dropFirst(base.count + 1))
+    }
+
+    private struct SQLiteProjectSessionRow: Decodable {
+        var id: String
+        var model: String?
+        var title: String?
+        var startedAt: Double?
+        var endedAt: Double?
+        var messageCount: Int?
+        var inputTokens: Int?
+        var outputTokens: Int?
+        var estimatedCostUSD: Double?
+    }
+
+    private func projectSessions(source: String) -> (sessions: [ProjectMemorySessionRecord], warnings: [String]) {
+        guard FileManager.default.fileExists(atPath: stateDBURL.path) else {
+            return ([], ["Hermes state.db が見つかりません。"])
+        }
+        let query = """
+        SELECT
+          id,
+          model,
+          title,
+          started_at AS startedAt,
+          ended_at AS endedAt,
+          message_count AS messageCount,
+          input_tokens AS inputTokens,
+          output_tokens AS outputTokens,
+          estimated_cost_usd AS estimatedCostUSD
+        FROM sessions
+        WHERE source = \(Self.sqliteLiteral(source))
+        ORDER BY started_at DESC
+        LIMIT 50;
+        """
+        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", "-json", stateDBURL.path, query], timeout: 10)
+        guard output.exitCode == 0 else {
+            return ([], ["Hermes session 一覧を読めませんでした: \(Redactor.redact(output.combinedTrimmed))"])
+        }
+        let json = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !json.isEmpty else {
+            return ([], [])
+        }
+        guard let data = json.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([SQLiteProjectSessionRow].self, from: data) else {
+            return ([], ["Hermes session 一覧の形式を読めませんでした。"])
+        }
+        let sessions = rows.map { row in
+            ProjectMemorySessionRecord(
+                id: row.id,
+                model: row.model?.nilIfBlank,
+                title: row.title?.nilIfBlank,
+                startedAt: row.startedAt.map(Date.init(timeIntervalSince1970:)),
+                endedAt: row.endedAt.map(Date.init(timeIntervalSince1970:)),
+                messageCount: row.messageCount ?? 0,
+                inputTokens: row.inputTokens ?? 0,
+                outputTokens: row.outputTokens ?? 0,
+                estimatedCostUSD: row.estimatedCostUSD
+            )
+        }
+        return (sessions, [])
+    }
+
+    private static func sqliteLiteral(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "''"))'"
+    }
+
+    private static func safeTag(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let scalars = value.lowercased().unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        return String(scalars).trimmingCharacters(in: CharacterSet(charactersIn: "-")).nilIfBlank ?? "project"
     }
 
     private func unifiedDiff(original: String, proposed: String, label: String) throws -> String {
