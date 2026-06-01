@@ -2,6 +2,7 @@ import SwiftUI
 
 enum AppSection: String, CaseIterable, Identifiable {
     case home
+    case portfolio
     case projects
     case devices
     case runs
@@ -17,6 +18,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .home: L10n.tr("Command")
+        case .portfolio: L10n.tr("Portfolio")
         case .projects: L10n.tr("Projects")
         case .devices: L10n.tr("Devices")
         case .runs: L10n.tr("Runs")
@@ -32,6 +34,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .home: "command"
+        case .portfolio: "rectangle.3.group"
         case .projects: "folder"
         case .devices: "macbook.and.iphone"
         case .runs: "play.rectangle.on.rectangle"
@@ -44,8 +47,8 @@ enum AppSection: String, CaseIterable, Identifiable {
         }
     }
 
-    static let primaryTabs: [AppSection] = [.home, .approvals, .projects, .devices]
-    static let commandGroup: [AppSection] = [.home]
+    static let primaryTabs: [AppSection] = [.home, .portfolio, .approvals, .devices]
+    static let commandGroup: [AppSection] = [.home, .portfolio]
     static let operationGroup: [AppSection] = [.projects, .runs, .diff, .artifacts, .history]
     static let systemGroup: [AppSection] = [.devices, .approvals, .memory, .github]
 }

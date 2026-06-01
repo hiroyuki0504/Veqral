@@ -53,6 +53,11 @@ struct HostConfig: Codable, Sendable {
     var apnsKeyPath: String?
     var apnsBundleID: String?
     var apnsEnvironment: String?
+    var portfolioRegistryRepo: String = "git@github.com:hiroyuki0504/veqral-portfolio.git"
+    var portfolioRegistryPath: String?
+    var portfolioEngagementRoots: [String] = []
+    var portfolioCodeRoots: [String] = []
+    var portfolioDiscordWebhook: String?
 
     static var folder: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -85,6 +90,33 @@ struct HostConfig: Codable, Sendable {
         )
     }
 
+    var resolvedPortfolioRegistryRepo: String {
+        ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_REGISTRY_REPO"]?.nilIfBlank
+            ?? portfolioRegistryRepo
+    }
+
+    var resolvedPortfolioRegistryPath: String {
+        ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_REGISTRY_PATH"]?.nilIfBlank
+            ?? portfolioRegistryPath?.nilIfBlank
+            ?? HostConfig.folder.appendingPathComponent("portfolio-registry", isDirectory: true).path
+    }
+
+    var resolvedPortfolioEngagementRoots: [String] {
+        Self.listValue(ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS"])
+            ?? portfolioEngagementRoots
+    }
+
+    var resolvedPortfolioCodeRoots: [String] {
+        Self.listValue(ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_CODE_ROOTS"])
+            ?? portfolioCodeRoots
+    }
+
+    var resolvedPortfolioDiscordWebhook: String? {
+        ProcessInfo.processInfo.environment["VEQRAL_DISCORD_WEBHOOK"]?.nilIfBlank
+            ?? KeychainStore.get(account: "portfolio:discord-webhook")?.nilIfBlank
+            ?? portfolioDiscordWebhook?.nilIfBlank
+    }
+
     private static func booleanValue(_ value: String?) -> Bool {
         switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "1", "true", "yes", "on", "enabled":
@@ -92,6 +124,14 @@ struct HostConfig: Codable, Sendable {
         default:
             false
         }
+    }
+
+    private static func listValue(_ value: String?) -> [String]? {
+        guard let value = value?.nilIfBlank else { return nil }
+        return value
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).expandingTilde }
+            .filter { !$0.isEmpty }
     }
 }
 
@@ -133,6 +173,7 @@ enum AgentEngine: String, Codable, Sendable, CaseIterable {
     case hermes
     case codex
     case claude
+    case shell
 
     var title: String {
         switch self {
@@ -142,6 +183,8 @@ enum AgentEngine: String, Codable, Sendable, CaseIterable {
             "Codex"
         case .claude:
             "Claude"
+        case .shell:
+            "Shell"
         }
     }
 }
@@ -352,14 +395,18 @@ actor HostState {
         chatID: String? = nil,
         provider: String? = nil,
         model: String? = nil,
-        attachments: [RunAttachmentUpload] = []
+        attachments: [RunAttachmentUpload] = [],
+        forceApprovalReason: String? = nil,
+        forceApprovalSeverity: ApprovalSeverity = .high
     ) throws -> HostRun {
         let directory = (workingDirectory.isEmpty ? config.defaultWorkingDirectory : workingDirectory).expandingTilde
         guard FileManager.default.fileExists(atPath: directory) else {
             throw HostError.badRequest("Working directory does not exist")
         }
         let risk = RiskClassifier.classify(prompt)
-        let approvalReason: String? = if !budgetAllows(project: directory) {
+        let approvalReason: String? = if let forceApprovalReason = forceApprovalReason?.nilIfBlank {
+            forceApprovalReason
+        } else if !budgetAllows(project: directory) {
             "Budget guard exceeded"
         } else if risk.requiresApproval {
             risk.reason
@@ -368,6 +415,8 @@ actor HostState {
         }
         let approvalSeverity: ApprovalSeverity? = if approvalReason == nil {
             nil
+        } else if forceApprovalReason?.nilIfBlank != nil {
+            forceApprovalSeverity
         } else if approvalReason == "Budget guard exceeded" {
             .high
         } else {
@@ -642,6 +691,8 @@ final class HostServer: @unchecked Sendable {
     private let runner: AgentRunner
     private let memoryStore = HermesMemoryStore()
     private let historyStore = AgentHistoryStore()
+    private let portfolioStore: PortfolioRegistryStore
+    private let portfolioMonitor: PortfolioMonitor
     private let connectionLock = NSLock()
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
 
@@ -650,6 +701,8 @@ final class HostServer: @unchecked Sendable {
         self.state = state
         self.listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: config.port)!)
         self.runner = AgentRunner(state: state)
+        self.portfolioStore = PortfolioRegistryStore(config: config)
+        self.portfolioMonitor = PortfolioMonitor(store: portfolioStore, config: config)
     }
 
     func start() throws {
@@ -657,6 +710,7 @@ final class HostServer: @unchecked Sendable {
             self?.handle(connection)
         }
         listener.start(queue: .global(qos: .userInitiated))
+        portfolioMonitor.start()
         Task {
             let recoverable = await state.recoverableRunIDs()
             for runID in recoverable {
@@ -849,6 +903,71 @@ final class HostServer: @unchecked Sendable {
                 )
                 await state.recordAudit("github draft-pr url=\(response.url)")
                 sendJSON(response, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/portfolio/assets", request.method == "GET" {
+                sendJSON(PortfolioAssetListResponse(assets: try portfolioStore.list()), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/portfolio/assets", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(PortfolioAssetRequest.self, from: request.body)
+                let asset = try portfolioStore.upsert(body.asset, message: "Create \(body.asset.name)")
+                await state.recordAudit("portfolio created asset id=\(asset.id)")
+                sendJSON(asset, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/portfolio/discover", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(PortfolioDiscoverRequest.self, from: request.body)
+                let assets = try portfolioStore.discover(request: body)
+                await state.recordAudit("portfolio discover assets=\(assets.count)")
+                sendJSON(PortfolioAssetListResponse(assets: assets), connection: connection)
+                return
+            }
+
+            if request.path.hasPrefix("/v1/portfolio/assets/") {
+                let parts = request.path.split(separator: "/").map(String.init)
+                guard parts.count >= 4 else { throw HostError.notFound("Invalid portfolio path") }
+                let assetID = parts[3]
+                if request.method == "PATCH", parts.count == 4 {
+                    let body = try JSONDecoder.dates.decode(PortfolioAssetRequest.self, from: request.body)
+                    let asset = try portfolioStore.upsert(body.asset, message: "Update \(body.asset.name)")
+                    await state.recordAudit("portfolio updated asset id=\(asset.id)")
+                    sendJSON(asset, connection: connection)
+                    return
+                }
+                if request.method == "DELETE", parts.count == 4 {
+                    try portfolioStore.delete(id: assetID)
+                    await state.recordAudit("portfolio deleted asset id=\(assetID)")
+                    sendJSON(SimpleResponse(ok: true), connection: connection)
+                    return
+                }
+                guard parts.count >= 5 else { throw HostError.notFound("Invalid portfolio action") }
+                let action = parts[4]
+                switch (request.method, action) {
+                case ("GET", "status"):
+                    sendJSON(try portfolioStore.status(id: assetID), connection: connection)
+                case ("GET", "logs"):
+                    sendJSON(PortfolioLogsResponse(assetID: assetID, lines: try portfolioStore.logs(id: assetID)), connection: connection)
+                case ("GET", "log-summary"):
+                    let summary = try portfolioStore.logSummary(id: assetID)
+                    sendJSON(PortfolioLogSummaryResponse(assetID: assetID, summary: summary, generatedAt: Date()), connection: connection)
+                case ("GET", "commits"):
+                    sendJSON(PortfolioCommitsResponse(assetID: assetID, commits: try portfolioStore.recentCommits(id: assetID)), connection: connection)
+                case ("POST", "control"):
+                    let body = try JSONDecoder.dates.decode(PortfolioControlRequest.self, from: request.body)
+                    let response = try await portfolioStore.controlRun(assetID: assetID, action: body.action, state: state)
+                    await state.recordAudit("portfolio queued control asset=\(assetID) action=\(body.action) run=\(response.runID)")
+                    sendJSON(response, connection: connection)
+                case ("POST", "promote"):
+                    let response = try await portfolioStore.promoteRun(assetID: assetID, state: state)
+                    await state.recordAudit("portfolio queued promote asset=\(assetID) run=\(response.runID)")
+                    sendJSON(response, connection: connection)
+                default:
+                    throw HostError.notFound("Unknown portfolio action")
+                }
                 return
             }
 
@@ -1130,6 +1249,8 @@ enum CLIAdapterRegistry {
             codexArguments(for: run)
         case .claude:
             claudeArguments(for: run)
+        case .shell:
+            ["-lc", run.prompt]
         }
     }
 
@@ -1251,6 +1372,8 @@ enum CLIAdapterRegistry {
                     "/usr/local/bin/claude"
                 ]
             )
+        case .shell:
+            "/bin/zsh"
         }
     }
 
@@ -1288,6 +1411,8 @@ enum CLIAdapterRegistry {
             expected = SemanticVersion(major: 0, minor: 130, patch: 0)
         case .claude:
             expected = SemanticVersion(major: 2, minor: 1, patch: 144)
+        case .shell:
+            return (true, "Shell commands run through /bin/zsh with Veqral approval gates.")
         }
         if parsed.major == expected.major, parsed.minor == expected.minor {
             var note = "Known command shape: \(adapterName(for: engine))."
@@ -1310,6 +1435,8 @@ enum CLIAdapterRegistry {
             "CodexExecAdapter"
         case .claude:
             "ClaudePrintAdapter"
+        case .shell:
+            "ShellPTYAdapter"
         }
     }
 
@@ -1321,6 +1448,8 @@ enum CLIAdapterRegistry {
             "codex exec [--model <model>] [resume <session>] <prompt>"
         case .claude:
             "claude --print --output-format stream-json [--resume <session>] [--model <model>] <prompt>"
+        case .shell:
+            "zsh -lc <approved command>"
         }
     }
 
@@ -2389,6 +2518,635 @@ enum AttachmentStore {
     }
 }
 
+enum PortfolioAssetKind: String, Codable, Sendable, CaseIterable {
+    case app
+    case engagement
+    case content
+}
+
+enum PortfolioAssetStatus: String, Codable, Sendable, CaseIterable {
+    case running
+    case stopped
+    case unknown
+    case notApplicable = "n/a"
+}
+
+enum PortfolioBackupState: String, Codable, Sendable {
+    case git
+    case localOnly = "local-only"
+}
+
+struct PortfolioLocalPath: Codable, Sendable, Equatable {
+    var machineId: String
+    var path: String
+}
+
+struct PortfolioSourceRefs: Codable, Sendable, Equatable {
+    var github: String?
+    var driveUrl: String?
+    var localPaths: [PortfolioLocalPath]
+
+    static let empty = PortfolioSourceRefs(github: nil, driveUrl: nil, localPaths: [])
+}
+
+struct PortfolioHealthSpec: Codable, Sendable, Equatable {
+    var type: String
+    var target: String
+}
+
+struct PortfolioLogSource: Codable, Sendable, Equatable {
+    var path: String?
+    var cmd: String?
+}
+
+struct PortfolioControls: Codable, Sendable, Equatable {
+    var start: String?
+    var stop: String?
+    var restart: String?
+    var deploy: String?
+
+    func command(for action: String) -> String? {
+        switch action {
+        case "start": start?.nilIfBlank
+        case "stop": stop?.nilIfBlank
+        case "restart": restart?.nilIfBlank
+        case "deploy": deploy?.nilIfBlank
+        default: nil
+        }
+    }
+}
+
+struct PortfolioDeliverable: Codable, Sendable, Equatable, Identifiable {
+    var id: String { "\(name):\(ref)" }
+    var name: String
+    var ref: String
+}
+
+struct PortfolioAsset: Codable, Sendable, Identifiable, Equatable {
+    var id: String
+    var kind: PortfolioAssetKind
+    var name: String
+    var summary: String
+    var status: PortfolioAssetStatus
+    var sourceRefs: PortfolioSourceRefs
+    var tags: [String]
+    var runtimeHost: String?
+    var healthSpec: PortfolioHealthSpec?
+    var logSource: PortfolioLogSource?
+    var controls: PortfolioControls?
+    var linkedProjectId: String?
+    var backupState: PortfolioBackupState
+    var client: String?
+    var phase: String?
+    var deliverables: [PortfolioDeliverable]
+    var timeline: String?
+    var relatedAssetIds: [String]
+    var createdAt: Date
+    var updatedAt: Date
+}
+
+struct PortfolioAssetListResponse: Codable {
+    var assets: [PortfolioAsset]
+}
+
+struct PortfolioAssetRequest: Codable {
+    var asset: PortfolioAsset
+}
+
+struct PortfolioDiscoverRequest: Codable {
+    var engagementRoots: [String]?
+    var codeRoots: [String]?
+}
+
+struct PortfolioAssetStatusResponse: Codable {
+    var assetID: String
+    var status: PortfolioAssetStatus
+    var health: String
+    var pid: Int32?
+    var cpuPercent: Double?
+    var memoryMB: Double?
+    var checkedAt: Date
+}
+
+struct PortfolioLogsResponse: Codable {
+    var assetID: String
+    var lines: [String]
+}
+
+struct PortfolioLogSummaryResponse: Codable {
+    var assetID: String
+    var summary: String
+    var generatedAt: Date
+}
+
+struct PortfolioRecentCommit: Codable {
+    var sha: String
+    var message: String
+    var author: String
+    var date: Date
+}
+
+struct PortfolioCommitsResponse: Codable {
+    var assetID: String
+    var commits: [PortfolioRecentCommit]
+}
+
+struct PortfolioControlRequest: Codable {
+    var action: String
+}
+
+struct PortfolioControlResponse: Codable {
+    var runID: String
+    var approvalRequired: Bool
+    var status: String
+}
+
+struct PortfolioPromoteResponse: Codable {
+    var runID: String
+    var approvalRequired: Bool
+}
+
+final class PortfolioRegistryStore {
+    private let config: HostConfig
+    private let fileManager = FileManager.default
+
+    init(config: HostConfig) {
+        self.config = config
+    }
+
+    private var rootURL: URL {
+        URL(fileURLWithPath: config.resolvedPortfolioRegistryPath.expandingTilde, isDirectory: true)
+    }
+
+    private var assetsURL: URL {
+        rootURL.appendingPathComponent("assets", isDirectory: true)
+    }
+
+    func list() throws -> [PortfolioAsset] {
+        try ensureRegistry()
+        let files = (try? fileManager.contentsOfDirectory(
+            at: assetsURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        return files
+            .filter { $0.pathExtension == "yaml" || $0.pathExtension == "yml" }
+            .compactMap { try? readAsset(url: $0) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    func upsert(_ asset: PortfolioAsset, message: String? = nil) throws -> PortfolioAsset {
+        try ensureRegistry()
+        var saved = asset
+        let now = Date()
+        if saved.createdAt.timeIntervalSince1970 == 0 {
+            saved.createdAt = now
+        }
+        saved.updatedAt = now
+        let url = assetsURL.appendingPathComponent("\(safeID(saved.id)).yaml")
+        try yamlData(for: saved).write(to: url, options: .atomic)
+        try commitAndPush(message: message ?? "Update \(saved.name)")
+        return saved
+    }
+
+    func delete(id: String) throws {
+        try ensureRegistry()
+        let url = assetsURL.appendingPathComponent("\(safeID(id)).yaml")
+        if fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
+            try commitAndPush(message: "Delete \(id)")
+        }
+    }
+
+    func discover(request: PortfolioDiscoverRequest) throws -> [PortfolioAsset] {
+        let existing = try list()
+        var mergedByKey: [String: PortfolioAsset] = Dictionary(uniqueKeysWithValues: existing.map { (dedupKey($0), $0) })
+        var changedAssetIDs: Set<String> = []
+        for asset in discoverGitHubAssets() + discoverLocalCodeAssets(roots: request.codeRoots) + discoverEngagementAssets(roots: request.engagementRoots) {
+            let key = dedupKey(asset)
+            if var current = mergedByKey[key] {
+                let before = current
+                current = merge(current, with: asset)
+                mergedByKey[key] = current
+                if current != before {
+                    changedAssetIDs.insert(current.id)
+                }
+            } else {
+                mergedByKey[key] = asset
+                changedAssetIDs.insert(asset.id)
+            }
+        }
+        let assets = Array(mergedByKey.values).sorted { $0.updatedAt > $1.updatedAt }
+        for asset in assets where changedAssetIDs.contains(asset.id) {
+            _ = try upsert(asset, message: "Discover \(asset.name)")
+        }
+        return assets
+    }
+
+    func asset(id: String) throws -> PortfolioAsset {
+        guard let asset = try list().first(where: { $0.id == id }) else {
+            throw HostError.notFound("Asset not found")
+        }
+        return asset
+    }
+
+    func status(id: String) throws -> PortfolioAssetStatusResponse {
+        let asset = try asset(id: id)
+        let checkedAt = Date()
+        if asset.kind == .content {
+            return PortfolioAssetStatusResponse(assetID: id, status: .notApplicable, health: "n/a", pid: nil, cpuPercent: nil, memoryMB: nil, checkedAt: checkedAt)
+        }
+        if let health = asset.healthSpec {
+            return statusFromHealth(assetID: id, health: health, checkedAt: checkedAt)
+        }
+        if let pid = processID(for: asset.name) {
+            let usage = processUsage(pid: pid)
+            return PortfolioAssetStatusResponse(assetID: id, status: .running, health: "process", pid: pid, cpuPercent: usage.cpu, memoryMB: usage.memoryMB, checkedAt: checkedAt)
+        }
+        return PortfolioAssetStatusResponse(assetID: id, status: asset.status == .running ? .unknown : asset.status, health: "not configured", pid: nil, cpuPercent: nil, memoryMB: nil, checkedAt: checkedAt)
+    }
+
+    func logs(id: String, limit: Int = 160) throws -> [String] {
+        let asset = try asset(id: id)
+        if let path = asset.logSource?.path?.nilIfBlank {
+            let result = ProcessRunner.run("/usr/bin/tail", ["-n", "\(limit)", path.expandingTilde], timeout: 8)
+            return result.combinedTrimmed.split(whereSeparator: \.isNewline).map { Redactor.redact(String($0)) }
+        }
+        if let cmd = asset.logSource?.cmd?.nilIfBlank {
+            let result = ProcessRunner.run("/bin/zsh", ["-lc", cmd], timeout: 12)
+            return result.combinedTrimmed.split(whereSeparator: \.isNewline).suffix(limit).map { Redactor.redact(String($0)) }
+        }
+        return ["ログソース未設定: \(asset.name)"]
+    }
+
+    func logSummary(id: String) throws -> String {
+        let text = try logs(id: id, limit: 220).joined(separator: "\n")
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "ログはまだありません。"
+        }
+        let prompt = "次のログを日本語で短く要約し、異常があれば先頭に書いてください。\n\n\(String(text.suffix(5000)))"
+        if let ollama = commandPath("ollama") {
+            let result = ProcessRunner.run(ollama, ["run", "llama3.2", prompt], timeout: 25)
+            if result.exitCode == 0, let summary = result.stdout.nilIfBlank {
+                return Redactor.redact(summary)
+            }
+        }
+        if text.localizedCaseInsensitiveContains("error") || text.localizedCaseInsensitiveContains("failed"),
+           let claude = commandPath("claude") {
+            let result = ProcessRunner.run(claude, ["--print", prompt], timeout: 35)
+            if result.exitCode == 0, let summary = result.stdout.nilIfBlank {
+                return Redactor.redact(summary)
+            }
+        }
+        return fallbackSummary(text)
+    }
+
+    func recentCommits(id: String) throws -> [PortfolioRecentCommit] {
+        let asset = try asset(id: id)
+        guard let slug = asset.sourceRefs.github?.nilIfBlank,
+              commandPath("gh") != nil else { return [] }
+        let auth = ProcessRunner.run("/bin/zsh", ["-lc", "gh auth status -h github.com >/dev/null 2>&1"], timeout: 10)
+        guard auth.exitCode == 0 else { return [] }
+        let output = ProcessRunner.run("/bin/zsh", ["-lc", "gh api \(shellQuoted("repos/\(slug)/commits")) --method GET -f per_page=5"], timeout: 25)
+        guard output.exitCode == 0, let data = output.stdout.data(using: .utf8) else { return [] }
+        struct GitHubCommit: Decodable {
+            struct CommitPayload: Decodable {
+                struct AuthorPayload: Decodable {
+                    var name: String?
+                    var date: String?
+                }
+                var message: String
+                var author: AuthorPayload?
+            }
+            struct UserPayload: Decodable {
+                var login: String?
+            }
+            var sha: String
+            var commit: CommitPayload
+            var author: UserPayload?
+        }
+        let formatter = ISO8601DateFormatter()
+        let commits = (try? JSONDecoder().decode([GitHubCommit].self, from: data)) ?? []
+        return commits.map { commit in
+            PortfolioRecentCommit(
+                sha: commit.sha,
+                message: Redactor.redact(commit.commit.message),
+                author: Redactor.redact(commit.author?.login ?? commit.commit.author?.name ?? "unknown"),
+                date: commit.commit.author?.date.flatMap { formatter.date(from: $0) } ?? Date(timeIntervalSince1970: 0)
+            )
+        }
+    }
+
+    func controlRun(assetID: String, action: String, state: HostState) async throws -> PortfolioControlResponse {
+        let asset = try asset(id: assetID)
+        guard let command = asset.controls?.command(for: action)?.nilIfBlank else {
+            throw HostError.badRequest("Control command is not configured")
+        }
+        let workingDirectory = asset.sourceRefs.localPaths.first?.path ?? config.defaultWorkingDirectory
+        let run = try await state.createRun(
+            prompt: command,
+            workingDirectory: workingDirectory,
+            engine: .shell,
+            forceApprovalReason: "Portfolio \(action) requires approval: \(asset.name)",
+            forceApprovalSeverity: .high
+        )
+        return PortfolioControlResponse(runID: run.id, approvalRequired: true, status: run.status.rawValue)
+    }
+
+    func promoteRun(assetID: String, state: HostState) async throws -> PortfolioPromoteResponse {
+        let asset = try asset(id: assetID)
+        guard let localPath = asset.sourceRefs.localPaths.first?.path.nilIfBlank else {
+            throw HostError.badRequest("Local path is not configured")
+        }
+        let repoName = safeID(asset.name)
+        let command = [
+            "cd \(shellQuoted(localPath.expandingTilde))",
+            "git init",
+            "gh repo create \(shellQuoted(repoName)) --private --source . --remote origin --push"
+        ].joined(separator: " && ")
+        let run = try await state.createRun(
+            prompt: command,
+            workingDirectory: localPath,
+            engine: .shell,
+            forceApprovalReason: "Portfolio private repo promotion requires approval: \(asset.name)",
+            forceApprovalSeverity: .high
+        )
+        return PortfolioPromoteResponse(runID: run.id, approvalRequired: true)
+    }
+
+    private func ensureRegistry() throws {
+        try fileManager.createDirectory(at: assetsURL, withIntermediateDirectories: true)
+        if !fileManager.fileExists(atPath: rootURL.appendingPathComponent(".git").path) {
+            _ = ProcessRunner.run("/usr/bin/git", ["init"], workingDirectory: rootURL.path, timeout: 20)
+        }
+        let remotes = ProcessRunner.run("/usr/bin/git", ["remote"], workingDirectory: rootURL.path, timeout: 10).stdout
+        if !config.resolvedPortfolioRegistryRepo.isEmpty, !remotes.split(whereSeparator: \.isNewline).contains("origin") {
+            _ = ProcessRunner.run("/usr/bin/git", ["remote", "add", "origin", config.resolvedPortfolioRegistryRepo], workingDirectory: rootURL.path, timeout: 10)
+        }
+    }
+
+    private func commitAndPush(message: String) throws {
+        _ = ProcessRunner.run("/usr/bin/git", ["add", "assets"], workingDirectory: rootURL.path, timeout: 20)
+        let commit = ProcessRunner.run("/usr/bin/git", ["commit", "-m", message], workingDirectory: rootURL.path, timeout: 30)
+        if commit.exitCode != 0, !commit.combinedTrimmed.localizedCaseInsensitiveContains("nothing to commit") {
+            throw HostError.badRequest(Redactor.redact(commit.combinedTrimmed))
+        }
+        guard !config.resolvedPortfolioRegistryRepo.isEmpty else { return }
+        _ = ProcessRunner.run("/usr/bin/git", ["push", "-u", "origin", "HEAD"], workingDirectory: rootURL.path, timeout: 45)
+    }
+
+    private func readAsset(url: URL) throws -> PortfolioAsset {
+        let text = try String(contentsOf: url, encoding: .utf8)
+        guard let range = text.range(of: "json: |") else {
+            throw HostError.badRequest("Unsupported asset format")
+        }
+        let jsonBlock = text[range.upperBound...]
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in
+                let text = String(line)
+                return text.hasPrefix("  ") ? String(text.dropFirst(2)) : text
+            }
+            .joined(separator: "\n")
+        return try JSONDecoder.dates.decode(PortfolioAsset.self, from: Data(jsonBlock.utf8))
+    }
+
+    private func yamlData(for asset: PortfolioAsset) throws -> Data {
+        let json = String(data: try JSONEncoder.pretty.encode(asset), encoding: .utf8) ?? "{}"
+        let indented = json.split(separator: "\n", omittingEmptySubsequences: false).map { "  \($0)" }.joined(separator: "\n")
+        return Data("# Veqral portfolio asset\njson: |\n\(indented)\n".utf8)
+    }
+
+    private func discoverGitHubAssets() -> [PortfolioAsset] {
+        guard commandPath("gh") != nil else { return [] }
+        let auth = ProcessRunner.run("/bin/zsh", ["-lc", "gh auth status -h github.com >/dev/null 2>&1"], timeout: 10)
+        guard auth.exitCode == 0 else { return [] }
+        let output = ProcessRunner.run("/bin/zsh", ["-lc", "gh repo list hiroyuki0504 --json nameWithOwner,description,url --limit 100"], timeout: 30)
+        guard output.exitCode == 0, let data = output.stdout.data(using: .utf8) else { return [] }
+        struct Repo: Decodable { var nameWithOwner: String; var description: String?; var url: String? }
+        let repos = (try? JSONDecoder().decode([Repo].self, from: data)) ?? []
+        return repos.map { repo in
+            makeAsset(
+                kind: .app,
+                name: repo.nameWithOwner.split(separator: "/").last.map(String.init) ?? repo.nameWithOwner,
+                summary: repo.description ?? "",
+                github: repo.nameWithOwner,
+                localPath: nil,
+                tags: ["GitHub"],
+                backupState: .git
+            )
+        }
+    }
+
+    private func discoverLocalCodeAssets(roots: [String]?) -> [PortfolioAsset] {
+        let roots = (roots?.isEmpty == false ? roots! : config.resolvedPortfolioCodeRoots).map(\.expandingTilde)
+        return roots.flatMap { root in
+            scanDirectories(root: root, maxDepth: 3, limit: 160).compactMap { url in
+                guard isCodeDirectory(url) else { return nil }
+                let github = gitHubSlug(path: url.path)
+                return makeAsset(
+                    kind: .app,
+                    name: url.lastPathComponent,
+                    summary: "",
+                    github: github,
+                    localPath: url.path,
+                    tags: codeTags(path: url.path),
+                    backupState: github == nil ? .localOnly : .git
+                )
+            }
+        }
+    }
+
+    private func discoverEngagementAssets(roots: [String]?) -> [PortfolioAsset] {
+        let roots = (roots?.isEmpty == false ? roots! : config.resolvedPortfolioEngagementRoots).map(\.expandingTilde)
+        return roots.flatMap { root in
+            ((try? fileManager.contentsOfDirectory(at: URL(fileURLWithPath: root), includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []).compactMap { url in
+                guard (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { return nil }
+                var asset = makeAsset(kind: .engagement, name: url.lastPathComponent, summary: "", github: nil, localPath: url.path, tags: ["案件"], backupState: .localOnly)
+                asset.client = url.lastPathComponent
+                asset.phase = "未設定"
+                return asset
+            }
+        }
+    }
+
+    private func makeAsset(kind: PortfolioAssetKind, name: String, summary: String, github: String?, localPath: String?, tags: [String], backupState: PortfolioBackupState) -> PortfolioAsset {
+        let now = Date()
+        let id = safeID(github ?? localPath ?? name)
+        return PortfolioAsset(
+            id: id,
+            kind: kind,
+            name: name,
+            summary: summary,
+            status: kind == .content ? .notApplicable : .unknown,
+            sourceRefs: PortfolioSourceRefs(
+                github: github,
+                driveUrl: nil,
+                localPaths: localPath.map { [PortfolioLocalPath(machineId: localHostName(), path: $0)] } ?? []
+            ),
+            tags: tags,
+            runtimeHost: localHostName(),
+            healthSpec: nil,
+            logSource: nil,
+            controls: PortfolioControls(start: nil, stop: nil, restart: nil, deploy: nil),
+            linkedProjectId: nil,
+            backupState: backupState,
+            client: nil,
+            phase: nil,
+            deliverables: [],
+            timeline: nil,
+            relatedAssetIds: [],
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    private func merge(_ current: PortfolioAsset, with draft: PortfolioAsset) -> PortfolioAsset {
+        var merged = current
+        merged.summary = current.summary.nilIfBlank ?? draft.summary
+        merged.sourceRefs.github = current.sourceRefs.github ?? draft.sourceRefs.github
+        let paths = current.sourceRefs.localPaths + draft.sourceRefs.localPaths.filter { !current.sourceRefs.localPaths.contains($0) }
+        merged.sourceRefs.localPaths = paths
+        merged.tags = Array(Set(current.tags + draft.tags)).sorted()
+        merged.backupState = merged.sourceRefs.github == nil ? .localOnly : .git
+        if merged != current {
+            merged.updatedAt = Date()
+        }
+        return merged
+    }
+
+    private func dedupKey(_ asset: PortfolioAsset) -> String {
+        asset.sourceRefs.github?.lowercased() ?? asset.sourceRefs.localPaths.first?.path.lowercased() ?? asset.id
+    }
+
+    private func statusFromHealth(assetID: String, health: PortfolioHealthSpec, checkedAt: Date) -> PortfolioAssetStatusResponse {
+        switch health.type {
+        case "http":
+            let result = ProcessRunner.run("/usr/bin/curl", ["-fsS", "--max-time", "5", health.target], timeout: 8)
+            let status: PortfolioAssetStatus = result.exitCode == 0 ? .running : .stopped
+            return PortfolioAssetStatusResponse(assetID: assetID, status: status, health: result.exitCode == 0 ? "http ok" : "http failed", pid: nil, cpuPercent: nil, memoryMB: nil, checkedAt: checkedAt)
+        case "cmd":
+            let result = ProcessRunner.run("/bin/zsh", ["-lc", health.target], timeout: 12)
+            let status: PortfolioAssetStatus = result.exitCode == 0 ? .running : .stopped
+            return PortfolioAssetStatusResponse(assetID: assetID, status: status, health: Redactor.redact(result.combinedTrimmed.nilIfBlank ?? "cmd exit \(result.exitCode)"), pid: nil, cpuPercent: nil, memoryMB: nil, checkedAt: checkedAt)
+        default:
+            return PortfolioAssetStatusResponse(assetID: assetID, status: .unknown, health: "unknown health type", pid: nil, cpuPercent: nil, memoryMB: nil, checkedAt: checkedAt)
+        }
+    }
+
+    private func processID(for name: String) -> Int32? {
+        let output = ProcessRunner.run("/usr/bin/pgrep", ["-f", name], timeout: 5)
+        return output.stdout.split(whereSeparator: \.isNewline).first.flatMap { Int32(String($0).trimmingCharacters(in: .whitespaces)) }
+    }
+
+    private func processUsage(pid: Int32) -> (cpu: Double?, memoryMB: Double?) {
+        let output = ProcessRunner.run("/bin/ps", ["-o", "%cpu=", "-o", "rss=", "-p", "\(pid)"], timeout: 5)
+        let parts = output.stdout.split(whereSeparator: \.isWhitespace)
+        let cpu = parts.first.flatMap { Double(String($0)) }
+        let memory = parts.dropFirst().first.flatMap { Double(String($0)).map { $0 / 1024.0 } }
+        return (cpu, memory)
+    }
+
+    private func scanDirectories(root: String, maxDepth: Int, limit: Int) -> [URL] {
+        let rootURL = URL(fileURLWithPath: root)
+        var results: [URL] = []
+        let skip = Set(["node_modules", ".git", "DerivedData", "Library", ".build", "Pods", "vendor"])
+        func walk(_ url: URL, depth: Int) {
+            guard depth <= maxDepth, results.count < limit else { return }
+            guard let children = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return }
+            for child in children where results.count < limit {
+                guard (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+                guard !skip.contains(child.lastPathComponent) else { continue }
+                results.append(child)
+                walk(child, depth: depth + 1)
+            }
+        }
+        walk(rootURL, depth: 0)
+        return results
+    }
+
+    private func isCodeDirectory(_ url: URL) -> Bool {
+        [".git", "package.json", "requirements.txt", "pyproject.toml", "Cargo.toml", "go.mod", "Package.swift", "Gemfile"].contains {
+            fileManager.fileExists(atPath: url.appendingPathComponent($0).path)
+        }
+    }
+
+    private func codeTags(path: String) -> [String] {
+        let url = URL(fileURLWithPath: path)
+        var tags: [String] = []
+        if fileManager.fileExists(atPath: url.appendingPathComponent("package.json").path) { tags.append("Node") }
+        if fileManager.fileExists(atPath: url.appendingPathComponent("Package.swift").path) { tags.append("Swift") }
+        if fileManager.fileExists(atPath: url.appendingPathComponent("pyproject.toml").path) { tags.append("Python") }
+        if fileManager.fileExists(atPath: url.appendingPathComponent("Cargo.toml").path) { tags.append("Rust") }
+        if fileManager.fileExists(atPath: url.appendingPathComponent("go.mod").path) { tags.append("Go") }
+        return tags.isEmpty ? ["App"] : tags
+    }
+
+    private func gitHubSlug(path: String) -> String? {
+        let output = ProcessRunner.run("/usr/bin/git", ["-C", path, "remote", "get-url", "origin"], timeout: 8)
+        guard output.exitCode == 0 else { return nil }
+        return GitHubInspector.githubSlug(from: output.stdout)
+    }
+
+    private func fallbackSummary(_ text: String) -> String {
+        let lines = text.split(whereSeparator: \.isNewline).suffix(8).map(String.init)
+        return Redactor.redact(lines.joined(separator: "\n")).nilIfBlank ?? "要約できるログがありません。"
+    }
+
+    private func commandPath(_ name: String) -> String? {
+        let output = ProcessRunner.run("/bin/zsh", ["-lc", "command -v \(shellQuoted(name))"], timeout: 5)
+        return output.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+    }
+
+    private func safeID(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let mapped = value.lowercased().unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        return String(mapped).trimmingCharacters(in: CharacterSet(charactersIn: "-")).nilIfBlank ?? UUID().uuidString.lowercased()
+    }
+}
+
+final class PortfolioMonitor: @unchecked Sendable {
+    private let store: PortfolioRegistryStore
+    private let config: HostConfig
+    private var lastStatuses: [String: PortfolioAssetStatus] = [:]
+
+    init(store: PortfolioRegistryStore, config: HostConfig) {
+        self.store = store
+        self.config = config
+    }
+
+    func start() {
+        Task.detached { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                await self.tick()
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+            }
+        }
+    }
+
+    private func tick() async {
+        guard config.resolvedPortfolioDiscordWebhook != nil else { return }
+        guard let assets = try? store.list() else { return }
+        for asset in assets {
+            guard let status = try? store.status(id: asset.id).status else { continue }
+            if lastStatuses[asset.id] == .running, status == .stopped {
+                await sendDiscord("\(asset.name) が停止しました。")
+            }
+            lastStatuses[asset.id] = status
+        }
+    }
+
+    private func sendDiscord(_ content: String) async {
+        guard let webhook = config.resolvedPortfolioDiscordWebhook,
+              let url = URL(string: webhook) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try? JSONEncoder().encode(["content": Redactor.redact(content)])
+        _ = try? await URLSession.shared.data(for: request)
+    }
+}
+
 enum GitHubInspector {
     static func status(workingDirectory: String) -> GitHubStatusResponse {
         let directory = workingDirectory.expandingTilde
@@ -2574,7 +3332,7 @@ enum GitHubInspector {
         return (url, state, "\(checks.count) passing")
     }
 
-    private static func githubSlug(from remote: String) -> String? {
+    static func githubSlug(from remote: String) -> String? {
         let trimmed = remote.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let path: String
@@ -3555,12 +4313,12 @@ struct ProcessOutput {
 }
 
 enum ProcessRunner {
-    static func run(_ executable: String, _ arguments: [String], timeout: TimeInterval = 30) -> ProcessOutput {
+    static func run(_ executable: String, _ arguments: [String], workingDirectory: String = "/", timeout: TimeInterval = 30) -> ProcessOutput {
         let process = Process()
         let stdout = Pipe()
         let stderr = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
-        process.currentDirectoryURL = URL(fileURLWithPath: "/")
+        process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory.expandingTilde)
         process.arguments = arguments
         process.standardOutput = stdout
         process.standardError = stderr

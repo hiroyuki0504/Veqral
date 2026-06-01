@@ -2,6 +2,534 @@ import SwiftUI
 import UIKit
 import AVFoundation
 
+struct PortfolioView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    @State private var kindFilter: PortfolioAssetKind?
+    @State private var statusFilter: PortfolioAssetStatus?
+    @State private var isShowingAddAsset = false
+    @State private var draftAsset = PortfolioAsset.empty()
+    @State private var editorTitle = "Add Asset"
+
+    private var filteredAssets: [PortfolioAsset] {
+        store.portfolioAssets.filter { asset in
+            (kindFilter == nil || asset.kind == kindFilter) &&
+            (statusFilter == nil || asset.status == statusFilter)
+        }
+    }
+
+    var body: some View {
+        ScreenScaffold(title: "Portfolio", systemImage: "rectangle.3.group") {
+            portfolioHeader
+            filters
+            assetGrid
+            selectedAssetDetail
+        }
+        .onAppear {
+            if store.portfolioAssets.isEmpty {
+                store.refreshPortfolio()
+            }
+        }
+        .sheet(isPresented: $isShowingAddAsset) {
+            PortfolioAssetEditor(asset: $draftAsset, title: editorTitle) {
+                store.savePortfolioAsset(draftAsset)
+                isShowingAddAsset = false
+                draftAsset = PortfolioAsset.empty()
+                editorTitle = "Add Asset"
+            }
+            .presentationDetents([.large])
+        }
+    }
+
+    private var portfolioHeader: some View {
+        VQPanel("Portfolio Overview", systemImage: "rectangle.3.group", actionImage: "arrow.clockwise") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    StatusPill(title: "\(store.portfolioAssets.count) \(L10n.tr("assets"))", tint: VQTheme.accent)
+                    StatusPill(title: "\(store.portfolioAssets.filter { $0.status == .running }.count) \(L10n.tr("running"))", tint: VQTheme.green)
+                    StatusPill(title: "\(store.portfolioAssets.filter { $0.status == .stopped }.count) \(L10n.tr("stopped"))", tint: VQTheme.amber)
+                    Spacer()
+                }
+                HStack(spacing: 8) {
+                    Button(action: store.refreshPortfolio) {
+                        Label(L10n.tr("Refresh"), systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                    Button(action: store.discoverPortfolio) {
+                        Label(L10n.tr("Discover"), systemImage: "magnifyingglass")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                    Button {
+                        draftAsset = PortfolioAsset.empty()
+                        editorTitle = "Add Asset"
+                        isShowingAddAsset = true
+                    } label: {
+                        Label(L10n.tr("Add"), systemImage: "plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                    Spacer()
+                }
+                if !store.portfolioMessage.isEmpty {
+                    Text(store.portfolioMessage)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var filters: some View {
+        VQPanel("Filters", systemImage: "line.3.horizontal.decrease.circle") {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker(L10n.tr("Kind"), selection: $kindFilter) {
+                    Text(L10n.tr("All")).tag(nil as PortfolioAssetKind?)
+                    ForEach(PortfolioAssetKind.allCases) { kind in
+                        Text(kind.title).tag(kind as PortfolioAssetKind?)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Picker(L10n.tr("Status"), selection: $statusFilter) {
+                    Text(L10n.tr("All")).tag(nil as PortfolioAssetStatus?)
+                    ForEach(PortfolioAssetStatus.allCases) { status in
+                        Text(status.title).tag(status as PortfolioAssetStatus?)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+    }
+
+    private var assetGrid: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], alignment: .leading, spacing: 12) {
+            if filteredAssets.isEmpty {
+                VQPanel("Assets", systemImage: "tray") {
+                    Text(store.remoteHost.isPaired ? L10n.tr("No assets registered yet.") : L10n.tr("Mac Host pairing is required."))
+                        .font(.subheadline)
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+            }
+            ForEach(filteredAssets) { asset in
+                Button {
+                    store.selectPortfolioAsset(asset)
+                } label: {
+                    PortfolioAssetCard(asset: asset, isSelected: store.selectedPortfolioAsset?.id == asset.id)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var selectedAssetDetail: some View {
+        if let asset = store.selectedPortfolioAsset {
+            VQPanel(asset.name.isEmpty ? L10n.tr("Asset Detail") : asset.name, systemImage: asset.kind.symbol) {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        StatusPill(title: asset.kind.title, tint: VQTheme.steel)
+                        StatusPill(title: (store.selectedPortfolioStatus?.status ?? asset.status).title, tint: tint(for: store.selectedPortfolioStatus?.status ?? asset.status))
+                        StatusPill(title: asset.backupState == .git ? "Git" : L10n.tr("Local only"), tint: asset.backupState == .git ? VQTheme.green : VQTheme.steel)
+                        Spacer()
+                        Button {
+                            draftAsset = asset
+                            editorTitle = "Edit Asset"
+                            isShowingAddAsset = true
+                        } label: {
+                            Image(systemName: "pencil")
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                        Button(action: store.refreshSelectedPortfolioDetail) {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                    }
+
+                    if !asset.summary.isEmpty {
+                        Text(asset.summary)
+                            .font(.subheadline)
+                            .foregroundStyle(VQTheme.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    VStack(spacing: 7) {
+                        KeyValueLine(key: "Health", value: store.selectedPortfolioStatus?.health ?? L10n.tr("Not checked"))
+                        KeyValueLine(key: "Machine", value: asset.runtimeHost ?? L10n.tr("This Mac"))
+                        KeyValueLine(key: "Repository", value: asset.sourceRefs.github ?? L10n.tr("Not set"))
+                        if let driveURL = asset.sourceRefs.driveUrl?.vqNilIfBlank {
+                            KeyValueLine(key: "Drive", value: driveURL)
+                        }
+                        if let cpu = store.selectedPortfolioStatus?.cpuPercent {
+                            KeyValueLine(key: "CPU", value: String(format: "%.1f%%", cpu))
+                        }
+                        if let memory = store.selectedPortfolioStatus?.memoryMB {
+                            KeyValueLine(key: "Memory", value: String(format: "%.1f MB", memory))
+                        }
+                    }
+
+                    if asset.kind == .engagement {
+                        PortfolioEngagementPanel(asset: asset, assets: store.portfolioAssets)
+                    }
+
+                    PortfolioRecentCommitsPanel(commits: store.portfolioCommits)
+
+                    PortfolioControlPanel(asset: asset)
+
+                    VQPanel("Live Logs", systemImage: "terminal") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Button(action: store.summarizePortfolioLogs) {
+                                    Label(L10n.tr("Summarize"), systemImage: "sparkles")
+                                }
+                                .buttonStyle(.bordered)
+                                .buttonBorderShape(.roundedRectangle(radius: 8))
+                                Spacer()
+                            }
+                            if !store.portfolioLogSummary.isEmpty {
+                                Text(store.portfolioLogSummary)
+                                    .font(.caption)
+                                    .foregroundStyle(VQTheme.ink)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            VStack(alignment: .leading, spacing: 5) {
+                                ForEach(Array(store.portfolioLogLines.suffix(12).enumerated()), id: \.offset) { _, line in
+                                    Text(line)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(VQTheme.secondaryText)
+                                        .lineLimit(3)
+                                }
+                                if store.portfolioLogLines.isEmpty {
+                                    Text(L10n.tr("No logs loaded yet."))
+                                        .font(.caption)
+                                        .foregroundStyle(VQTheme.secondaryText)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+
+                    HStack {
+                        Button(action: store.linkSelectedPortfolioAssetToProject) {
+                            Label(asset.linkedProjectId == nil ? L10n.tr("Create Project Link") : L10n.tr("Open Project"), systemImage: "sparkles.rectangle.stack")
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                        if asset.backupState == .localOnly {
+                            Button(action: store.promotePortfolioAsset) {
+                                Label(L10n.tr("Private Repo"), systemImage: "arrow.up.right.square")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                        }
+                        Spacer()
+                    }
+                }
+            }
+        }
+    }
+
+    private func tint(for status: PortfolioAssetStatus) -> Color {
+        switch status {
+        case .running: VQTheme.green
+        case .stopped: VQTheme.amber
+        case .unknown, .notApplicable: VQTheme.unavailable
+        }
+    }
+}
+
+private struct PortfolioAssetCard: View {
+    let asset: PortfolioAsset
+    let isSelected: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: asset.kind.symbol)
+                    .frame(width: 30, height: 30)
+                    .foregroundStyle(isSelected ? VQTheme.accent : VQTheme.secondaryText)
+                    .background(VQTheme.control.opacity(0.48))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                Spacer()
+                StatusPill(title: asset.status.title, tint: tint(for: asset.status))
+            }
+            Text(asset.name.isEmpty ? L10n.tr("Untitled") : asset.name)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+                .lineLimit(2)
+            Text(asset.summary.isEmpty ? asset.kind.title : asset.summary)
+                .font(.caption)
+                .foregroundStyle(VQTheme.secondaryText)
+                .lineLimit(2)
+            FlowLayout(items: Array(asset.tags.prefix(4)) + [asset.runtimeHost ?? L10n.tr("This Mac")])
+        }
+        .padding(12)
+        .background(isSelected ? VQTheme.accent.opacity(0.09) : VQTheme.elevated)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(isSelected ? VQTheme.accent.opacity(0.45) : VQTheme.hairline, lineWidth: 1)
+        }
+    }
+
+    private func tint(for status: PortfolioAssetStatus) -> Color {
+        switch status {
+        case .running: VQTheme.green
+        case .stopped: VQTheme.amber
+        case .unknown, .notApplicable: VQTheme.unavailable
+        }
+    }
+}
+
+private struct PortfolioControlPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let asset: PortfolioAsset
+
+    var body: some View {
+        VQPanel("Controls", systemImage: "switch.2") {
+            HStack(spacing: 8) {
+                controlButton("start", title: "Start", symbol: "play")
+                controlButton("stop", title: "Stop", symbol: "stop")
+                controlButton("restart", title: "Restart", symbol: "arrow.clockwise")
+                controlButton("deploy", title: "Deploy", symbol: "paperplane")
+                Spacer()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func controlButton(_ action: String, title: String, symbol: String) -> some View {
+        let command = asset.controls?.command(for: action)
+        Button {
+            store.runPortfolioControl(action)
+        } label: {
+            Label(L10n.tr(title), systemImage: symbol)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.roundedRectangle(radius: 8))
+        .disabled(command == nil)
+    }
+}
+
+private struct PortfolioEngagementPanel: View {
+    let asset: PortfolioAsset
+    let assets: [PortfolioAsset]
+
+    var body: some View {
+        VQPanel("Engagement", systemImage: "person.text.rectangle") {
+            VStack(alignment: .leading, spacing: 8) {
+                KeyValueLine(key: "Client", value: asset.client ?? L10n.tr("Not set"))
+                KeyValueLine(key: "Phase", value: asset.phase ?? L10n.tr("Not set"))
+                if let timeline = asset.timeline?.vqNilIfBlank {
+                    KeyValueLine(key: "Timeline", value: timeline)
+                }
+                if !asset.deliverables.isEmpty {
+                    Text(L10n.tr("Deliverables"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.secondaryText)
+                    FlowLayout(items: asset.deliverables.map(\.name))
+                }
+                if !asset.relatedAssetIds.isEmpty {
+                    Text(L10n.tr("Related Apps"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.secondaryText)
+                    FlowLayout(items: asset.relatedAssetIds.map(relatedAssetName))
+                }
+            }
+        }
+    }
+
+    private func relatedAssetName(_ id: String) -> String {
+        assets.first(where: { $0.id == id })?.name.vqNilIfBlank ?? L10n.tr("Unknown")
+    }
+}
+
+private struct PortfolioRecentCommitsPanel: View {
+    let commits: [PortfolioRecentCommit]
+
+    var body: some View {
+        VQPanel("Recent Commits", systemImage: "clock.arrow.circlepath") {
+            VStack(alignment: .leading, spacing: 8) {
+                if commits.isEmpty {
+                    Text(L10n.tr("No recent commits"))
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                } else {
+                    ForEach(commits) { commit in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(commit.message.components(separatedBy: .newlines).first ?? commit.message)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(VQTheme.ink)
+                                .lineLimit(2)
+                            Text("\(commit.author) · \(commit.date.formatted(date: .abbreviated, time: .shortened)) · \(commit.shortSHA)")
+                                .font(.caption2)
+                                .foregroundStyle(VQTheme.secondaryText)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct PortfolioAssetEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var asset: PortfolioAsset
+    let title: String
+    let onSave: () -> Void
+    @State private var localPath = ""
+    @State private var tags = ""
+    @State private var driveURL = ""
+    @State private var deliverables = ""
+    @State private var relatedAssetIDs = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(L10n.tr("Basics")) {
+                    Picker(L10n.tr("Kind"), selection: $asset.kind) {
+                        ForEach(PortfolioAssetKind.allCases) { kind in
+                            Text(kind.title).tag(kind)
+                        }
+                    }
+                    TextField(L10n.tr("Name"), text: $asset.name)
+                    TextField(L10n.tr("Summary"), text: $asset.summary, axis: .vertical)
+                    TextField(L10n.tr("Tags"), text: $tags)
+                }
+
+                Section(L10n.tr("Source")) {
+                    TextField(L10n.tr("GitHub owner/repo"), text: Binding(
+                        get: { asset.sourceRefs.github ?? "" },
+                        set: { asset.sourceRefs.github = $0.vqNilIfBlank }
+                    ))
+                    TextField(L10n.tr("Drive URL"), text: $driveURL)
+                    TextField(L10n.tr("Local folder"), text: $localPath)
+                }
+
+                Section(L10n.tr("Health")) {
+                    TextField(L10n.tr("http / cmd"), text: Binding(
+                        get: { asset.healthSpec?.type ?? "" },
+                        set: { value in
+                            let target = asset.healthSpec?.target ?? ""
+                            asset.healthSpec = value.vqNilIfBlank.map { PortfolioHealthSpec(type: $0, target: target) }
+                        }
+                    ))
+                    TextField(L10n.tr("Target"), text: Binding(
+                        get: { asset.healthSpec?.target ?? "" },
+                        set: { value in
+                            let type = asset.healthSpec?.type ?? "http"
+                            asset.healthSpec = value.vqNilIfBlank.map { PortfolioHealthSpec(type: type, target: $0) }
+                        }
+                    ))
+                }
+
+                Section(L10n.tr("Controls")) {
+                    controlField("Start", keyPath: \.start)
+                    controlField("Stop", keyPath: \.stop)
+                    controlField("Restart", keyPath: \.restart)
+                    controlField("Deploy", keyPath: \.deploy)
+                }
+
+                if asset.kind == .engagement {
+                    Section(L10n.tr("Engagement")) {
+                        TextField(L10n.tr("Client"), text: Binding(get: { asset.client ?? "" }, set: { asset.client = $0.vqNilIfBlank }))
+                        TextField(L10n.tr("Phase"), text: Binding(get: { asset.phase ?? "" }, set: { asset.phase = $0.vqNilIfBlank }))
+                        TextField(L10n.tr("Timeline"), text: Binding(get: { asset.timeline ?? "" }, set: { asset.timeline = $0.vqNilIfBlank }))
+                        TextField(L10n.tr("Deliverables"), text: $deliverables)
+                        TextField(L10n.tr("Related Apps"), text: $relatedAssetIDs)
+                    }
+                }
+            }
+            .navigationTitle(L10n.tr(title))
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(L10n.tr("Cancel")) { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(L10n.tr("Save")) {
+                        applyFields()
+                        onSave()
+                    }
+                    .disabled(asset.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .onAppear {
+                localPath = asset.sourceRefs.localPaths.first?.path ?? ""
+                tags = asset.tags.joined(separator: ", ")
+                driveURL = asset.sourceRefs.driveUrl ?? ""
+                deliverables = asset.deliverables.map { "\($0.name)=\($0.ref)" }.joined(separator: ", ")
+                relatedAssetIDs = asset.relatedAssetIds.joined(separator: ", ")
+            }
+        }
+    }
+
+    private func controlField(_ title: String, keyPath: WritableKeyPath<PortfolioControls, String?>) -> some View {
+        TextField(L10n.tr(title), text: Binding(
+            get: { asset.controls?[keyPath: keyPath] ?? "" },
+            set: { value in
+                var controls = asset.controls ?? PortfolioControls(start: nil, stop: nil, restart: nil, deploy: nil)
+                controls[keyPath: keyPath] = value.vqNilIfBlank
+                asset.controls = controls
+            }
+        ))
+    }
+
+    private func applyFields() {
+        asset.tags = tags.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        asset.sourceRefs.driveUrl = driveURL.vqNilIfBlank
+        if let path = localPath.vqNilIfBlank {
+            asset.sourceRefs.localPaths = [PortfolioLocalPath(machineId: ProcessInfo.processInfo.hostName, path: path)]
+            if asset.sourceRefs.github == nil {
+                asset.backupState = .localOnly
+            }
+        }
+        asset.deliverables = deliverables.split(separator: ",").compactMap { item in
+            let parts = item.split(separator: "=", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard let name = parts.first?.vqNilIfBlank else { return nil }
+            let ref = parts.dropFirst().first?.vqNilIfBlank ?? name
+            return PortfolioDeliverable(name: name, ref: ref)
+        }
+        asset.relatedAssetIds = relatedAssetIDs.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        asset.status = asset.kind == .content ? .notApplicable : asset.status
+    }
+}
+
+private extension PortfolioAssetKind {
+    var symbol: String {
+        switch self {
+        case .app: "app.connected.to.app.below.fill"
+        case .engagement: "person.text.rectangle"
+        case .content: "doc.richtext"
+        }
+    }
+}
+
+private extension PortfolioControls {
+    func command(for action: String) -> String? {
+        switch action {
+        case "start": start?.vqNilIfBlank
+        case "stop": stop?.vqNilIfBlank
+        case "restart": restart?.vqNilIfBlank
+        case "deploy": deploy?.vqNilIfBlank
+        default: nil
+        }
+    }
+}
+
+private extension String {
+    var vqNilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 struct DevicesView: View {
     @EnvironmentObject private var store: CommandCenterStore
     @State private var remoteEndpoint = ""
