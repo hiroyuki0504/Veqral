@@ -13,14 +13,14 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 - [x] #6 Run コスト/トークン表示 — completed in PR #23 (`codex/backlog-6-run-usage`)
 - [x] #7 承認時に diff/コマンド表示 — completed in PR #24 (`codex/backlog-7-approval-context`)
 - [x] #8 定型コマンドの保存/再送 — completed in PR #25 (`codex/backlog-8-saved-commands`)
-- [ ] #9 Mac ホストテレメトリ
+- [x] #9 Mac ホストテレメトリ — completed in PR #26 (`codex/backlog-9-host-telemetry`)
 - [ ] #10 音声入力 P0
 - [x] #11 司令塔（ポートフォリオ層）フル実装 — completed in PR #18 (`codex/pr2-portfolio-command-center`)
 - [ ] #12 スタック→clean main 統合（ユーザー承認制）
 
 ## Current Item
 
-#9 Mac ホストテレメトリ
+#10 音声入力 P0
 
 ## Notes
 
@@ -32,5 +32,6 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 - #6 Run usage is documented in `RUN_USAGE_PR6.md`. Host parser smoke passed for Claude stream JSON, Codex usage JSON, and usage text. Run details now show input/output/reasoning/cache/total tokens and estimated/actual cost when the Host can derive them.
 - #7 Approval context is documented in `APPROVAL_CONTEXT_PR7.md`. High-risk approve now opens a review sheet with command text and linked diff/file context before approval is sent.
 - #8 Saved command drafts are documented in `SAVED_COMMANDS_PR8.md`. Command composer now saves reusable drafts, restores them by tap, and writes a best-effort iCloud Documents cache with local fallback.
+- #9 Host telemetry is documented in `HOST_TELEMETRY_PR9.md`. Mac Host now serves authenticated telemetry, health includes an initial snapshot, and Devices polls CPU/memory/disk/thermal/uptime/power/network/process data every 5 seconds while visible. Raw temperature/fan remain best-effort and show `—` when unavailable.
 - #1/#2/#11 are marked done because they already exist as stacked Draft PRs in this repository.
 - #12 must stop at "merge plan ready, waiting for explicit user approval"; no automatic main merge.
