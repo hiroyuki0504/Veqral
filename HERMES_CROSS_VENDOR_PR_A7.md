@@ -2,6 +2,8 @@
 
 This is the #A7 Claude-to-GPT rerun attempt. It is intentionally testing subscription/login auth, not an API-key fallback.
 
+Draft PR: #37
+
 - Source: `veqral-memtest-20260601-153016-940e3af3`
 - Hermes home: isolated temporary home (`hermes-home`)
 - Chat A: `anthropic/claude-haiku-4-5`

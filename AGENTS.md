@@ -71,7 +71,7 @@ Device(Mac)
 - #34 (`codex/a4-portfolio-real-data`): #A4。実ルート未設定時の isolated portfolio sample acceptance、`VEQRAL_HOST_HOME`、`includeGitHub`、Discord webhook disable を追加。実資産 roots/registry は未設定。
 - #35 (`codex/a5-auth-onboarding`): #A5。Host auth onboarding API、Devices の認証オンボーディング panel、Keychain readiness marker、`smoke-auth-onboarding` を追加。
 - #36 (`codex/a6-watch-approval`): #A6。Apple Watch 承認 scaffold。`VeqralWatch` target/scheme、Watch HMAC client、Keychain token、approve/reject UI、一言コマンド、complication 用 status view を追加。watchOS 26.5 platform 未インストールのため Watch build/実機/cellular/APNs は partial として `WATCH_APPROVAL_PR_A6.md` に明記。
-- #A7 (`codex/a7-cross-vendor-memory`): Claude→GPT の cross-vendor #0 を `anthropic/claude-haiku-4-5 -> openai-codex/gpt-5.5` で試行。Claude 側は subscription/login auth のみを許可し、API key fallback では通していない。Hermes-readable Claude/Anthropic login が未復旧のため preflight で停止し、`HERMES_CROSS_VENDOR_PR_A7.md` と `HERMES_MEMORY_INHERITANCE_PR0.md` に未到達理由を記録。
+- #37 (`codex/a7-cross-vendor-memory`): #A7。Claude→GPT の cross-vendor #0 を `anthropic/claude-haiku-4-5 -> openai-codex/gpt-5.5` で試行。Claude 側は subscription/login auth のみを許可し、API key fallback では通していない。Hermes-readable Claude/Anthropic login が未復旧のため preflight で停止し、`HERMES_CROSS_VENDOR_PR_A7.md` と `HERMES_MEMORY_INHERITANCE_PR0.md` に未到達理由を記録。
 
 ## 未完了・次の手番
 
