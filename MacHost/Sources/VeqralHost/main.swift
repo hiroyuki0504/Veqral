@@ -1858,15 +1858,72 @@ actor SwarmCoordinator {
     private func pump() {
         let available = max(0, effectiveMaxSlots() - activeTaskIDs.count)
         guard available > 0, !killSwitchActive else { return }
-        let queued = sortedTasks()
-            .filter { $0.status == .queued && !$0.cancelRequested }
-            .prefix(available)
-        for task in queued {
+        for task in runnableQueuedTasks(limit: available) {
             activeTaskIDs.insert(task.id)
             Task.detached(priority: .utility) { [weak self] in
                 await self?.execute(taskID: task.id)
             }
         }
+    }
+
+    private func runnableQueuedTasks(limit: Int) -> [SwarmTaskRecord] {
+        var selected: [SwarmTaskRecord] = []
+        var xcodeSlots = max(0, config.resolvedSwarmXcodeMaxSlots - activeXcodeTaskCount())
+        let active = activeTaskIDs.compactMap { tasks[$0] }
+        for task in sortedTasks().filter({ $0.status == .queued && !$0.cancelRequested }) {
+            let scheduledPeers = active + selected
+            if hasScopeConflict(task, against: scheduledPeers) {
+                continue
+            }
+            if isXcodeTask(task) {
+                guard xcodeSlots > 0 else { continue }
+                xcodeSlots -= 1
+            }
+            selected.append(task)
+            if selected.count >= limit { break }
+        }
+        return selected
+    }
+
+    private func activeXcodeTaskCount() -> Int {
+        activeTaskIDs
+            .compactMap { tasks[$0] }
+            .filter(isXcodeTask)
+            .count
+    }
+
+    private func hasScopeConflict(_ task: SwarmTaskRecord, against peers: [SwarmTaskRecord]) -> Bool {
+        let lhs = normalizedScopeHints(task)
+        guard !lhs.isEmpty else { return false }
+        return peers.contains { peer in
+            guard peer.repoPath == task.repoPath else { return false }
+            let rhs = normalizedScopeHints(peer)
+            guard !rhs.isEmpty else { return false }
+            return lhs.contains { left in
+                rhs.contains { right in
+                    left == right || left.hasPrefix("\(right)/") || right.hasPrefix("\(left)/")
+                }
+            }
+        }
+    }
+
+    private func normalizedScopeHints(_ task: SwarmTaskRecord) -> [String] {
+        task.scopeHints
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { value in
+                var normalized = value.replacingOccurrences(of: "\\", with: "/")
+                while normalized.hasPrefix("./") {
+                    normalized.removeFirst(2)
+                }
+                return normalized.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+            }
+            .filter { !$0.isEmpty }
+    }
+
+    private func isXcodeTask(_ task: SwarmTaskRecord) -> Bool {
+        let text = ([task.instruction] + task.verifyCommands).joined(separator: "\n").lowercased()
+        return text.contains("xcodebuild") || text.contains(".xcodeproj") || text.contains(".xcworkspace")
     }
 
     private func execute(taskID: String) async {
@@ -1967,12 +2024,22 @@ actor SwarmCoordinator {
     }
 
     private func effectiveMaxSlots() -> Int {
+        var slots = config.resolvedSwarmMaxSlots
         switch ProcessInfo.processInfo.thermalState {
         case .serious, .critical:
-            return 1
+            slots = 1
         default:
-            return config.resolvedSwarmMaxSlots
+            break
         }
+        if let load = Self.loadAverage1() {
+            let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
+            if load > Double(cores) * 1.20 {
+                slots = min(slots, 1)
+            } else if load > Double(cores) * 0.85 {
+                slots = min(slots, max(1, (slots + 1) / 2))
+            }
+        }
+        return max(1, slots)
     }
 
     private func sortedTasks() -> [SwarmTaskRecord] {
@@ -2092,6 +2159,18 @@ actor SwarmCoordinator {
         workingDirectory: String? = nil
     ) async -> ProcessOutput {
         append(taskID, log: "$ \(label)")
+        if executable == "/usr/bin/git" || label.hasPrefix("verify:") {
+            let output = ProcessRunner.run(
+                executable,
+                arguments,
+                workingDirectory: workingDirectory ?? "/",
+                timeout: timeout
+            )
+            if let text = output.combinedTrimmed.nilIfBlank {
+                append(taskID, log: String(text.prefix(1_200)))
+            }
+            return output
+        }
         let output = await SwarmProcessRunner.run(
             executable,
             arguments,
@@ -2175,6 +2254,28 @@ actor SwarmCoordinator {
         @unknown default: "unknown"
         }
     }
+
+    nonisolated private static func loadAverage1() -> Double? {
+        var loads = [Double](repeating: 0, count: 3)
+        return getloadavg(&loads, 3) == 3 ? loads[0] : nil
+    }
+}
+
+final class SwarmTerminationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var terminated = false
+
+    var isTerminated: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return terminated
+    }
+
+    func markTerminated() {
+        lock.lock()
+        terminated = true
+        lock.unlock()
+    }
 }
 
 enum SwarmProcessRunner {
@@ -2194,6 +2295,10 @@ enum SwarmProcessRunner {
         process.arguments = arguments
         process.standardOutput = stdout
         process.standardError = stderr
+        let termination = SwarmTerminationBox()
+        process.terminationHandler = { _ in
+            termination.markTerminated()
+        }
 
         do {
             try process.run()
@@ -2209,13 +2314,13 @@ enum SwarmProcessRunner {
         var stdoutData = Data()
         var stderrData = Data()
         let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning {
+        while !termination.isTerminated {
             readAvailable(from: stdoutFD, into: &stdoutData)
             readAvailable(from: stderrFD, into: &stderrData)
             if await shouldCancel() {
                 process.terminate()
                 try? await Task.sleep(nanoseconds: 200_000_000)
-                if process.isRunning {
+                if !termination.isTerminated {
                     kill(process.processIdentifier, SIGKILL)
                 }
                 break
@@ -2223,7 +2328,7 @@ enum SwarmProcessRunner {
             if Date() >= deadline {
                 process.terminate()
                 try? await Task.sleep(nanoseconds: 200_000_000)
-                if process.isRunning {
+                if !termination.isTerminated {
                     kill(process.processIdentifier, SIGKILL)
                 }
                 break
@@ -2292,6 +2397,7 @@ enum SwarmRunnerSmoke {
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
         setenv("VEQRAL_HOST_HOME", hostHome.path, 1)
         setenv("VEQRAL_SWARM_MAX_SLOTS", "2", 1)
+        setenv("VEQRAL_SWARM_XCODE_MAX_SLOTS", "1", 1)
 
         try require(ProcessRunner.run("/usr/bin/git", ["init", "-b", "main"], workingDirectory: repo.path, timeout: 20), "git init")
         try require(ProcessRunner.run("/usr/bin/git", ["config", "user.email", "veqral-smoke@example.invalid"], workingDirectory: repo.path, timeout: 20), "git config email")
@@ -2341,6 +2447,92 @@ enum SwarmRunnerSmoke {
             throw SmokeError("base repository was dirtied: \(repoStatus.stdout)")
         }
 
+        let conflictStartedAt = Date()
+        let firstConflict = try await coordinator.enqueue(
+            SwarmTaskRequest(
+                title: "Shared file first",
+                repoPath: repo.path,
+                baseBranch: "main",
+                instruction: "sleep 1; printf first > shared.txt",
+                scopeHints: ["shared.txt"],
+                agent: .shell,
+                branchName: nil,
+                verifyCommands: ["test -f shared.txt"],
+                createDraftPR: false,
+                cleanupWorktree: true
+            )
+        )
+        let secondConflict = try await coordinator.enqueue(
+            SwarmTaskRequest(
+                title: "Shared file second",
+                repoPath: repo.path,
+                baseBranch: "main",
+                instruction: "sleep 1; printf second > shared.txt",
+                scopeHints: ["shared.txt"],
+                agent: .shell,
+                branchName: nil,
+                verifyCommands: ["test -f shared.txt"],
+                createDraftPR: false,
+                cleanupWorktree: true
+            )
+        )
+        try await Task.sleep(nanoseconds: 350_000_000)
+        let conflictTasks = await coordinator.list().tasks.filter { [$0.id].contains(firstConflict.id) || [$0.id].contains(secondConflict.id) }
+        let conflictRunning = conflictTasks.filter { [.preparing, .running, .verifying, .committing, .creatingDraftPR].contains($0.status) }.count
+        let conflictQueued = conflictTasks.filter { $0.status == .queued }.count
+        guard conflictRunning == 1 && conflictQueued == 1 else {
+            let statuses = conflictTasks.map { "\($0.title)=\($0.status.rawValue)" }.joined(separator: ", ")
+            throw SmokeError("scope conflict did not serialize tasks: \(statuses)")
+        }
+        try await waitForTasks(coordinator, count: 4, terminal: [.complete], timeout: 30)
+        let conflictElapsed = Date().timeIntervalSince(conflictStartedAt)
+        guard conflictElapsed >= 1.8 else {
+            throw SmokeError("conflicting tasks finished too quickly: \(String(format: "%.2f", conflictElapsed))s")
+        }
+
+        let xcodeStartedAt = Date()
+        let firstXcode = try await coordinator.enqueue(
+            SwarmTaskRequest(
+                title: "Xcode slot first",
+                repoPath: repo.path,
+                baseBranch: "main",
+                instruction: "sleep 1; printf one > xcode-one.txt",
+                scopeHints: ["xcode-one.txt"],
+                agent: .shell,
+                branchName: nil,
+                verifyCommands: ["echo xcodebuild >/dev/null", "test -f xcode-one.txt"],
+                createDraftPR: false,
+                cleanupWorktree: true
+            )
+        )
+        let secondXcode = try await coordinator.enqueue(
+            SwarmTaskRequest(
+                title: "Xcode slot second",
+                repoPath: repo.path,
+                baseBranch: "main",
+                instruction: "sleep 1; printf two > xcode-two.txt",
+                scopeHints: ["xcode-two.txt"],
+                agent: .shell,
+                branchName: nil,
+                verifyCommands: ["echo xcodebuild >/dev/null", "test -f xcode-two.txt"],
+                createDraftPR: false,
+                cleanupWorktree: true
+            )
+        )
+        try await Task.sleep(nanoseconds: 350_000_000)
+        let xcodeTasks = await coordinator.list().tasks.filter { [$0.id].contains(firstXcode.id) || [$0.id].contains(secondXcode.id) }
+        let xcodeRunning = xcodeTasks.filter { [.preparing, .running, .verifying, .committing, .creatingDraftPR].contains($0.status) }.count
+        let xcodeQueued = xcodeTasks.filter { $0.status == .queued }.count
+        guard xcodeRunning == 1 && xcodeQueued == 1 else {
+            let statuses = xcodeTasks.map { "\($0.title)=\($0.status.rawValue)" }.joined(separator: ", ")
+            throw SmokeError("Xcode slot limit did not serialize tasks: \(statuses)")
+        }
+        try await waitForTasks(coordinator, count: 6, terminal: [.complete], timeout: 30)
+        let xcodeElapsed = Date().timeIntervalSince(xcodeStartedAt)
+        guard xcodeElapsed >= 1.8 else {
+            throw SmokeError("Xcode-limited tasks finished too quickly: \(String(format: "%.2f", xcodeElapsed))s")
+        }
+
         let longTask = try await coordinator.enqueue(
             SwarmTaskRequest(
                 title: "Kill switch",
@@ -2359,7 +2551,7 @@ enum SwarmRunnerSmoke {
         _ = await coordinator.killAll()
         try await waitForStatus(coordinator, taskID: longTask.id, statuses: [.cancelled], timeout: 10)
 
-        return "Swarm runner isolated 2 worktrees in \(String(format: "%.2f", elapsed))s, kept base clean, and kill switch cancelled active work."
+        return "Swarm runner isolated 2 worktrees in \(String(format: "%.2f", elapsed))s, serialized conflicting scopes in \(String(format: "%.2f", conflictElapsed))s, held Xcode slot to \(String(format: "%.2f", xcodeElapsed))s, kept base clean, and kill switch cancelled active work."
     }
 
     private static func waitForTasks(
