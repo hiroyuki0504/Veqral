@@ -20,7 +20,19 @@ This file is the resume point for the clean main baseline. The former stacked Dr
 
 ## Current Item
 
-Gate2: clean `main` 上で `DEVICE_ACCEPTANCE.md` に沿った iPhone/iPad 実機5項目の green 待ち
+#A1 Gate2 自動受け入れ: clean `main` 上で XCUITest による iPhone/iPad simulator + 実機 5 項目の green 待ち
+
+## Differentiation Backlog
+
+- [x] #A0 コード実査監査 — `AUDIT.md` を追加し、Discord 2xx 実判定、Host/Hermes test isolation、redact 追加、Portfolio DELETE fail-closed を修正。Draft PR: `codex/a0-code-audit`
+- [ ] #A1 Gate2 自動受け入れ — XCUITest で saved command / telemetry / memory visibility / Discord 2xx / voice transcript approval gate を sim→実機で検証
+- [ ] #A2 記憶の体験化
+- [ ] #A3 コストガバナンス
+- [ ] #A4 司令塔を実データで
+- [ ] #A5 認証オンボーディング・ウィザード
+- [ ] #A6 Apple Watch 承認アプリ
+- [ ] #A7 クロスベンダー #0 再実走
+- [ ] Final main 統合（ユーザー GO 後のみ）
 
 ## Notes
 

@@ -76,7 +76,10 @@ struct HostConfig: Codable, Sendable {
     var portfolioDiscordWebhook: String?
 
     static var folder: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        if let override = ProcessInfo.processInfo.environment["VEQRAL_HOST_HOME"]?.nilIfBlank {
+            return URL(fileURLWithPath: override.expandingTilde, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".veqral-host", isDirectory: true)
     }
 
@@ -86,12 +89,20 @@ struct HostConfig: Codable, Sendable {
 
     static func load() -> HostConfig {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var loaded: HostConfig?
         if let data = try? Data(contentsOf: configURL),
            let config = try? JSONDecoder().decode(HostConfig.self, from: data) {
-            return config
+            loaded = config
         }
-        let config = HostConfig()
-        if let data = try? JSONEncoder.pretty.encode(config) {
+        var config = loaded ?? HostConfig()
+        let env = ProcessInfo.processInfo.environment
+        if let port = env["VEQRAL_HOST_PORT"].flatMap(UInt16.init) {
+            config.port = port
+        }
+        if let workingDirectory = env["VEQRAL_HOST_WORKING_DIRECTORY"]?.nilIfBlank {
+            config.defaultWorkingDirectory = workingDirectory.expandingTilde
+        }
+        if loaded == nil, let data = try? JSONEncoder.pretty.encode(config) {
             try? data.write(to: configURL, options: .atomic)
         }
         return config
@@ -342,13 +353,20 @@ enum DiscordWebhookNotifier {
         await send(webhook: webhook, content: content)
     }
 
-    static func send(webhook: String, content: String) async {
-        guard let url = URL(string: webhook) else { return }
+    @discardableResult
+    static func send(webhook: String, content: String) async -> Bool {
+        guard let url = URL(string: webhook) else { return false }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try? JSONEncoder().encode(["content": clipped(Redactor.redact(content), limit: 1_800)])
-        _ = try? await URLSession.shared.data(for: request)
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+            return (200..<300).contains(http.statusCode)
+        } catch {
+            return false
+        }
     }
 
     private static func title(for event: PushEventType) -> String {
@@ -400,6 +418,9 @@ enum DiscordNotificationSmoke {
         let bearerSample = "Author" + "ization: bearer veqraltestsecret"
         let tokenSample = "tok" + "en=token-should-hide"
         let passwordSample = "pass" + "word=password-should-hide"
+        let discordWebhookSample = "https://discord.com/api/web" + "hooks/123456789/discord-webhook-should-hide"
+        let slackTokenSample = "xox" + "b-slack-token-should-hide"
+        let openRouterSample = "sk" + "-or-openrouter-key-should-hide"
 
         let run = HostRun(
             id: UUID().uuidString,
@@ -433,7 +454,10 @@ enum DiscordNotificationSmoke {
         failedRun.exitCode = 2
         await DiscordWebhookNotifier.sendRun(webhook: webhookURL.absoluteString, run: failedRun, event: .failed, message: "Run failed with exit code 2", severity: .low)
 
-        await DiscordWebhookNotifier.send(webhook: webhookURL.absoluteString, content: "司令塔: Smoke Asset が停止しました。 \(passwordSample)")
+        await DiscordWebhookNotifier.send(
+            webhook: webhookURL.absoluteString,
+            content: "司令塔: Smoke Asset が停止しました。 \(passwordSample) \(discordWebhookSample) \(slackTokenSample) \(openRouterSample)"
+        )
 
         let payloads = try receiver.waitForPayloads(count: 4, timeout: 5)
         let contents = try payloads.map(contentField(from:))
@@ -445,6 +469,9 @@ enum DiscordNotificationSmoke {
         try require(!joined.contains("veqraltestsecret"), "Authorization bearer が redaction されていません。")
         try require(!joined.contains("token-should-hide"), "token が redaction されていません。")
         try require(!joined.contains("password-should-hide"), "password が redaction されていません。")
+        try require(!joined.contains("discord-webhook-should-hide"), "Discord webhook が redaction されていません。")
+        try require(!joined.contains("slack-token-should-hide"), "Slack token が redaction されていません。")
+        try require(!joined.contains("openrouter-key-should-hide"), "OpenRouter key が redaction されていません。")
         print("PASS: Discord notification smoke received \(payloads.count) redacted payloads.")
     }
 
@@ -1776,7 +1803,9 @@ final class HostServer: @unchecked Sendable {
                 }
                 let host = localHostName()
                 let content = "Veqral Discord テスト通知: \(host) の Mac Host から送信しました。"
-                await DiscordWebhookNotifier.send(webhook: webhook, content: content)
+                guard await DiscordWebhookNotifier.send(webhook: webhook, content: content) else {
+                    throw HostError.badRequest("Discord webhook did not return a 2xx response.")
+                }
                 await state.recordAudit("discord test notification requested device=\(authenticatedDeviceID)")
                 sendJSON(NotificationTestResponse(ok: true, message: "Discord test notification sent."), connection: connection)
                 return
@@ -1925,10 +1954,8 @@ final class HostServer: @unchecked Sendable {
                     return
                 }
                 if request.method == "DELETE", parts.count == 4 {
-                    try portfolioStore.delete(id: assetID)
-                    await state.recordAudit("portfolio deleted asset id=\(assetID)")
-                    sendJSON(SimpleResponse(ok: true), connection: connection)
-                    return
+                    await state.recordAudit("portfolio delete blocked pending approval flow asset id=\(assetID)")
+                    throw HostError.approvalRequired("Portfolio asset deletion requires an approval-backed delete flow.")
                 }
                 guard parts.count >= 5 else { throw HostError.notFound("Invalid portfolio action") }
                 let action = parts[4]
@@ -4585,12 +4612,19 @@ struct HistorySessionDetailResponse: Codable {
 }
 
 struct HermesMemoryStore {
-    private let memoriesFolder = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hermes/memories", isDirectory: true)
-    private let skillsFolder = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hermes/skills", isDirectory: true)
-    private let stateDBURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hermes/state.db")
+    private static var hermesHome: URL {
+        if let override = ProcessInfo.processInfo.environment["HERMES_HOME"]?.nilIfBlank {
+            return URL(fileURLWithPath: override.expandingTilde, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hermes", isDirectory: true)
+    }
+
+    private let memoriesFolder = HermesMemoryStore.hermesHome
+        .appendingPathComponent("memories", isDirectory: true)
+    private let skillsFolder = HermesMemoryStore.hermesHome
+        .appendingPathComponent("skills", isDirectory: true)
+    private let stateDBURL = HermesMemoryStore.hermesHome
+        .appendingPathComponent("state.db")
     private let maxReadableBytes = 1_048_576
 
     func list() throws -> MemoryListResponse {
@@ -6251,6 +6285,9 @@ enum Redactor {
         let patterns = [
             (#"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]+"#, "$1[REDACTED]"),
             (#"(?i)(token|api[_-]?key|secret|password)\s*[:=]\s*['"]?[^'"\s]+"#, "$1=[REDACTED]"),
+            (#"https://discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9._\-]+"#, "[REDACTED_DISCORD_WEBHOOK]"),
+            (#"(?i)xox[baprs]-[A-Za-z0-9-]+"#, "[REDACTED_SLACK_TOKEN]"),
+            (#"(?i)sk-or-[A-Za-z0-9_-]{12,}"#, "[REDACTED_OPENROUTER_KEY]"),
             (#"(?i)sk-[A-Za-z0-9]{12,}"#, "[REDACTED]"),
             (#"(?i)gh[opusr]_[A-Za-z0-9_]+"#, "[REDACTED]"),
             (#"(?i)github_pat_[A-Za-z0-9_]+"#, "[REDACTED]")

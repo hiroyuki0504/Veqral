@@ -43,6 +43,7 @@ Device(Mac)
 
 - `main` = clean baseline（#9〜#29 を 1 回の union integration で統合済み。退避 branch: `pre-portfolio-main-20260601-061622`）
 - 旧スタック #9〜#29 は `codex/main-stack-integration-20260601` 経由で `main` に包含済み。以後の新規作業は clean `main` からブランチを切る。
+- #A0 (`codex/a0-code-audit`): clean main の実コード監査。`AUDIT.md` を追加し、Discord test notification の 2xx 実判定、`VEQRAL_HOST_HOME`/`VEQRAL_HOST_PORT`/`VEQRAL_HOST_WORKING_DIRECTORY` と `HERMES_HOME` による隔離、redact の Discord/Slack/OpenRouter 追加、Portfolio DELETE の fail-closed 化を実施。MacHost build / iOS Simulator build / Mac Catalyst build / Host smoke / #0 memory smoke 通過。
 - #9: Device→エージェント選択、Codex/Claude 直接、Hermes Project→Chat→model、History「Continue」resume。（更新耐性 adapter を同ブランチに足す指示済み → 入っているかブランチで確認）
 - #10: ワンタップ承認(一覧から)、Chat/セッション名前付け+フィルタ、画像 diff 3 モード+hunk 添付、swipe、日本語/English/System 切替（`Localizable.strings` 体系。`.xcstrings` 移行は未）
 - #11: APNs push（device build は free team では Push capability 非対応で停止 → #12 で外した）
@@ -69,9 +70,9 @@ Device(Mac)
 
 1. Gate1: #0 Hermes 記憶継承は `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4` の real 2 model で PASS 済み。`HERMES_MEMORY_INHERITANCE_PR0.md` に実トランスクリプトあり。自作 memory は足していない。
    - より強いクロスベンダー証明は、Hermes から Claude/Anthropic login が使える状態になった後で再実行する。
-2. Gate2（最優先）: `DEVICE_ACCEPTANCE.md` に沿って iPhone/iPad 実機タップ確認。
-   - 対象: voice input / host telemetry / saved command / Discord 実 webhook / Hermes memory visibility。
-   - ユーザーが落ちた項目を報告したら、その項目だけ Draft PR で修正。
+2. #A1 Gate2（最優先）: XCUITest で `DEVICE_ACCEPTANCE.md` の5項目を自動化。
+   - 対象: saved command / host telemetry / Discord 2xx / Hermes memory visibility / voice transcript cleanup + approval gate。
+   - 既存の `gate2-xcuitest-acceptance-wip` stash に A1 用の未完了作業あり。再開時は clean main から #A1 ブランチを切り、必要分だけ取り込む。
 3. 実機検証（継続）
    - QR ペアリング（ユーザー報告ではカメラ認識→connected 済み。#18 端末配布後に念のため再確認）
    - Hermes memory visibility。同 Project で Chat①(モデル A)に記憶→Chat②(モデル B)が継承され、Memory 画面で同じ事実が見えること（Gate1 smoke は PASS 済み）
