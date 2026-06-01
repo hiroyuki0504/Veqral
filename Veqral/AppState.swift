@@ -194,6 +194,10 @@ extension CommandApproval {
     var requiresPreApprovalReview: Bool {
         risk == "高" || tintName == "red"
     }
+
+    var priorityRank: Int {
+        requiresPreApprovalReview ? 0 : 1
+    }
 }
 
 struct CommandDiffEntry: Identifiable, Codable, Equatable {
@@ -2869,6 +2873,18 @@ final class CommandCenterStore: ObservableObject {
         persist()
     }
 
+    func approveBatchEligiblePendingApprovals() {
+        let batch = pendingApprovals().filter { !$0.requiresPreApprovalReview }
+        batch.forEach { approve($0) }
+    }
+
+    func rejectPendingApprovals(_ batch: [CommandApproval]) {
+        batch.forEach { approval in
+            guard approvals.first(where: { $0.id == approval.id })?.status == .pending else { return }
+            reject(approval)
+        }
+    }
+
     func pauseOrResumeSelectedRun() {
         guard let selectedRunID, let index = runs.firstIndex(where: { $0.id == selectedRunID }) else { return }
         switch runs[index].status {
@@ -2930,6 +2946,12 @@ final class CommandCenterStore: ObservableObject {
 
     func pendingApprovals(limit: Int? = nil) -> [CommandApproval] {
         let pending = approvals.filter { $0.status == .pending }
+            .sorted {
+                if $0.priorityRank != $1.priorityRank {
+                    return $0.priorityRank < $1.priorityRank
+                }
+                return $0.createdAt < $1.createdAt
+            }
         guard let limit else { return pending }
         return Array(pending.prefix(limit))
     }

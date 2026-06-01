@@ -3000,6 +3000,10 @@ struct ApprovalsView: View {
             }
 
             let pending = store.pendingApprovals()
+            if !pending.isEmpty {
+                ApprovalBatchControls(pending: pending)
+            }
+
             if pending.isEmpty {
                 VQPanel("Queue", systemImage: "checkmark.shield") {
                     Text(L10n.tr("No pending approvals. Risky commands stop here and run from the Mac build after approval."))
@@ -3015,6 +3019,69 @@ struct ApprovalsView: View {
             }
         }
         .accessibilityIdentifier("gate2.screen.approvals")
+    }
+}
+
+private struct ApprovalBatchControls: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let pending: [CommandApproval]
+    @State private var isConfirmingRejectAll = false
+
+    private var highCount: Int {
+        pending.filter { $0.requiresPreApprovalReview }.count
+    }
+
+    private var batchApprovable: [CommandApproval] {
+        pending.filter { !$0.requiresPreApprovalReview }
+    }
+
+    var body: some View {
+        VQPanel(L10n.tr("Approval priority"), systemImage: "line.3.horizontal.decrease.circle") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    StatusPill(title: "\(L10n.tr("High risk")) \(highCount)", tint: VQTheme.red)
+                    StatusPill(title: "\(L10n.tr("Medium risk")) \(batchApprovable.count)", tint: VQTheme.amber)
+                    Spacer(minLength: 0)
+                }
+
+                Text(L10n.tr("High-risk approvals stay in individual review. Medium-risk approvals can be handled together."))
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+
+                HStack(spacing: 10) {
+                    Button {
+                        store.approveBatchEligiblePendingApprovals()
+                    } label: {
+                        Label(L10n.tr("Approve medium risk"), systemImage: "checkmark.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(batchApprovable.isEmpty)
+
+                    Button(role: .destructive) {
+                        isConfirmingRejectAll = true
+                    } label: {
+                        Label(L10n.tr("Reject all"), systemImage: "xmark.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .font(.footnote.weight(.semibold))
+            }
+        }
+        .confirmationDialog(
+            L10n.tr("Reject all pending approvals?"),
+            isPresented: $isConfirmingRejectAll,
+            titleVisibility: .visible
+        ) {
+            Button(L10n.tr("Reject all"), role: .destructive) {
+                store.rejectPendingApprovals(pending)
+            }
+            Button(L10n.tr("Cancel"), role: .cancel) {}
+        } message: {
+            Text(L10n.tr("This stops every pending run in the approval queue."))
+        }
     }
 }
 
