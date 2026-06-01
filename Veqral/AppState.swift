@@ -1141,6 +1141,10 @@ final class CommandCenterStore: ObservableObject {
         let folderURL = supportURL.appendingPathComponent("Veqral", isDirectory: true)
         try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
         persistenceURL = folderURL.appendingPathComponent("command-center-state.json")
+        if Self.uiTestingResetRequested {
+            try? FileManager.default.removeItem(at: persistenceURL)
+            SavedCommandDraftCache.clearLocal(cacheFolder: folderURL)
+        }
         pairingToken = Self.makePairingToken()
         let defaultWorkingDirectory: String
         defaultWorkingDirectory = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
@@ -1201,12 +1205,63 @@ final class CommandCenterStore: ObservableObject {
             savedCommandDrafts = SavedCommandDraftCache.load(cacheFolder: folderURL)
             persist()
         }
+        applyUITestLaunchOverrides()
         isReadyForAutosave = true
         ensureAgentProjectForCurrentWorkspace()
         scheduleWorkspaceRefresh(delayNanoseconds: 0)
         requestNotificationPermission()
         reconnectRemoteRuns()
         refreshRemoteHostStatus()
+    }
+
+    private static var uiTestingResetRequested: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return env["VEQRAL_UI_TEST_RESET"] == "1"
+    }
+
+    private func applyUITestLaunchOverrides() {
+        let env = ProcessInfo.processInfo.environment
+        guard CommandLine.arguments.contains("-veqral-ui-testing") || env["VEQRAL_UI_TESTING"] == "1" else {
+            return
+        }
+
+        runs = []
+        approvals = []
+        logs = []
+        diffs = []
+        selectedRunID = nil
+        remoteRunIDs = [:]
+        savedCommandDrafts = []
+        if let directory = env["VEQRAL_UI_TEST_WORKING_DIRECTORY"]?.nilIfBlank {
+            workingDirectory = NSString(string: directory).expandingTildeInPath
+        }
+        if let runtimeValue = env["VEQRAL_UI_TEST_RUNTIME"]?.nilIfBlank,
+           let runtime = CommandRuntime(rawValue: runtimeValue) {
+            selectedRuntime = runtime
+        }
+        if let projectID = env["VEQRAL_UI_TEST_PROJECT_ID"]?.nilIfBlank {
+            let name = env["VEQRAL_UI_TEST_PROJECT_NAME"]?.nilIfBlank ?? "Gate2 XCUITest"
+            let chat = AgentChatSpace(
+                id: "gate2-xcuitest-chat",
+                title: "Gate2 Chat",
+                sessionID: nil,
+                provider: selectedHermesProvider,
+                model: selectedHermesModel,
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+            agentProjects = [
+                AgentProjectSpace(
+                    id: projectID,
+                    name: name,
+                    workingDirectory: workingDirectory,
+                    createdAt: Date(),
+                    chats: [chat]
+                )
+            ]
+            selectedAgentProjectID = projectID
+            selectedAgentChatID = chat.id
+        }
     }
 
     func selectRun(_ id: UUID) {
@@ -1400,6 +1455,7 @@ final class CommandCenterStore: ObservableObject {
             pairingSignature: cleanSignature
         )
         configureRemoteHost(endpoint: cleanEndpoint, deviceID: response.deviceID, token: response.token, name: "Mac Host")
+        refreshRemoteHostTelemetry()
         refreshRemoteHostStatus()
     }
 
@@ -1592,8 +1648,9 @@ final class CommandCenterStore: ObservableObject {
                 remoteHostMessage = "Mac Host online."
             } catch {
                 remoteHostHealth = nil
-                remoteHostTelemetry = nil
-                remoteHostTelemetryMessage = Self.remoteFailureMessage(error, context: "Mac Host telemetry")
+                if remoteHostTelemetry == nil {
+                    remoteHostTelemetryMessage = Self.remoteFailureMessage(error, context: "Mac Host telemetry")
+                }
                 remoteHostMessage = Self.remoteFailureMessage(error, context: "Mac Host")
             }
             isRefreshingRemoteHost = false
@@ -3474,6 +3531,10 @@ private enum SavedCommandDraftCache {
             )
             try? data.write(to: url, options: .atomic)
         }
+    }
+
+    static func clearLocal(cacheFolder: URL) {
+        try? FileManager.default.removeItem(at: localURL(cacheFolder: cacheFolder))
     }
 
     private static func localURL(cacheFolder: URL) -> URL {

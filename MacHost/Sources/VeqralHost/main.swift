@@ -76,7 +76,10 @@ struct HostConfig: Codable, Sendable {
     var portfolioDiscordWebhook: String?
 
     static var folder: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        if let path = ProcessInfo.processInfo.environment["VEQRAL_HOST_HOME"]?.nilIfBlank {
+            return URL(fileURLWithPath: path.expandingTilde, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".veqral-host", isDirectory: true)
     }
 
@@ -87,14 +90,27 @@ struct HostConfig: Codable, Sendable {
     static func load() -> HostConfig {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         if let data = try? Data(contentsOf: configURL),
-           let config = try? JSONDecoder().decode(HostConfig.self, from: data) {
+           var config = try? JSONDecoder().decode(HostConfig.self, from: data) {
+            config.applyEnvironmentOverrides()
             return config
         }
-        let config = HostConfig()
+        var config = HostConfig()
+        config.applyEnvironmentOverrides()
         if let data = try? JSONEncoder.pretty.encode(config) {
             try? data.write(to: configURL, options: .atomic)
         }
         return config
+    }
+
+    private mutating func applyEnvironmentOverrides() {
+        let env = ProcessInfo.processInfo.environment
+        if let value = env["VEQRAL_HOST_PORT"]?.nilIfBlank,
+           let port = UInt16(value) {
+            self.port = port
+        }
+        if let directory = env["VEQRAL_HOST_WORKING_DIRECTORY"]?.nilIfBlank {
+            self.defaultWorkingDirectory = directory.expandingTilde
+        }
     }
 
     var resolvedPushNotificationsEnabled: Bool {
@@ -342,13 +358,20 @@ enum DiscordWebhookNotifier {
         await send(webhook: webhook, content: content)
     }
 
-    static func send(webhook: String, content: String) async {
-        guard let url = URL(string: webhook) else { return }
+    @discardableResult
+    static func send(webhook: String, content: String) async -> Bool {
+        guard let url = URL(string: webhook) else { return false }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try? JSONEncoder().encode(["content": clipped(Redactor.redact(content), limit: 1_800)])
-        _ = try? await URLSession.shared.data(for: request)
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+            return (200..<300).contains(http.statusCode)
+        } catch {
+            return false
+        }
     }
 
     private static func title(for event: PushEventType) -> String {
@@ -1776,7 +1799,10 @@ final class HostServer: @unchecked Sendable {
                 }
                 let host = localHostName()
                 let content = "Veqral Discord テスト通知: \(host) の Mac Host から送信しました。"
-                await DiscordWebhookNotifier.send(webhook: webhook, content: content)
+                let delivered = await DiscordWebhookNotifier.send(webhook: webhook, content: content)
+                guard delivered else {
+                    throw HostError.badRequest("Discord webhook did not return 2xx.")
+                }
                 await state.recordAudit("discord test notification requested device=\(authenticatedDeviceID)")
                 sendJSON(NotificationTestResponse(ok: true, message: "Discord test notification sent."), connection: connection)
                 return
@@ -4585,13 +4611,24 @@ struct HistorySessionDetailResponse: Codable {
 }
 
 struct HermesMemoryStore {
-    private let memoriesFolder = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hermes/memories", isDirectory: true)
-    private let skillsFolder = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hermes/skills", isDirectory: true)
-    private let stateDBURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hermes/state.db")
+    private let hermesHome = URL(
+        fileURLWithPath: ProcessInfo.processInfo.environment["HERMES_HOME"]?.nilIfBlank?.expandingTilde
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hermes", isDirectory: true).path,
+        isDirectory: true
+    )
     private let maxReadableBytes = 1_048_576
+
+    private var memoriesFolder: URL {
+        hermesHome.appendingPathComponent("memories", isDirectory: true)
+    }
+
+    private var skillsFolder: URL {
+        hermesHome.appendingPathComponent("skills", isDirectory: true)
+    }
+
+    private var stateDBURL: URL {
+        hermesHome.appendingPathComponent("state.db")
+    }
 
     func list() throws -> MemoryListResponse {
         var files = [
