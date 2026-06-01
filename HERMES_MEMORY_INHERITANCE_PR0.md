@@ -43,3 +43,22 @@ session_id: 20260601_152028_b5a622
 ## Result
 
 PASS: Chat B returned the code name written by Chat A while using a different provider/model.
+
+## #A7 Cross-Vendor Re-Run Attempt
+
+- Date: 2026-06-02
+- Requested route: `anthropic/claude-haiku-4-5 -> openai-codex/gpt-5.5`
+- Report: `HERMES_CROSS_VENDOR_PR_A7.md`
+- Result: BLOCKED before LLM execution. 偽 pass は作っていません。
+
+The verifier intentionally tested the Claude side as subscription/login auth, not as an API-key route. With API-key environment removed, `hermes auth status anthropic` reports logged out, while `openai-codex` subscription login remains available through `~/.hermes/auth.json`.
+
+Required next step: restore Hermes-readable Claude/Anthropic login with `claude /login` or `claude setup-token`, then rerun:
+
+```sh
+VEQRAL_MEMTEST_PROVIDER_A=anthropic \
+VEQRAL_MEMTEST_MODEL_A=claude-haiku-4-5 \
+VEQRAL_MEMTEST_PROVIDER_B=openai-codex \
+VEQRAL_MEMTEST_MODEL_B=gpt-5.5 \
+swift run --package-path MacHost VeqralHostSmoke verify-memory-inheritance --report HERMES_CROSS_VENDOR_PR_A7.md
+```
