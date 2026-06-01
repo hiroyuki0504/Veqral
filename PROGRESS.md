@@ -31,7 +31,7 @@ Final: #A0〜#A7 are represented by Draft PRs / recorded attempts. Main integrat
 - [x] #A4 司令塔を実データで — Draft PR #34 (`codex/a4-portfolio-real-data`), isolated sample acceptance when real roots unset
 - [x] #A5 認証オンボーディング — Draft PR #35 (`codex/a5-auth-onboarding`), login readiness and Keychain markers
 - [x] #A6 Apple Watch 承認アプリ — Draft PR #36 (`codex/a6-watch-approval`), Watch UI scaffolded with honest watchOS/APNs partials
-- [x] #A7 クロスベンダー #0 再実走 — branch `codex/a7-cross-vendor-memory`, blocked before LLM execution because Hermes-readable Claude/Anthropic subscription login is not restored. See `HERMES_CROSS_VENDOR_PR_A7.md`.
+- [x] #A7 クロスベンダー #0 再実走 — Draft PR #37 (`codex/a7-cross-vendor-memory`), blocked before LLM execution because Hermes-readable Claude/Anthropic subscription login is not restored. See `HERMES_CROSS_VENDOR_PR_A7.md`.
 - [ ] Final main 統合 — waiting for explicit user GO
 
 ## Notes
