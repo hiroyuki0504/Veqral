@@ -2607,6 +2607,7 @@ private struct RemoteConnectionField: View {
 
 private struct ProjectMemoryReadOnlyView: View {
     @EnvironmentObject private var store: CommandCenterStore
+    @State private var memoryQuestion = ""
 
     private var displayedSnapshot: RemoteProjectMemoryResponse? {
         guard let snapshot = store.remoteProjectMemory else { return nil }
@@ -2647,11 +2648,13 @@ private struct ProjectMemoryReadOnlyView: View {
                     .fixedSize(horizontal: false, vertical: true)
             } else if let snapshot = displayedSnapshot {
                 snapshotView(snapshot)
+                memoryQuestionPanel
             } else {
                 Text(store.isLoadingRemoteProjectMemory ? "プロジェクト記憶を読み込み中..." : "更新すると、選択中の Hermes Project の記憶を表示します。")
                     .font(.caption)
                     .foregroundStyle(VQTheme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
+                memoryQuestionPanel
             }
 
             if !store.remoteProjectMemoryMessage.isEmpty {
@@ -2669,6 +2672,79 @@ private struct ProjectMemoryReadOnlyView: View {
         formatter.timeStyle = .short
         return formatter
     }()
+
+    private var memoryQuestionPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("記憶に聞く", systemImage: "questionmark.bubble")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                StatusPill(title: hermesModelLabel, tint: VQTheme.accent)
+            }
+            TextField("例: 先週このプロジェクトで何をしていた？", text: $memoryQuestion, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.caption)
+                .lineLimit(2...4)
+                .padding(10)
+                .background(VQTheme.control.opacity(0.50))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(VQTheme.hairline, lineWidth: 1)
+                }
+
+            HStack(spacing: 8) {
+                ForEach(Self.questionExamples, id: \.self) { example in
+                    Button(example) {
+                        memoryQuestion = example
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                    .controlSize(.small)
+                }
+                Spacer()
+                Button {
+                    let question = memoryQuestion
+                    memoryQuestion = ""
+                    store.askSelectedProjectMemory(question)
+                } label: {
+                    Label("Hermes Chat へ送る", systemImage: "paperplane")
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .disabled(memoryQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.selectedAgentProject == nil)
+            }
+            .font(.caption.weight(.semibold))
+
+            Text("回答は同じ Hermes Project の新しい Chat として実行されます。Project 記憶は読み取り専用表示のまま、保存や継承は Hermes native memory/session に任せます。")
+                .font(.caption2)
+                .foregroundStyle(VQTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .background(VQTheme.elevated.opacity(0.62))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
+        }
+    }
+
+    private var hermesModelLabel: String {
+        let provider = store.selectedHermesProvider.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = store.selectedHermesModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !provider.isEmpty, !model.isEmpty {
+            return "\(provider) / \(model)"
+        }
+        return model.isEmpty ? "Hermes 既定" : model
+    }
+
+    private static let questionExamples = [
+        "先週このプロジェクトで何をしていた？",
+        "未解決の論点は？",
+        "次に触るべきファイルは？"
+    ]
 
     @ViewBuilder
     private func snapshotView(_ snapshot: RemoteProjectMemoryResponse) -> some View {
