@@ -818,6 +818,7 @@ private struct CommandSubmitPanel: View {
                 .foregroundStyle(VQTheme.secondaryText)
             #endif
 
+            SavedCommandDraftBar(compact: false)
             CommandAttachmentControls()
             CommandRequirementMemo()
         }
@@ -1422,6 +1423,7 @@ private struct PhoneComposer: View {
                 Spacer()
             }
 
+            SavedCommandDraftBar(compact: true)
             CommandAttachmentControls()
             CommandRequirementMemo()
         }
@@ -1454,6 +1456,123 @@ private struct CommandChip: View {
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct SavedCommandDraftBar: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let compact: Bool
+
+    private var visibleDrafts: [SavedCommandDraft] {
+        Array(store.savedCommandDrafts.prefix(compact ? 6 : 12))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label(L10n.tr("Saved Commands"), systemImage: "bookmark")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                Button {
+                    store.saveCurrentCommandDraft()
+                } label: {
+                    Image(systemName: "bookmark.badge.plus")
+                        .font(.caption.weight(.semibold))
+                        .frame(width: 28, height: 24)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(store.canSaveCurrentCommandDraft ? VQTheme.accent : VQTheme.secondaryText)
+                .disabled(!store.canSaveCurrentCommandDraft)
+                .help(L10n.tr("Save current command as a reusable draft"))
+            }
+
+            if visibleDrafts.isEmpty {
+                Text(L10n.tr("Saved command drafts appear here."))
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(2)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(visibleDrafts) { draft in
+                            SavedCommandDraftChip(draft: draft, compact: compact)
+                        }
+                    }
+                    .padding(.vertical, 1)
+                }
+            }
+
+            if !store.savedCommandDraftMessage.isEmpty {
+                Text(store.savedCommandDraftMessage)
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(1)
+            }
+        }
+        .padding(10)
+        .background(VQTheme.control.opacity(0.34))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct SavedCommandDraftChip: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let draft: SavedCommandDraft
+    let compact: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button {
+                store.insertSavedCommandDraft(draft)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: draft.runtime?.symbol ?? "text.badge.plus")
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(draft.title)
+                            .lineLimit(1)
+                        if !compact, let runtime = draft.runtime {
+                            Text(runtime.shortTitle)
+                                .font(.caption2)
+                                .foregroundStyle(VQTheme.secondaryText)
+                        }
+                    }
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+                .padding(.leading, 9)
+                .padding(.trailing, 7)
+                .padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+            .help(L10n.tr("Insert saved command draft"))
+
+            Menu {
+                Button {
+                    store.insertSavedCommandDraft(draft)
+                } label: {
+                    Label(L10n.tr("Insert"), systemImage: "arrow.turn.down.left")
+                }
+                Button(role: .destructive) {
+                    store.deleteSavedCommandDraft(draft)
+                } label: {
+                    Label(L10n.tr("Delete"), systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .frame(width: 24, height: compact ? 24 : 30)
+            }
+            .buttonStyle(.plain)
+            .help(L10n.tr("Saved command actions"))
+        }
+        .background(VQTheme.control)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
+        }
     }
 }
 

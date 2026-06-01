@@ -105,6 +105,15 @@ struct CommandRunUsage: Codable, Equatable, Sendable {
     }
 }
 
+struct SavedCommandDraft: Identifiable, Codable, Equatable, Sendable {
+    var id: UUID
+    var title: String
+    var command: String
+    var runtime: CommandRuntime?
+    var createdAt: Date
+    var updatedAt: Date
+}
+
 struct CommandRun: Identifiable, Codable, Equatable {
     var id: UUID
     var title: String
@@ -948,6 +957,8 @@ final class CommandCenterStore: ObservableObject {
             persist()
         }
     }
+    @Published var savedCommandDrafts: [SavedCommandDraft] = []
+    @Published var savedCommandDraftMessage: String = ""
     @Published var workingDirectory: String {
         didSet {
             guard isReadyForAutosave, oldValue != workingDirectory else { return }
@@ -1010,6 +1021,10 @@ final class CommandCenterStore: ObservableObject {
         return project.chats.first { $0.id == selectedAgentChatID } ?? project.chats.first
     }
 
+    var canSaveCurrentCommandDraft: Bool {
+        !commandDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var selectedHermesChoiceTitle: String {
         HermesModelChoice.defaults.first {
             $0.provider == selectedHermesProvider && $0.model == selectedHermesModel
@@ -1064,6 +1079,10 @@ final class CommandCenterStore: ObservableObject {
             appLanguage = cleaned.appLanguage ?? savedLanguage
             sessionTitles = cleaned.sessionTitles ?? [:]
             archivedRunIDs = cleaned.archivedRunIDs ?? []
+            savedCommandDrafts = Self.mergedSavedCommandDrafts(
+                primary: SavedCommandDraftCache.load(cacheFolder: folderURL),
+                fallback: cleaned.savedCommandDrafts ?? []
+            )
             if cleaned.runs.count != snapshot.runs.count || cleaned.approvals.count != snapshot.approvals.count || cleaned.logs.count != snapshot.logs.count || cleaned.diffs.count != snapshot.diffs.count {
                 persist()
             }
@@ -1085,6 +1104,7 @@ final class CommandCenterStore: ObservableObject {
             appLanguage = empty.appLanguage ?? savedLanguage
             sessionTitles = empty.sessionTitles ?? [:]
             archivedRunIDs = empty.archivedRunIDs ?? []
+            savedCommandDrafts = SavedCommandDraftCache.load(cacheFolder: folderURL)
             persist()
         }
         isReadyForAutosave = true
@@ -1109,6 +1129,51 @@ final class CommandCenterStore: ObservableObject {
             return
         }
         submitCommand(trimmed)
+    }
+
+    func saveCurrentCommandDraft() {
+        let trimmed = commandDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            savedCommandDraftMessage = L10n.tr("Command draft is empty.")
+            return
+        }
+
+        let now = Date()
+        let key = Self.savedCommandKey(command: trimmed, runtime: selectedRuntime)
+        var drafts = savedCommandDrafts.filter {
+            Self.savedCommandKey(command: $0.command, runtime: $0.runtime) != key
+        }
+        let existing = savedCommandDrafts.first {
+            Self.savedCommandKey(command: $0.command, runtime: $0.runtime) == key
+        }
+        drafts.insert(
+            SavedCommandDraft(
+                id: existing?.id ?? UUID(),
+                title: title(for: trimmed),
+                command: trimmed,
+                runtime: selectedRuntime,
+                createdAt: existing?.createdAt ?? now,
+                updatedAt: now
+            ),
+            at: 0
+        )
+        savedCommandDrafts = Array(drafts.prefix(24))
+        savedCommandDraftMessage = existing == nil ? L10n.tr("Saved command draft.") : L10n.tr("Updated saved command draft.")
+        persistSavedCommandDrafts()
+    }
+
+    func insertSavedCommandDraft(_ draft: SavedCommandDraft) {
+        if let runtime = draft.runtime {
+            selectedRuntime = runtime
+        }
+        commandDraft = draft.command
+        savedCommandDraftMessage = L10n.tr("Inserted saved command draft.")
+    }
+
+    func deleteSavedCommandDraft(_ draft: SavedCommandDraft) {
+        savedCommandDrafts.removeAll { $0.id == draft.id }
+        savedCommandDraftMessage = L10n.tr("Deleted saved command draft.")
+        persistSavedCommandDrafts()
     }
 
     func submitCommand(
@@ -3046,7 +3111,8 @@ final class CommandCenterStore: ObservableObject {
             selectedHermesModel: selectedHermesModel,
             appLanguage: appLanguage,
             sessionTitles: sessionTitles,
-            archivedRunIDs: archivedRunIDs
+            archivedRunIDs: archivedRunIDs,
+            savedCommandDrafts: savedCommandDrafts
         )
         do {
             let data = try JSONEncoder.commandCenter.encode(snapshot)
@@ -3080,7 +3146,8 @@ final class CommandCenterStore: ObservableObject {
             selectedHermesModel: "",
             appLanguage: UserDefaults.standard.string(forKey: "appLanguage").flatMap(AppLanguage.init(rawValue:)) ?? .system,
             sessionTitles: [:],
-            archivedRunIDs: []
+            archivedRunIDs: [],
+            savedCommandDrafts: []
         )
     }
 
@@ -3103,7 +3170,35 @@ final class CommandCenterStore: ObservableObject {
             cleaned.selectedRunID = cleaned.runs.first?.id
         }
         cleaned.archivedRunIDs = cleaned.archivedRunIDs?.subtracting(removedRunIDs)
+        cleaned.savedCommandDrafts = mergedSavedCommandDrafts(
+            primary: cleaned.savedCommandDrafts ?? [],
+            fallback: []
+        )
         return cleaned
+    }
+
+    private func persistSavedCommandDrafts() {
+        persist()
+        SavedCommandDraftCache.save(savedCommandDrafts, cacheFolder: persistenceURL.deletingLastPathComponent())
+    }
+
+    private static func savedCommandKey(command: String, runtime: CommandRuntime?) -> String {
+        "\(runtime?.rawValue ?? "any")|\(command.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+
+    private static func mergedSavedCommandDrafts(primary: [SavedCommandDraft], fallback: [SavedCommandDraft]) -> [SavedCommandDraft] {
+        var seen: Set<String> = []
+        let merged = (primary + fallback)
+            .sorted { lhs, rhs in lhs.updatedAt > rhs.updatedAt }
+            .filter { draft in
+                let command = draft.command.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !command.isEmpty else { return false }
+                let key = savedCommandKey(command: command, runtime: draft.runtime)
+                guard !seen.contains(key) else { return false }
+                seen.insert(key)
+                return true
+            }
+        return Array(merged.prefix(24))
     }
 
     private static func isLegacySeedOrDiagnosticRun(_ run: CommandRun) -> Bool {
@@ -3219,6 +3314,49 @@ private struct CommandCenterSnapshot: Codable {
     var appLanguage: AppLanguage?
     var sessionTitles: [String: String]?
     var archivedRunIDs: Set<UUID>?
+    var savedCommandDrafts: [SavedCommandDraft]?
+}
+
+private enum SavedCommandDraftCache {
+    private static let fileName = "saved-command-drafts.json"
+
+    static func load(cacheFolder: URL) -> [SavedCommandDraft] {
+        let urls = [ubiquityURL(), localURL(cacheFolder: cacheFolder)].compactMap { $0 }
+        for url in urls {
+            guard let data = try? Data(contentsOf: url),
+                  let drafts = try? JSONDecoder.commandCenter.decode([SavedCommandDraft].self, from: data),
+                  !drafts.isEmpty else {
+                continue
+            }
+            return drafts
+        }
+        return []
+    }
+
+    static func save(_ drafts: [SavedCommandDraft], cacheFolder: URL) {
+        guard let data = try? JSONEncoder.commandCenter.encode(drafts) else { return }
+        for url in [localURL(cacheFolder: cacheFolder), ubiquityURL()].compactMap({ $0 }) {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private static func localURL(cacheFolder: URL) -> URL {
+        cacheFolder.appendingPathComponent(fileName)
+    }
+
+    private static func ubiquityURL() -> URL? {
+        guard let root = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
+            return nil
+        }
+        return root
+            .appendingPathComponent("Documents", isDirectory: true)
+            .appendingPathComponent("Veqral", isDirectory: true)
+            .appendingPathComponent(fileName)
+    }
 }
 
 struct LocalCommandResult: Sendable {

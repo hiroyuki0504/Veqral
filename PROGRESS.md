@@ -12,7 +12,7 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 - [x] #5 記憶の可視化（Memory 画面で実 project memory 表示） — completed in PR #22 (`codex/backlog-5-memory-visibility`)
 - [x] #6 Run コスト/トークン表示 — completed in PR #23 (`codex/backlog-6-run-usage`)
 - [x] #7 承認時に diff/コマンド表示 — completed in PR #24 (`codex/backlog-7-approval-context`)
-- [ ] #8 定型コマンドの保存/再送
+- [x] #8 定型コマンドの保存/再送 — completed in PR #25 (`codex/backlog-8-saved-commands`)
 - [ ] #9 Mac ホストテレメトリ
 - [ ] #10 音声入力 P0
 - [x] #11 司令塔（ポートフォリオ層）フル実装 — completed in PR #18 (`codex/pr2-portfolio-command-center`)
@@ -20,7 +20,7 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 
 ## Current Item
 
-#8 定型コマンドの保存/再送
+#9 Mac ホストテレメトリ
 
 ## Notes
 
@@ -31,5 +31,6 @@ This file is the resume point for the run-until-done backlog. Each item is one l
 - #5 Memory visibility is documented in `MEMORY_VISIBILITY_PR5.md`. Host smoke passed; paired-device confirmation after a real Hermes Project chat is still needed.
 - #6 Run usage is documented in `RUN_USAGE_PR6.md`. Host parser smoke passed for Claude stream JSON, Codex usage JSON, and usage text. Run details now show input/output/reasoning/cache/total tokens and estimated/actual cost when the Host can derive them.
 - #7 Approval context is documented in `APPROVAL_CONTEXT_PR7.md`. High-risk approve now opens a review sheet with command text and linked diff/file context before approval is sent.
+- #8 Saved command drafts are documented in `SAVED_COMMANDS_PR8.md`. Command composer now saves reusable drafts, restores them by tap, and writes a best-effort iCloud Documents cache with local fallback.
 - #1/#2/#11 are marked done because they already exist as stacked Draft PRs in this repository.
 - #12 must stop at "merge plan ready, waiting for explicit user approval"; no automatic main merge.
