@@ -30,6 +30,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-voice-cleanup" {
             VoiceCleanupSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-portfolio-real-data" {
+            PortfolioRealDataSmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -76,7 +79,10 @@ struct HostConfig: Codable, Sendable {
     var portfolioDiscordWebhook: String?
 
     static var folder: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        if let override = ProcessInfo.processInfo.environment["VEQRAL_HOST_HOME"]?.nilIfBlank {
+            return URL(fileURLWithPath: override.expandingTilde, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".veqral-host", isDirectory: true)
     }
 
@@ -128,8 +134,12 @@ struct HostConfig: Codable, Sendable {
     }
 
     var resolvedDiscordWebhook: String? {
-        ProcessInfo.processInfo.environment["VEQRAL_DISCORD_WEBHOOK"]?.nilIfBlank
-            ?? ProcessInfo.processInfo.environment["VEQRAL_PORTFOLIO_DISCORD_WEBHOOK"]?.nilIfBlank
+        let env = ProcessInfo.processInfo.environment
+        if Self.booleanValue(env["VEQRAL_DISABLE_DISCORD_WEBHOOK"]) {
+            return nil
+        }
+        return env["VEQRAL_DISCORD_WEBHOOK"]?.nilIfBlank
+            ?? env["VEQRAL_PORTFOLIO_DISCORD_WEBHOOK"]?.nilIfBlank
             ?? KeychainStore.get(account: "discord:webhook")?.nilIfBlank
             ?? KeychainStore.get(account: "portfolio:discord-webhook")?.nilIfBlank
             ?? discordWebhook?.nilIfBlank
@@ -1020,6 +1030,159 @@ enum VoiceCleanupSmoke {
             print("FAIL: Voice cleanup smoke failed: \(error.localizedDescription)")
             Foundation.exit(1)
         }
+    }
+}
+
+enum PortfolioRealDataSmoke {
+    static func runAndExit() -> Never {
+        Task.detached {
+            do {
+                let result = try await run()
+                print("PASS: Portfolio A4 smoke mode=\(result.mode) assets=\(result.assetCount) status=\(result.status) run=\(result.runID.prefix(8)) missing=\(result.missingConfiguration.joined(separator: ","))")
+                Foundation.exit(0)
+            } catch {
+                print("FAIL: Portfolio A4 smoke failed: \(error.localizedDescription)")
+                Foundation.exit(1)
+            }
+        }
+        dispatchMain()
+    }
+
+    private struct SmokeResult {
+        var mode: String
+        var assetCount: Int
+        var status: String
+        var runID: String
+        var missingConfiguration: [String]
+    }
+
+    private static func run() async throws -> SmokeResult {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("veqral-a4-portfolio-\(UUID().uuidString)", isDirectory: true)
+        let hostHome = root.appendingPathComponent("host-home", isDirectory: true)
+        let registry = root.appendingPathComponent("registry", isDirectory: true)
+        let codeRoot = root.appendingPathComponent("code-root", isDirectory: true)
+        let appRoot = codeRoot.appendingPathComponent("VeqralA4SampleApp", isDirectory: true)
+        let logURL = appRoot.appendingPathComponent("veqral-a4.log")
+        defer { try? fileManager.removeItem(at: root) }
+
+        let missing = missingPortfolioEnvironment(ProcessInfo.processInfo.environment)
+        try fileManager.createDirectory(at: appRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: hostHome, withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 5.9
+        import PackageDescription
+        let package = Package(name: "VeqralA4SampleApp")
+        """.write(to: appRoot.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try """
+        Veqral A4 sample log line
+        asset running
+        """.write(to: logURL, atomically: true, encoding: .utf8)
+
+        setenv("VEQRAL_HOST_HOME", hostHome.path, 1)
+        setenv("VEQRAL_PORTFOLIO_REGISTRY_REPO", "", 1)
+        setenv("VEQRAL_PORTFOLIO_REGISTRY_PATH", registry.path, 1)
+        setenv("VEQRAL_DISABLE_DISCORD_WEBHOOK", "1", 1)
+
+        var config = HostConfig()
+        config.defaultWorkingDirectory = appRoot.path
+        config.portfolioRegistryPath = registry.path
+        config.portfolioRegistryRepo = ""
+        config.portfolioCodeRoots = [codeRoot.path]
+        config.portfolioEngagementRoots = []
+        config.discordWebhook = nil
+        config.portfolioDiscordWebhook = nil
+        config.pushNotificationsEnabled = false
+
+        let store = PortfolioRegistryStore(config: config)
+        let discovered = try store.discover(
+            request: PortfolioDiscoverRequest(
+                engagementRoots: nil,
+                codeRoots: [codeRoot.path],
+                includeGitHub: false
+            )
+        )
+        guard var asset = discovered.first(where: { $0.name == "VeqralA4SampleApp" }) else {
+            throw SmokeError("sample asset was not discovered from local code root")
+        }
+        asset.summary = "A4 acceptance sample asset"
+        asset.healthSpec = PortfolioHealthSpec(type: "cmd", target: "/bin/test -f \(shellQuoted(logURL.path))")
+        asset.logSource = PortfolioLogSource(path: logURL.path, cmd: nil)
+        asset.controls = PortfolioControls(
+            start: nil,
+            stop: nil,
+            restart: "/bin/echo veqral-a4-control-approved",
+            deploy: nil
+        )
+
+        let saved = try store.upsert(asset, message: "A4 sample asset acceptance")
+        let listed = try store.list()
+        guard listed.contains(where: { $0.id == saved.id }) else {
+            throw SmokeError("saved asset was not returned by list")
+        }
+
+        let status = try store.status(id: saved.id)
+        guard status.status == .running else {
+            throw SmokeError("sample asset status expected running, got \(status.status.rawValue): \(status.health)")
+        }
+        let logs = try store.logs(id: saved.id)
+        guard logs.joined(separator: "\n").contains("Veqral A4 sample log line") else {
+            throw SmokeError("sample asset logs were not loaded")
+        }
+        let summary = try store.logSummary(id: saved.id)
+        guard summary.nilIfBlank != nil else {
+            throw SmokeError("sample asset log summary was empty")
+        }
+
+        let state = HostState(config: config)
+        let control = try await store.controlRun(assetID: saved.id, action: "restart", state: state)
+        guard control.approvalRequired, control.status == RunStatusWire.waitingApproval.rawValue else {
+            throw SmokeError("portfolio control did not enter approval state")
+        }
+        guard let waiting = await state.run(runID: control.runID),
+              waiting.approvalSeverity == .high,
+              waiting.approvalReason?.contains("Portfolio restart requires approval") == true else {
+            throw SmokeError("portfolio control approval metadata is missing")
+        }
+        let approved = try await state.approve(runID: control.runID)
+        guard approved.status == .queued else {
+            throw SmokeError("approved portfolio control did not return to queued")
+        }
+        await AgentRunner(state: state).start(runID: control.runID)
+        guard let finished = await state.run(runID: control.runID),
+              finished.status == .complete,
+              finished.exitCode == 0 else {
+            throw SmokeError("approved portfolio control did not complete")
+        }
+        let controlLog = await state.replayLogs(runID: control.runID)
+            .map(\.message)
+            .joined(separator: "\n")
+        guard controlLog.contains("veqral-a4-control-approved") else {
+            throw SmokeError("approved portfolio control output was not captured")
+        }
+
+        let mode = missing.isEmpty ? "sample-fixture; live roots present but not mutated" : "sample-fixture; §0 roots unset"
+        return SmokeResult(
+            mode: mode,
+            assetCount: listed.count,
+            status: status.status.rawValue,
+            runID: control.runID,
+            missingConfiguration: missing
+        )
+    }
+
+    private static func missingPortfolioEnvironment(_ env: [String: String]) -> [String] {
+        var missing: [String] = []
+        if env["VEQRAL_PORTFOLIO_CODE_ROOTS"]?.nilIfBlank == nil,
+           env["VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS"]?.nilIfBlank == nil {
+            missing.append("VEQRAL_PORTFOLIO_CODE_ROOTS/ENGAGEMENT_ROOTS")
+        }
+        if env["VEQRAL_PORTFOLIO_REGISTRY_REPO"]?.nilIfBlank == nil,
+           env["VEQRAL_PORTFOLIO_REGISTRY_PATH"]?.nilIfBlank == nil {
+            missing.append("VEQRAL_PORTFOLIO_REGISTRY_REPO/PATH")
+        }
+        return missing
     }
 }
 
@@ -3602,6 +3765,7 @@ struct PortfolioAssetRequest: Codable {
 struct PortfolioDiscoverRequest: Codable {
     var engagementRoots: [String]?
     var codeRoots: [String]?
+    var includeGitHub: Bool?
 }
 
 struct PortfolioAssetStatusResponse: Codable {
@@ -3708,7 +3872,8 @@ final class PortfolioRegistryStore {
         let existing = try list()
         var mergedByKey: [String: PortfolioAsset] = Dictionary(uniqueKeysWithValues: existing.map { (dedupKey($0), $0) })
         var changedAssetIDs: Set<String> = []
-        for asset in discoverGitHubAssets() + discoverLocalCodeAssets(roots: request.codeRoots) + discoverEngagementAssets(roots: request.engagementRoots) {
+        let githubAssets = request.includeGitHub == false ? [] : discoverGitHubAssets()
+        for asset in githubAssets + discoverLocalCodeAssets(roots: request.codeRoots) + discoverEngagementAssets(roots: request.engagementRoots) {
             let key = dedupKey(asset)
             if var current = mergedByKey[key] {
                 let before = current

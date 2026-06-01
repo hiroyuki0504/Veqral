@@ -4144,8 +4144,9 @@ struct RemoteHostClient: Sendable {
         struct Body: Encodable {
             var engagementRoots: [String]?
             var codeRoots: [String]?
+            var includeGitHub: Bool?
         }
-        let body = try JSONEncoder.commandCenter.encode(Body(engagementRoots: nil, codeRoots: nil))
+        let body = try JSONEncoder.commandCenter.encode(Body(engagementRoots: nil, codeRoots: nil, includeGitHub: nil))
         let data = try await request(path: "/v1/portfolio/discover", method: "POST", body: body)
         return try JSONDecoder.commandCenter.decode(RemotePortfolioAssetListResponse.self, from: data)
     }
