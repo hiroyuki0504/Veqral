@@ -1,18 +1,45 @@
 # Hermes Memory Inheritance PR0
 
-- Source: `veqral-memtest-20260601-031522-57257ec1`
+- Source: `veqral-memtest-20260601-052940-5a8e6e14`
 - Hermes home: isolated temporary home (`hermes-home`)
-- Chat A: `custom/qwen2.5:7b`
-- Chat B: `openrouter/google/gemini-2.5-flash`
-- Chat A credential source: local Ollama placeholder (`OPENAI_API_KEY=ollama`)
-- Chat B credential source: missing env `OPENROUTER_API_KEY` / Keychain account `openrouter:api-key`
-- Code name: `Tachibana-7-87F08337`
+- Chat A: `openai-codex/gpt-5.5`
+- Chat B: `openai-codex/gpt-5.4`
+- Chat A credential source: Hermes ChatGPT subscription login (`auth.json`)
+- Chat B credential source: Hermes ChatGPT subscription login (`auth.json`)
+- Code name: `Tachibana-7-E7A3D834`
 
-## Credential / Provider Preflight
+## Backend Capability Check
 
-- Chat A points at local Ollama, but `http://127.0.0.1:11434/api/tags` is not reachable. Start Ollama and pull the configured model before rerunning.
-- Chat B uses `openrouter`, but `OPENROUTER_API_KEY` is not set and Keychain account `openrouter:api-key` is empty.
+- `openai-codex`: Hermes ChatGPT subscription login auth was available for this isolated run; selected route: `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4`.
+- `anthropic`: Hermes reports Claude/Anthropic login as unavailable on this Mac; use `claude /login` or `claude setup-token` before choosing this route.
+- Local Ollama custom endpoint: supported through `provider=custom` + `base_url`, but `127.0.0.1:11434` is not reachable right now.
+- Login auth bridge: `auth.json` linked from `~/.hermes` into isolated `HERMES_HOME`
+
+## Chat A Transcript
+
+```text
+⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+MEMWRITE:Tachibana-7-E7A3D834
+
+
+session_id: 20260601_142941_809abf
+```
+
+## Native Memory Check
+
+- `MEMORY.md` exists: yes
+- `MEMORY.md` contains code name: yes
+- `state.db` session store: state.db, sessions total=1, source matches=0
+
+## Chat B Transcript
+
+```text
+CODENAME:Tachibana-7-E7A3D834
+
+
+session_id: 20260601_142950_d9ab90
+```
 
 ## Result
 
-FAIL: Hermes memory inheritance was not run because at least one real provider/model route is not ready. 偽 pass は作っていません。
+PASS: Chat B returned the code name written by Chat A while using a different provider/model.

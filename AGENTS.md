@@ -42,7 +42,7 @@ Device(Mac)
 ## 現状（重要）
 
 - `main` = `18b29b4`（PR #2〜#8 統合済み: P0 パイプライン + 実行時修正）
-- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き ← #15 PR1 core fixes ← #16 PR-A screen inventory ← #17 PR1 surface consolidation ← #18 PR2 portfolio command center ← #19 backlog #0 Hermes memory smoke ← #20 backlog #3 WebSocket reconnect ← #21 backlog #4 Discord notifications ← #22 backlog #5 Memory visibility ← #23 backlog #6 Run usage ← #24 backlog #7 Approval context ← #25 backlog #8 Saved command drafts ← #26 backlog #9 Host telemetry ← #27 backlog #10 Voice input ← #28 backlog #12 Integration plan ← `codex/gates-hermes-device-acceptance` Gate1/Gate2 prep（main merge は未実行）
+- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き ← #15 PR1 core fixes ← #16 PR-A screen inventory ← #17 PR1 surface consolidation ← #18 PR2 portfolio command center ← #19 backlog #0 Hermes memory smoke ← #20 backlog #3 WebSocket reconnect ← #21 backlog #4 Discord notifications ← #22 backlog #5 Memory visibility ← #23 backlog #6 Run usage ← #24 backlog #7 Approval context ← #25 backlog #8 Saved command drafts ← #26 backlog #9 Host telemetry ← #27 backlog #10 Voice input ← #28 backlog #12 Integration plan ← #29 `codex/gates-hermes-device-acceptance` Gate1/Gate2（main merge は未実行）
 - #9: Device→エージェント選択、Codex/Claude 直接、Hermes Project→Chat→model、History「Continue」resume。（更新耐性 adapter を同ブランチに足す指示済み → 入っているかブランチで確認）
 - #10: ワンタップ承認(一覧から)、Chat/セッション名前付け+フィルタ、画像 diff 3 モード+hunk 添付、swipe、日本語/English/System 切替（`Localizable.strings` 体系。`.xcstrings` 移行は未）
 - #11: APNs push（device build は free team では Push capability 非対応で停止 → #12 で外した）
@@ -63,20 +63,18 @@ Device(Mac)
 - #26 (`codex/backlog-9-host-telemetry`): Backlog #9。Mac Host に authenticated `GET /v1/telemetry` を追加し、`/v1/health` に初回 telemetry を同梱。CPU/per-core/load、memory/pressure、disk、`ProcessInfo.thermalState`、uptime/OS/model、battery/AC、network throughput(best-effort)、上位 process を収集。Devices 画面の「ホスト状態」で表示中だけ 5 秒間隔更新。raw 温度/fan/SMART は取得不可なら `—`。`VeqralHost smoke-host-telemetry` 通過。
 - #27 (`codex/backlog-10-voice-input`): Backlog #10。Command composer に mic ボタンを追加し、iPhone/iPad で Speech + AVFoundation の日本語 dictation → ローカル filler/自己修正 cleanup → Host `POST /v1/voice/cleanup` の短い LLM cleanup → raw/cleaned 確認 → `submitDraft()` 送信。Mac Catalyst は sheet で非対応表示。Host cleanup は Hermes 優先、選択中 Codex/Claude fallback、失敗時は rule cleanup。raw audio 非保存。`VeqralHost smoke-voice-cleanup` 通過。
 - #28 (`codex/backlog-12-main-integration-plan`): Backlog #12。`MAIN_INTEGRATION_PLAN_PR12.md` に #9→#27 を clean main へ統合する手順、検証、findings、rollback を記録。`main` merge/force-push/deploy は未実行。ユーザー明示承認待ち。
-- `codex/gates-hermes-device-acceptance`: Gate1/Gate2 準備。`VeqralHostSmoke verify-memory-inheritance` に custom endpoint（Ollama 等）/ OpenRouter / Anthropic の env + Keychain 受け口と preflight を追加。preferred pair は `custom/qwen2.5:7b`（Ollama `http://127.0.0.1:11434/v1`）→ `openrouter/google/gemini-2.5-flash`。現環境では Ollama 未起動 + `OPENROUTER_API_KEY` 未設定で #0 はまだ FAIL。`DEVICE_ACCEPTANCE.md` に iPhone/iPad の voice / telemetry / saved command / Discord webhook / Memory visibility 手順を追加し、Discord テスト通知ボタン、telemetry 失敗理由、Memory 最終取得時刻を追加。
+- #29 (`codex/gates-hermes-device-acceptance`): Gate1/Gate2。`VeqralHostSmoke verify-memory-inheritance` を月額ログイン優先へ更新し、隔離 `HERMES_HOME` に `~/.hermes/auth.json` を symlink して `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4` で実走 PASS。Chat A が `Tachibana-7-E7A3D834` を Hermes native `MEMORY.md` に書き、Chat B が `CODENAME:Tachibana-7-E7A3D834` を返した。Claude/Anthropic は Hermes からは未ログイン扱い、Ollama は未起動。`DEVICE_ACCEPTANCE.md` に iPhone/iPad の voice / telemetry / saved command / Discord webhook / Memory visibility 手順を追加し、Discord テスト通知ボタン、telemetry 失敗理由、Memory 最終取得時刻を追加。
 
 ## 未完了・次の手番
 
-1. Gate1（最優先）: Hermes 記憶継承 #0 を real 2 model で pass させる。
-   - 第一候補: Ollama を起動して `qwen2.5:7b`（または実際に pull 済みの qwen 系）を用意し、OpenRouter key を env `OPENROUTER_API_KEY` または Keychain service `dev.hiroyuki.veqral.host` account `openrouter:api-key` に入れる。
-   - 実行: `VEQRAL_MEMTEST_PROVIDER_A=custom VEQRAL_MEMTEST_MODEL_A=qwen2.5:7b VEQRAL_MEMTEST_BASE_URL_A=http://127.0.0.1:11434/v1 VEQRAL_MEMTEST_PROVIDER_B=openrouter VEQRAL_MEMTEST_MODEL_B=google/gemini-2.5-flash swift run --package-path MacHost VeqralHostSmoke verify-memory-inheritance --report HERMES_MEMORY_INHERITANCE_PR0.md`
-   - pass するまで main merge しない。merit fail の場合は Hermes native memory/source 注入だけ直し、自作 memory は足さない。
-2. Gate2: `DEVICE_ACCEPTANCE.md` に沿って iPhone/iPad 実機タップ確認。
+1. Gate1: #0 Hermes 記憶継承は `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4` の real 2 model で PASS 済み。`HERMES_MEMORY_INHERITANCE_PR0.md` に実トランスクリプトあり。自作 memory は足していない。
+   - より強いクロスベンダー証明は、Hermes から Claude/Anthropic login が使える状態になった後で再実行する。
+2. Gate2（最優先）: `DEVICE_ACCEPTANCE.md` に沿って iPhone/iPad 実機タップ確認。
    - 対象: voice input / host telemetry / saved command / Discord 実 webhook / Hermes memory visibility。
    - ユーザーが落ちた項目を報告したら、その項目だけ Draft PR で修正。
 3. 実機検証（継続）
    - QR ペアリング（ユーザー報告ではカメラ認識→connected 済み。#18 端末配布後に念のため再確認）
-   - Hermes の記憶継承。同 Project で Chat①(モデル A)に記憶→Chat②(モデル B)が継承（Gate1 が green になるまで未証明）
+   - Hermes memory visibility。同 Project で Chat①(モデル A)に記憶→Chat②(モデル B)が継承され、Memory 画面で同じ事実が見えること（Gate1 smoke は PASS 済み）
    - 使いやすさ機能（承認ボタンは Approvals/Run detail/phone run row で見えること、Devices に自分自身が出ないこと）
    - 司令塔 E2E: discover → Asset 編集（health/controls/案件）→ control が承認待ちに積まれる → 承認後 Run ログで結果確認 → log-summary → local-only promote
    - #20 WebSocket reconnect: 長い remote run 中にネットワークを一瞬切り、strip が再接続表示になってログが復帰すること（実機 manual smoke 未実施）
@@ -88,7 +86,7 @@ Device(Mac)
    - #26 Host telemetry: Devices→ホスト状態で CPU/メモリ/ディスク/熱状態/稼働時間/バッテリー/ネットワークが表示され、画面表示中に約 5 秒間隔で更新されること。raw 温度/fan は `—` でよい。
    - #27 Voice input: iPhone/iPad で mic→権限許可→日本語発話→Stop→raw/cleaned 表示→編集→送信。Host に cleanup LLM credentials が無い場合は rule cleanup fallback 表示でよい。高リスク語は送信後に既存承認 Gate に乗ること。
    - UI 受け入れ確認: 日本語のみ、赤い 0 バッジなし、未ペアリング strip が細い、UUID/コンテナパスが主表示に出ない、Unavailable/Offline が緑でない
-4. スタック統合：Gate1 pass + Gate2 green 後、#28 の計画どおり #9→最新を main にまとめて取り込む。`main` への merge はユーザーの明示承認待ち。
+4. スタック統合：Gate2 green 後、#28 の計画どおり #9→最新を main にまとめて取り込む。`main` への merge はユーザーの明示承認待ち。
 5. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
 6. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
 7. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
