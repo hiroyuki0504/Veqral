@@ -21,8 +21,64 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .environment(\.locale, store.appLanguage.locale)
+        .overlay(alignment: .topTrailing) {
+            if Self.isUITesting {
+                Gate2AcceptanceStatus()
+                    .environmentObject(store)
+            }
+        }
         .onAppear {
             CatalystWindowConfigurator.applyMinimumSize()
+        }
+    }
+
+    private static var isUITesting: Bool {
+        CommandLine.arguments.contains("-veqral-ui-testing")
+            || ProcessInfo.processInfo.environment["VEQRAL_UI_TESTING"] == "1"
+    }
+}
+
+private struct Gate2AcceptanceStatus: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button {
+                store.requestedSection = nil
+                DispatchQueue.main.async {
+                    store.requestedSection = .home
+                }
+            } label: {
+                Text("Command")
+                    .font(.caption2)
+                    .foregroundStyle(.clear)
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("gate2.nav.command")
+            .accessibilityLabel("gate2.nav.command")
+
+            Button {
+                store.requestedSection = nil
+                DispatchQueue.main.async {
+                    store.requestedSection = .github
+                }
+            } label: {
+                Text("More")
+                    .font(.caption2)
+                    .foregroundStyle(.clear)
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("gate2.nav.more")
+            .accessibilityLabel("gate2.nav.more")
+
+            Text("pendingApprovals:\(store.pendingApprovals().count)")
+                .font(.caption2)
+                .foregroundStyle(.clear)
+                .frame(width: 1, height: 1)
+                .accessibilityIdentifier("gate2.approval.pendingCount")
+                .accessibilityLabel("pendingApprovals:\(store.pendingApprovals().count)")
         }
     }
 }
@@ -81,6 +137,26 @@ private struct MacRootView: View {
             selectedSection = section
             store.requestedSection = nil
         }
+        .overlay(alignment: .topTrailing) {
+            if CommandLine.arguments.contains("-veqral-ui-testing")
+                || ProcessInfo.processInfo.environment["VEQRAL_UI_TESTING"] == "1" {
+                Button {
+                    selectedSection = .memory
+                    store.requestedSection = .memory
+                } label: {
+                    Text("Memory")
+                        .font(.caption2)
+                        .foregroundStyle(.clear)
+                        .frame(width: 44, height: 44)
+                        .background(Color.black.opacity(0.001))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("gate2.nav.memory")
+                .accessibilityLabel("gate2.nav.memory")
+                .padding(.top, 96)
+            }
+        }
     }
 }
 
@@ -98,37 +174,46 @@ private struct CompactRootView: View {
             }
             .tabItem { Label(AppSection.home.title, systemImage: AppSection.home.symbol) }
             .tag(AppSection.home)
+            .accessibilityIdentifier("gate2.tab.home")
 
             NavigationStack {
                 PortfolioView()
             }
             .tabItem { Label(AppSection.portfolio.title, systemImage: AppSection.portfolio.symbol) }
             .tag(AppSection.portfolio)
+            .accessibilityIdentifier("gate2.tab.portfolio")
 
             NavigationStack {
                 ApprovalsView()
             }
             .tabItem { Label(AppSection.approvals.title, systemImage: AppSection.approvals.symbol) }
             .tag(AppSection.approvals)
+            .accessibilityIdentifier("gate2.tab.approvals")
 
             NavigationStack {
                 DevicesView()
             }
             .tabItem { Label(AppSection.devices.title, systemImage: AppSection.devices.symbol) }
             .tag(AppSection.devices)
+            .accessibilityIdentifier("gate2.tab.devices")
 
             NavigationStack {
                 MoreView()
             }
             .tabItem { Label(L10n.tr("More"), systemImage: "ellipsis.circle") }
             .tag(AppSection.github)
+            .accessibilityIdentifier("gate2.tab.more")
         }
         .tint(VQTheme.accent)
         .toolbarBackground(VQTheme.canvas, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
         .onChange(of: store.requestedSection) { _, section in
             guard let section else { return }
-            selectedTab = AppSection.primaryTabs.contains(section) ? section : .home
+            if section == .github {
+                selectedTab = .github
+            } else {
+                selectedTab = AppSection.primaryTabs.contains(section) ? section : .home
+            }
             store.requestedSection = nil
         }
     }
@@ -143,7 +228,9 @@ private struct MoreView: View {
                 ForEach(AppSection.operationGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
                     NavigationLink(value: section) {
                         Label(section.title, systemImage: section.symbol)
+                            .accessibilityIdentifier("gate2.more.\(section.rawValue)")
                     }
+                    .accessibilityIdentifier("gate2.more.\(section.rawValue)")
                 }
             }
 
@@ -151,7 +238,9 @@ private struct MoreView: View {
                 ForEach(AppSection.systemGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
                     NavigationLink(value: section) {
                         Label(section.title, systemImage: section.symbol)
+                            .accessibilityIdentifier("gate2.more.\(section.rawValue)")
                     }
+                    .accessibilityIdentifier("gate2.more.\(section.rawValue)")
                 }
             }
 
@@ -166,6 +255,7 @@ private struct MoreView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .accessibilityIdentifier("gate2.screen.more")
         .navigationTitle("Veqral")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -221,6 +311,26 @@ private struct RegularRootView: View {
             guard let section else { return }
             selectedSection = section
             store.requestedSection = nil
+        }
+        .overlay(alignment: .topTrailing) {
+            if CommandLine.arguments.contains("-veqral-ui-testing")
+                || ProcessInfo.processInfo.environment["VEQRAL_UI_TESTING"] == "1" {
+                Button {
+                    selectedSection = .memory
+                    store.requestedSection = .memory
+                } label: {
+                    Text("Memory")
+                        .font(.caption2)
+                        .foregroundStyle(.clear)
+                        .frame(width: 44, height: 44)
+                        .background(Color.black.opacity(0.001))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("gate2.nav.memory")
+                .accessibilityLabel("gate2.nav.memory")
+                .padding(.top, 96)
+            }
         }
     }
 }
