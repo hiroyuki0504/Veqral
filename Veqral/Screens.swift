@@ -2644,6 +2644,13 @@ struct MemoryView: View {
 
     var body: some View {
         ScreenScaffold(title: "Memory", systemImage: "brain.head.profile") {
+            Text("Memory")
+                .font(.caption2)
+                .foregroundStyle(.clear)
+                .frame(width: 1, height: 1)
+                .accessibilityIdentifier("gate2.screen.memory")
+                .accessibilityLabel("gate2.screen.memory")
+
             VQPanel("Hermes プロジェクト記憶", systemImage: "sparkles.rectangle.stack") {
                 ProjectMemoryReadOnlyView()
             }
@@ -2720,7 +2727,6 @@ struct MemoryView: View {
                 store.refreshRemoteProjectMemory()
             }
         }
-        .accessibilityIdentifier("gate2.screen.memory")
     }
 }
 

@@ -190,7 +190,6 @@ struct CommandCenterRunView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     HostConnectionStrip()
-                    CommandSubmitPanel()
 
                     if let run = store.selectedRun {
                         RunHeader(run: run)
@@ -219,6 +218,18 @@ struct CommandCenterRunView: View {
             }
 
             RunStatusBar(run: store.selectedRun)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            CommandSubmitPanel()
+                .padding(.horizontal, 18)
+                .padding(.top, 10)
+                .padding(.bottom, 10)
+                .background(.ultraThinMaterial)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(VQTheme.hairline)
+                        .frame(height: 1)
+                }
         }
         .background {
             ZStack {
@@ -392,6 +403,308 @@ struct CommandCenterPhoneDashboard: View {
                 .ignoresSafeArea()
             }
         }
+    }
+}
+
+struct CommandCenterMobileChatView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let openDrawer: () -> Void
+    let openSection: (AppSection) -> Void
+
+    private var visibleRuns: [CommandRun] {
+        Array(store.visibleRuns().prefix(12))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            mobileTopBar
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    HostConnectionStrip()
+
+                    if visibleRuns.isEmpty {
+                        MobileWelcomePanel(openSection: openSection)
+                    } else {
+                        ForEach(visibleRuns) { run in
+                            PhoneRunRow(run: run)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    store.selectRun(run.id)
+                                }
+                                .commandPanel()
+                        }
+                    }
+
+                    if let run = store.selectedRun {
+                        MobileRunDetail(run: run, openSection: openSection)
+                    }
+
+                    MobileQuickAccess(openSection: openSection)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 18)
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            PhoneComposer(showsRuntimePicker: false, prominentVoice: true)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+                .background(.ultraThinMaterial)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(VQTheme.hairline)
+                        .frame(height: 1)
+                }
+        }
+        .background(VQTheme.canvas.ignoresSafeArea())
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private var mobileTopBar: some View {
+        HStack(spacing: 10) {
+            Button(action: openDrawer) {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(.plain)
+            .background(VQTheme.control.opacity(0.72))
+            .clipShape(Circle())
+            .accessibilityLabel(L10n.tr("Open navigation"))
+            .accessibilityIdentifier("gate2.mobile.menu")
+
+            Menu {
+                ForEach(CommandRuntime.allCases) { runtime in
+                    Button {
+                        store.selectRuntime(runtime)
+                    } label: {
+                        Label(runtime.title, systemImage: runtime.symbol)
+                    }
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: store.selectedRuntime.symbol)
+                    Text(store.selectedRuntime.shortTitle)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.bold))
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+                .padding(.horizontal, 12)
+                .frame(height: 38)
+                .background(VQTheme.control.opacity(0.72))
+                .clipShape(Capsule())
+            }
+            .accessibilityLabel(L10n.tr("Select agent"))
+
+            Spacer()
+
+            Button {
+                store.commandDraft = ""
+                store.selectedRunID = nil
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(.plain)
+            .background(VQTheme.control.opacity(0.72))
+            .clipShape(Circle())
+            .accessibilityLabel(L10n.tr("New command"))
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .background(VQTheme.canvas.opacity(0.94))
+    }
+}
+
+private struct MobileWelcomePanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L10n.tr("What should the agents do?"))
+                    .font(.system(size: 27, weight: .semibold))
+                    .foregroundStyle(VQTheme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(L10n.tr("Choose Hermes, Codex, Claude, or Shell above, then send a command from the bottom composer."))
+                    .font(.subheadline)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                MobileActionTile(symbol: "clock.arrow.circlepath", title: L10n.tr("Resume History"), tint: VQTheme.accent) {
+                    openSection(.history)
+                }
+                MobileActionTile(symbol: "brain.head.profile", title: L10n.tr("Project Memory"), tint: VQTheme.green) {
+                    openSection(.memory)
+                }
+                MobileActionTile(symbol: "hand.raised", title: L10n.tr("Approvals"), tint: store.pendingApprovals().isEmpty ? VQTheme.secondaryText : VQTheme.red) {
+                    openSection(.approvals)
+                }
+                MobileActionTile(symbol: "rectangle.3.group", title: L10n.tr("Portfolio"), tint: VQTheme.amber) {
+                    openSection(.portfolio)
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct MobileRunDetail: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let run: CommandRun
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(run.title)
+                        .font(.headline)
+                        .foregroundStyle(VQTheme.ink)
+                        .lineLimit(2)
+                    HStack(spacing: 7) {
+                        StatusPill(title: run.status.title, tint: run.status.tint)
+                        Text(run.runtimeOrDefault.shortTitle)
+                        Text(run.elapsedLabel)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                }
+                Spacer()
+                Button {
+                    openSection(.runs)
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .background(VQTheme.control.opacity(0.72))
+                .clipShape(Circle())
+                .accessibilityLabel(L10n.tr("Open run details"))
+            }
+
+            if let usage = run.usage, usage.hasDisplayValues {
+                RunUsageSummary(usage: usage)
+            }
+
+            if let approval = store.pendingApproval(for: run.id) {
+                RunApprovalCallout(approval: approval, compact: true)
+            }
+
+            let recentLogs = Array(store.logEntries(for: run.id).suffix(5))
+            if recentLogs.isEmpty {
+                PhoneEmptyState(symbol: "text.alignleft", text: L10n.tr("Run logs appear here."))
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(recentLogs) { entry in
+                        Text(entry.message)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(entry.stream == "error" ? VQTheme.red : VQTheme.secondaryText)
+                            .lineLimit(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(10)
+                .background(VQTheme.control.opacity(0.34))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+        .padding(14)
+        .commandPanel()
+    }
+}
+
+private struct MobileQuickAccess: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(L10n.tr("Quick access"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.secondaryText)
+                Spacer()
+                if store.remoteHost.isPaired {
+                    StatusPill(title: L10n.tr("Connected"), tint: VQTheme.green)
+                }
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    MobileQuickButton(section: .devices, title: L10n.tr("Devices"), openSection: openSection)
+                    MobileQuickButton(section: .projects, title: L10n.tr("Projects"), openSection: openSection)
+                    MobileQuickButton(section: .diff, title: L10n.tr("Diff"), openSection: openSection)
+                    MobileQuickButton(section: .artifacts, title: L10n.tr("Artifacts"), openSection: openSection)
+                    MobileQuickButton(section: .github, title: "GitHub", openSection: openSection)
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(.bottom, 4)
+    }
+}
+
+private struct MobileQuickButton: View {
+    let section: AppSection
+    let title: String
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        Button {
+            openSection(section)
+        } label: {
+            Label(title, systemImage: section.symbol)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .background(VQTheme.control.opacity(0.62))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct MobileActionTile: View {
+    let symbol: String
+    let title: String
+    let tint: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(tint)
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(12)
+            .frame(minHeight: 92, alignment: .topLeading)
+            .background(VQTheme.control.opacity(0.50))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(VQTheme.hairline, lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1636,16 +1949,21 @@ private struct PhoneRunRow: View {
 
 private struct PhoneComposer: View {
     @EnvironmentObject private var store: CommandCenterStore
+    var showsRuntimePicker = true
+    var prominentVoice = false
     @State private var isVoiceInputPresented = false
 
     var body: some View {
         VStack(spacing: 8) {
-            RuntimeSegmentedControl()
+            if showsRuntimePicker {
+                RuntimeSegmentedControl()
+            }
 
             HStack(spacing: 8) {
-                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft)
-                    .font(.caption)
+                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft, axis: .vertical)
+                    .font(prominentVoice ? .subheadline : .caption)
                     .textFieldStyle(.plain)
+                    .lineLimit(1...4)
                     .onSubmit {
                         store.submitDraft()
                     }
@@ -1668,21 +1986,21 @@ private struct PhoneComposer: View {
                     isVoiceInputPresented = true
                 } label: {
                     Image(systemName: "mic")
-                        .font(.caption.weight(.bold))
-                        .frame(width: 28, height: 28)
-                        .foregroundStyle(VQTheme.ink)
-                        .background(VQTheme.control)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .font(.system(size: prominentVoice ? 17 : 12, weight: .bold))
+                        .frame(width: prominentVoice ? 38 : 28, height: prominentVoice ? 38 : 28)
+                        .foregroundStyle(prominentVoice ? .black : VQTheme.ink)
+                        .background(prominentVoice ? VQTheme.accent : VQTheme.control)
+                        .clipShape(RoundedRectangle(cornerRadius: prominentVoice ? 12 : 7, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("gate2.voice.open")
                 Button(action: store.submitDraft) {
                     Image(systemName: "arrow.up")
-                        .font(.caption.weight(.bold))
-                        .frame(width: 28, height: 28)
+                        .font(.system(size: prominentVoice ? 17 : 12, weight: .bold))
+                        .frame(width: prominentVoice ? 38 : 28, height: prominentVoice ? 38 : 28)
                         .foregroundStyle(.white)
-                        .background(VQTheme.secondaryText)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .background(store.commandDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? VQTheme.secondaryText : VQTheme.accent)
+                        .clipShape(RoundedRectangle(cornerRadius: prominentVoice ? 12 : 7, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("gate2.command.submit")
@@ -1692,18 +2010,22 @@ private struct PhoneComposer: View {
             .background(VQTheme.control.opacity(0.7))
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            HStack {
-                CommandChip(title: L10n.tr("Implementation"), symbol: "chevron.left.forwardslash.chevron.right", command: "Implement the current approved requirements.")
-                CommandChip(title: L10n.tr("Testing"), symbol: "flask", command: "Run the relevant tests and fix failures if they are in scope.")
-                CommandChip(title: "", symbol: "ellipsis", command: "Show available next actions for this project.")
-                Spacer()
+            if showsRuntimePicker {
+                HStack {
+                    CommandChip(title: L10n.tr("Implementation"), symbol: "chevron.left.forwardslash.chevron.right", command: "Implement the current approved requirements.")
+                    CommandChip(title: L10n.tr("Testing"), symbol: "flask", command: "Run the relevant tests and fix failures if they are in scope.")
+                    CommandChip(title: "", symbol: "ellipsis", command: "Show available next actions for this project.")
+                    Spacer()
+                }
             }
 
             SavedCommandDraftBar(compact: true)
             CommandAttachmentControls()
-            CommandRequirementMemo()
+            if showsRuntimePicker {
+                CommandRequirementMemo()
+            }
         }
-        .padding(8)
+        .padding(prominentVoice ? 10 : 8)
         .commandPanel()
         .sheet(isPresented: $isVoiceInputPresented) {
             VoiceCommandSheet()
@@ -1999,14 +2321,26 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     private let audioEngine = AVAudioEngine()
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var activeRecognitionID = UUID()
+    private var hasInputTap = false
+    private var hasActiveAudioSession = false
+    private var interruptionObserver: NSObjectProtocol?
     #endif
 
     func startListening() {
+        guard phase != .listening && phase != .cleaning else { return }
         rawText = ""
         ruleBasedText = ""
         cleanedText = ""
         cleanupNote = ""
         statusMessage = L10n.tr("Requesting microphone and speech recognition permission.")
+
+        let forcedError = ProcessInfo.processInfo.environment["VEQRAL_UI_TEST_VOICE_FORCE_ERROR"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let forcedError, !forcedError.isEmpty {
+            fail(Self.forcedVoiceErrorMessage(forcedError))
+            return
+        }
 
         let injectedTranscript = ProcessInfo.processInfo.environment["VEQRAL_UI_TEST_VOICE_TRANSCRIPT"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2018,19 +2352,28 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         }
 
         #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-        guard speechRecognizer?.isAvailable == true else {
+        guard let speechRecognizer, speechRecognizer.isAvailable else {
             fail(L10n.tr("Speech recognition is unavailable."))
             return
         }
-        SFSpeechRecognizer.requestAuthorization { [weak self] status in
+        requestSpeechAuthorization { [weak self] status in
             Task { @MainActor in
                 guard let self else { return }
                 switch status {
                 case .authorized:
-                    do {
-                        try self.startAudioRecognition()
-                    } catch {
-                        self.fail(error.localizedDescription)
+                    self.requestMicrophonePermission { [weak self] granted in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            guard granted else {
+                                self.fail(L10n.tr("Microphone permission was denied."))
+                                return
+                            }
+                            do {
+                                try self.startAudioRecognition()
+                            } catch {
+                                self.fail(error.localizedDescription)
+                            }
+                        }
                     }
                 case .denied:
                     self.fail(L10n.tr("Speech recognition permission was denied."))
@@ -2049,11 +2392,9 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     }
 
     func stopListening() {
+        guard phase == .listening else { return }
         #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
-        recognitionRequest?.endAudio()
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        stopAudioCapture(cancelTask: false)
         #endif
         ruleBasedText = VoiceCommandRuleCleaner.clean(rawText)
         cleanedText = ruleBasedText
@@ -2079,15 +2420,7 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
 
     func cancel() {
         #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-        if audioEngine.isRunning {
-            audioEngine.stop()
-            audioEngine.inputNode.removeTap(onBus: 0)
-        }
-        recognitionRequest?.endAudio()
-        recognitionTask?.cancel()
-        recognitionTask = nil
-        recognitionRequest = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        stopAudioCapture(cancelTask: true)
         #endif
     }
 
@@ -2098,11 +2431,41 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     }
 
     #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+    private func requestSpeechAuthorization(_ completion: @escaping (SFSpeechRecognizerAuthorizationStatus) -> Void) {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized, .denied, .restricted:
+            completion(SFSpeechRecognizer.authorizationStatus())
+        case .notDetermined:
+            SFSpeechRecognizer.requestAuthorization(completion)
+        @unknown default:
+            completion(.denied)
+        }
+    }
+
+    private func requestMicrophonePermission(_ completion: @escaping @Sendable (Bool) -> Void) {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            completion(true)
+        case .denied, .restricted:
+            completion(false)
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio, completionHandler: completion)
+        @unknown default:
+            completion(false)
+        }
+    }
+
     private func startAudioRecognition() throws {
-        cancel()
+        stopAudioCapture(cancelTask: true)
+        guard let speechRecognizer, speechRecognizer.isAvailable else {
+            throw VoiceCommandCaptureError.speechUnavailable
+        }
+
         let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
-        try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+        try audioSession.setCategory(.record, mode: .measurement, options: [.duckOthers])
+        try audioSession.setActive(true)
+        hasActiveAudioSession = true
+        installInterruptionObserver()
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -2110,29 +2473,116 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw VoiceCommandCaptureError.invalidInputFormat
+        }
+        if hasInputTap {
+            inputNode.removeTap(onBus: 0)
+            hasInputTap = false
+        }
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
             request.append(buffer)
         }
+        hasInputTap = true
 
         audioEngine.prepare()
         try audioEngine.start()
         phase = .listening
         statusMessage = L10n.tr("Listening. Speak your command in Japanese.")
 
-        recognitionTask = speechRecognizer?.recognitionTask(with: request) { [weak self] result, error in
+        let recognitionID = UUID()
+        activeRecognitionID = recognitionID
+        recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
             Task { @MainActor in
                 guard let self else { return }
+                guard self.activeRecognitionID == recognitionID else { return }
                 if let result {
                     self.rawText = result.bestTranscription.formattedString
                 }
-                if let error {
+                if let error, self.phase == .listening {
                     self.fail(error.localizedDescription)
                 }
             }
         }
     }
+
+    private func stopAudioCapture(cancelTask: Bool) {
+        activeRecognitionID = UUID()
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        if hasInputTap {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            hasInputTap = false
+        }
+        recognitionRequest?.endAudio()
+        if cancelTask {
+            recognitionTask?.cancel()
+        } else {
+            recognitionTask?.finish()
+        }
+        recognitionTask = nil
+        recognitionRequest = nil
+        if hasActiveAudioSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            hasActiveAudioSession = false
+        }
+        if let interruptionObserver {
+            NotificationCenter.default.removeObserver(interruptionObserver)
+            self.interruptionObserver = nil
+        }
+    }
+
+    private func installInterruptionObserver() {
+        if let interruptionObserver {
+            NotificationCenter.default.removeObserver(interruptionObserver)
+        }
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            Task { @MainActor in
+                guard let self, self.phase == .listening else { return }
+                let type = rawType.flatMap(AVAudioSession.InterruptionType.init(rawValue:))
+                if type == .began {
+                    self.fail(L10n.tr("Recording was interrupted."))
+                }
+            }
+        }
+    }
     #endif
+
+    private static func forcedVoiceErrorMessage(_ value: String) -> String {
+        switch value {
+        case "speechDenied":
+            L10n.tr("Speech recognition permission was denied.")
+        case "microphoneDenied":
+            L10n.tr("Microphone permission was denied.")
+        case "unavailable":
+            L10n.tr("Speech recognition is unavailable.")
+        default:
+            L10n.tr("Voice input is unavailable.")
+        }
+    }
 }
+
+#if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+private enum VoiceCommandCaptureError: LocalizedError {
+    case speechUnavailable
+    case invalidInputFormat
+
+    var errorDescription: String? {
+        switch self {
+        case .speechUnavailable:
+            L10n.tr("Speech recognition is unavailable.")
+        case .invalidInputFormat:
+            L10n.tr("Microphone input is unavailable.")
+        }
+    }
+}
+#endif
 
 private enum VoiceCommandRuleCleaner {
     static func clean(_ rawText: String) -> String {
