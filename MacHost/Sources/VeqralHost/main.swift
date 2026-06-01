@@ -21,6 +21,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-project-memory" {
             ProjectMemorySmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-run-usage" {
+            RunUsageSmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -221,9 +224,75 @@ struct HostRun: Codable, Sendable, Identifiable {
     var provider: String?
     var model: String?
     var approvalSeverity: ApprovalSeverity? = nil
+    var usage: RunUsage? = nil
 
     var engineOrDefault: AgentEngine {
         engine ?? .hermes
+    }
+}
+
+struct RunUsage: Codable, Sendable, Equatable {
+    var inputTokens: Int? = nil
+    var outputTokens: Int? = nil
+    var cacheReadTokens: Int? = nil
+    var cacheWriteTokens: Int? = nil
+    var reasoningTokens: Int? = nil
+    var totalTokens: Int? = nil
+    var estimatedCostUSD: Double? = nil
+    var actualCostUSD: Double? = nil
+    var source: String? = nil
+    var model: String? = nil
+
+    var hasValues: Bool {
+        inputTokens != nil
+            || outputTokens != nil
+            || cacheReadTokens != nil
+            || cacheWriteTokens != nil
+            || reasoningTokens != nil
+            || totalTokens != nil
+            || estimatedCostUSD != nil
+            || actualCostUSD != nil
+    }
+
+    var normalized: RunUsage? {
+        var usage = self
+        if usage.totalTokens == nil {
+            let total = [usage.inputTokens, usage.outputTokens, usage.reasoningTokens]
+                .compactMap { $0 }
+                .reduce(0, +)
+            if total > 0 {
+                usage.totalTokens = total
+            }
+        }
+        return usage.hasValues ? usage : nil
+    }
+
+    func merged(with other: RunUsage) -> RunUsage {
+        var merged = self
+        merged.inputTokens = Self.maxValue(inputTokens, other.inputTokens)
+        merged.outputTokens = Self.maxValue(outputTokens, other.outputTokens)
+        merged.cacheReadTokens = Self.maxValue(cacheReadTokens, other.cacheReadTokens)
+        merged.cacheWriteTokens = Self.maxValue(cacheWriteTokens, other.cacheWriteTokens)
+        merged.reasoningTokens = Self.maxValue(reasoningTokens, other.reasoningTokens)
+        merged.totalTokens = Self.maxValue(totalTokens, other.totalTokens)
+        merged.estimatedCostUSD = Self.maxValue(estimatedCostUSD, other.estimatedCostUSD)
+        merged.actualCostUSD = Self.maxValue(actualCostUSD, other.actualCostUSD)
+        merged.source = other.source?.nilIfBlank ?? source
+        merged.model = other.model?.nilIfBlank ?? model
+        return merged.normalized ?? merged
+    }
+
+    private static func maxValue<T: Comparable>(_ lhs: T?, _ rhs: T?) -> T? {
+        switch (lhs, rhs) {
+        case let (.some(lhs), .some(rhs)):
+            max(lhs, rhs)
+        case let (.some(lhs), .none):
+            lhs
+        case let (.none, .some(rhs)):
+            rhs
+        case (.none, .none):
+            nil
+        }
     }
 }
 
@@ -531,6 +600,60 @@ enum ProjectMemorySmoke {
     }
 }
 
+enum RunUsageSmoke {
+    static func runAndExit() -> Never {
+        do {
+            let claude = try requireUsage(
+                from: #"{"type":"result","usage":{"input_tokens":1234,"output_tokens":234,"cache_read_input_tokens":12,"cache_creation_input_tokens":6},"model":"claude-haiku-4.5"}"#,
+                label: "Claude stream JSON"
+            )
+            guard claude.inputTokens == 1_234,
+                  claude.outputTokens == 234,
+                  claude.cacheReadTokens == 12,
+                  claude.cacheWriteTokens == 6,
+                  claude.model == "claude-haiku-4.5" else {
+                throw SmokeError("Claude usage JSON を正しく読めませんでした。")
+            }
+
+            let codex = try requireUsage(
+                from: #"{"usage":{"prompt_tokens":2000,"completion_tokens":300,"reasoning_tokens":50,"total_tokens":2350,"estimated_cost_usd":0.0123},"model":"gpt-5-codex"}"#,
+                label: "Codex usage JSON"
+            )
+            guard codex.inputTokens == 2_000,
+                  codex.outputTokens == 300,
+                  codex.reasoningTokens == 50,
+                  codex.totalTokens == 2_350,
+                  abs((codex.estimatedCostUSD ?? 0) - 0.0123) < 0.000001 else {
+                throw SmokeError("Codex usage JSON を正しく読めませんでした。")
+            }
+
+            let text = try requireUsage(
+                from: "usage: input tokens 100, output tokens 25, total tokens 125, cost $0.0042",
+                label: "usage text"
+            )
+            guard text.inputTokens == 100,
+                  text.outputTokens == 25,
+                  text.totalTokens == 125,
+                  abs((text.estimatedCostUSD ?? 0) - 0.0042) < 0.000001 else {
+                throw SmokeError("usage テキストを正しく読めませんでした。")
+            }
+
+            print("PASS: Run usage smoke parsed Claude, Codex, and text usage samples.")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Run usage smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+
+    private static func requireUsage(from text: String, label: String) throws -> RunUsage {
+        guard let usage = RunUsageParser.parse(text) else {
+            throw SmokeError("\(label) から usage を抽出できませんでした。")
+        }
+        return usage
+    }
+}
+
 struct HostLogEvent: Codable, Sendable {
     enum Kind: String, Codable, Sendable {
         case log
@@ -789,17 +912,40 @@ actor HostState {
 
     func appendLog(runID: String, stream: String, message: String) {
         let redacted = Redactor.redact(message)
-        if let sessionID = SessionParser.sessionID(from: redacted), var run = runs[runID] {
-            run.sessionID = sessionID
-            runs[runID] = run
-            persistRuns()
+        if var run = runs[runID] {
+            var didUpdate = false
+            if let sessionID = SessionParser.sessionID(from: redacted), run.sessionID != sessionID {
+                run.sessionID = sessionID
+                didUpdate = true
+            }
+            if let usage = RunUsageParser.parse(redacted) {
+                applyUsage(usage, to: &run)
+                didUpdate = true
+            }
+            if didUpdate {
+                runs[runID] = run
+                persistRuns()
+            }
         }
         publish(HostLogEvent(runID: runID, kind: .log, stream: stream, message: redacted, createdAt: Date(), sessionID: runs[runID]?.sessionID))
+    }
+
+    private func applyUsage(_ usage: RunUsage, to run: inout HostRun) {
+        run.usage = run.usage.map { $0.merged(with: usage) } ?? usage
+    }
+
+    private func refreshHermesUsageIfAvailable(for run: inout HostRun) {
+        guard let sessionID = run.sessionID?.nilIfBlank else { return }
+        guard let usage = HermesUsageStore().usage(sessionID: sessionID) else { return }
+        applyUsage(usage, to: &run)
     }
 
     func finish(runID: String, exitCode: Int32) {
         guard var run = runs[runID] else { return }
         guard run.status != .cancelled else { return }
+        if run.engineOrDefault == .hermes {
+            refreshHermesUsageIfAvailable(for: &run)
+        }
         run.status = exitCode == 0 ? .complete : .failed
         run.exitCode = exitCode
         run.completedAt = Date()
@@ -4213,6 +4359,88 @@ struct HermesMemoryStore {
     }
 }
 
+struct HermesUsageStore {
+    private let stateDBURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".hermes/state.db")
+
+    func usage(sessionID: String) -> RunUsage? {
+        let cleanSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanSessionID.isEmpty,
+              FileManager.default.fileExists(atPath: stateDBURL.path) else {
+            return nil
+        }
+        let columns = sessionColumns()
+        let query = """
+        SELECT
+          \(selectColumn("model", alias: "model", columns: columns)),
+          \(selectColumn("input_tokens", alias: "inputTokens", columns: columns)),
+          \(selectColumn("output_tokens", alias: "outputTokens", columns: columns)),
+          \(selectColumn("cache_read_tokens", alias: "cacheReadTokens", columns: columns)),
+          \(selectColumn("cache_write_tokens", alias: "cacheWriteTokens", columns: columns)),
+          \(selectColumn("reasoning_tokens", alias: "reasoningTokens", columns: columns)),
+          \(selectColumn("estimated_cost_usd", alias: "estimatedCostUSD", columns: columns)),
+          \(selectColumn("actual_cost_usd", alias: "actualCostUSD", columns: columns))
+        FROM sessions
+        WHERE id = \(Self.sqliteLiteral(cleanSessionID))
+        LIMIT 1;
+        """
+        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", "-json", stateDBURL.path, query], timeout: 10)
+        guard output.exitCode == 0,
+              let json = output.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+              let data = json.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([SQLiteHermesUsageRow].self, from: data),
+              let row = rows.first else {
+            return nil
+        }
+        let usage = RunUsage(
+            inputTokens: row.inputTokens,
+            outputTokens: row.outputTokens,
+            cacheReadTokens: row.cacheReadTokens,
+            cacheWriteTokens: row.cacheWriteTokens,
+            reasoningTokens: row.reasoningTokens,
+            totalTokens: nil,
+            estimatedCostUSD: row.estimatedCostUSD,
+            actualCostUSD: row.actualCostUSD,
+            source: "hermes-state",
+            model: row.model?.nilIfBlank
+        )
+        return usage.normalized
+    }
+
+    private struct SQLiteHermesUsageRow: Decodable {
+        var model: String?
+        var inputTokens: Int?
+        var outputTokens: Int?
+        var cacheReadTokens: Int?
+        var cacheWriteTokens: Int?
+        var reasoningTokens: Int?
+        var estimatedCostUSD: Double?
+        var actualCostUSD: Double?
+    }
+
+    private struct SQLiteTableColumn: Decodable {
+        var name: String
+    }
+
+    private func sessionColumns() -> Set<String> {
+        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", "-json", stateDBURL.path, "PRAGMA table_info(sessions);"], timeout: 10)
+        guard output.exitCode == 0,
+              let data = output.stdout.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([SQLiteTableColumn].self, from: data) else {
+            return []
+        }
+        return Set(rows.map(\.name))
+    }
+
+    private func selectColumn(_ column: String, alias: String, columns: Set<String>) -> String {
+        columns.contains(column) ? "\(column) AS \(alias)" : "NULL AS \(alias)"
+    }
+
+    private static func sqliteLiteral(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "''"))'"
+    }
+}
+
 struct AgentHistoryStore {
     private let fileManager = FileManager.default
     private let listMaxFiles = 240
@@ -5453,6 +5681,206 @@ enum SessionParser {
             }
         }
         return nil
+    }
+}
+
+enum RunUsageParser {
+    static func parse(_ text: String) -> RunUsage? {
+        var merged: RunUsage?
+        for candidate in candidates(from: text) {
+            if let usage = jsonUsage(from: candidate) ?? textUsage(from: candidate) {
+                merged = merged.map { $0.merged(with: usage) } ?? usage
+            }
+        }
+        return merged?.normalized
+    }
+
+    private static func candidates(from text: String) -> [String] {
+        let stripped = stripANSI(text)
+        let lines = stripped
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return lines.isEmpty ? [stripped.trimmingCharacters(in: .whitespacesAndNewlines)].filter { !$0.isEmpty } : lines
+    }
+
+    private static func jsonUsage(from text: String) -> RunUsage? {
+        var merged: RunUsage?
+        for candidate in jsonCandidates(from: text) {
+            guard let data = candidate.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) else {
+                continue
+            }
+            guard let usage = usage(from: object)?.normalized else { continue }
+            merged = merged.map { $0.merged(with: usage) } ?? usage
+        }
+        return merged?.normalized
+    }
+
+    private static func jsonCandidates(from text: String) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        var candidates: [String] = [trimmed]
+        if let start = trimmed.firstIndex(of: "{"), let end = trimmed.lastIndex(of: "}"), start < end {
+            candidates.append(String(trimmed[start...end]))
+        }
+        return Array(Set(candidates))
+    }
+
+    private static func usage(from object: Any) -> RunUsage? {
+        if let dictionary = object as? [String: Any] {
+            var merged = usageFromFlatDictionary(dictionary)
+            for value in dictionary.values {
+                guard let nested = usage(from: value) else { continue }
+                merged = merged.map { $0.merged(with: nested) } ?? nested
+            }
+            guard var usage = merged else { return nil }
+            usage.model = usage.model?.nilIfBlank ?? stringValue(dictionary, keys: ["model", "model_name", "modelName"])
+            return usage.normalized
+        }
+        if let array = object as? [Any] {
+            var merged: RunUsage?
+            for item in array {
+                guard let nested = usage(from: item) else { continue }
+                merged = merged.map { $0.merged(with: nested) } ?? nested
+            }
+            return merged?.normalized
+        }
+        return nil
+    }
+
+    private static func usageFromFlatDictionary(_ dictionary: [String: Any]) -> RunUsage? {
+        var usage = RunUsage(source: "json")
+        usage.inputTokens = intValue(dictionary, keys: [
+            "input_tokens", "inputTokens", "prompt_tokens", "promptTokens",
+            "prompt_token_count", "input_token_count"
+        ])
+        usage.outputTokens = intValue(dictionary, keys: [
+            "output_tokens", "outputTokens", "completion_tokens", "completionTokens",
+            "completion_token_count", "output_token_count"
+        ])
+        usage.cacheReadTokens = intValue(dictionary, keys: [
+            "cache_read_tokens", "cacheReadTokens", "cache_read_input_tokens",
+            "cached_input_tokens", "cachedInputTokens"
+        ])
+        usage.cacheWriteTokens = intValue(dictionary, keys: [
+            "cache_write_tokens", "cacheWriteTokens", "cache_creation_input_tokens",
+            "cacheCreationInputTokens"
+        ])
+        usage.reasoningTokens = intValue(dictionary, keys: [
+            "reasoning_tokens", "reasoningTokens", "reasoning_output_tokens",
+            "reasoningOutputTokens"
+        ])
+        usage.totalTokens = intValue(dictionary, keys: ["total_tokens", "totalTokens"])
+        usage.estimatedCostUSD = doubleValue(dictionary, keys: [
+            "estimated_cost_usd", "estimatedCostUSD", "cost_usd", "costUSD",
+            "total_cost", "totalCost"
+        ])
+        usage.actualCostUSD = doubleValue(dictionary, keys: ["actual_cost_usd", "actualCostUSD"])
+        usage.model = stringValue(dictionary, keys: ["model", "model_name", "modelName"])
+        return usage.normalized
+    }
+
+    private static func textUsage(from text: String) -> RunUsage? {
+        var usage = RunUsage(source: "text")
+        usage.inputTokens = firstInt(in: text, patterns: [
+            #"(?:input|prompt)[_\s-]*(?:tokens?|token count)\D{0,20}([0-9][0-9,]*)"#,
+            #"([0-9][0-9,]*)\s*(?:input|prompt)[_\s-]*tokens?"#
+        ])
+        usage.outputTokens = firstInt(in: text, patterns: [
+            #"(?:output|completion)[_\s-]*(?:tokens?|token count)\D{0,20}([0-9][0-9,]*)"#,
+            #"([0-9][0-9,]*)\s*(?:output|completion)[_\s-]*tokens?"#
+        ])
+        usage.reasoningTokens = firstInt(in: text, patterns: [
+            #"reasoning[_\s-]*tokens?\D{0,20}([0-9][0-9,]*)"#,
+            #"([0-9][0-9,]*)\s*reasoning[_\s-]*tokens?"#
+        ])
+        usage.totalTokens = firstInt(in: text, patterns: [
+            #"total[_\s-]*tokens?\D{0,20}([0-9][0-9,]*)"#,
+            #"([0-9][0-9,]*)\s*total[_\s-]*tokens?"#
+        ])
+        usage.estimatedCostUSD = firstDouble(in: text, patterns: [
+            #"(?:estimated\s+)?cost(?:\s+usd)?\D{0,12}\$?([0-9]+(?:\.[0-9]+)?)"#,
+            #"\$([0-9]+(?:\.[0-9]+)?)"#
+        ])
+        return usage.normalized
+    }
+
+    private static func intValue(_ dictionary: [String: Any], keys: [String]) -> Int? {
+        for key in keys {
+            guard let value = dictionary[key], let integer = intValue(value) else { continue }
+            return integer
+        }
+        return nil
+    }
+
+    private static func intValue(_ value: Any) -> Int? {
+        if let integer = value as? Int { return integer }
+        if let number = value as? NSNumber { return number.intValue }
+        if let string = value as? String {
+            return Int(string.replacingOccurrences(of: ",", with: ""))
+        }
+        return nil
+    }
+
+    private static func doubleValue(_ dictionary: [String: Any], keys: [String]) -> Double? {
+        for key in keys {
+            guard let value = dictionary[key], let double = doubleValue(value) else { continue }
+            return double
+        }
+        return nil
+    }
+
+    private static func doubleValue(_ value: Any) -> Double? {
+        if let double = value as? Double { return double }
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let string = value as? String {
+            return Double(string.replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: ""))
+        }
+        return nil
+    }
+
+    private static func stringValue(_ dictionary: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            guard let string = dictionary[key] as? String, let clean = string.nilIfBlank else { continue }
+            return clean
+        }
+        return nil
+    }
+
+    private static func firstInt(in text: String, patterns: [String]) -> Int? {
+        for pattern in patterns {
+            guard let value = firstMatch(in: text, pattern: pattern) else { continue }
+            return Int(value.replacingOccurrences(of: ",", with: ""))
+        }
+        return nil
+    }
+
+    private static func firstDouble(in text: String, patterns: [String]) -> Double? {
+        for pattern in patterns {
+            guard let value = firstMatch(in: text, pattern: pattern) else { continue }
+            return Double(value.replacingOccurrences(of: ",", with: ""))
+        }
+        return nil
+    }
+
+    private static func firstMatch(in text: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges > 1,
+              let valueRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        return String(text[valueRange])
+    }
+
+    private static func stripANSI(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "\u{001B}\\[[0-9;?]*[ -/]*[@-~]") else {
+            return text
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "")
     }
 }
 

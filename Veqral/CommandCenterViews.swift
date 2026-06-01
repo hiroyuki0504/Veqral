@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct AppearanceToggleButton: View {
@@ -618,9 +619,93 @@ private struct RunHeader: View {
             .font(.caption)
             .foregroundStyle(VQTheme.secondaryText)
 
+            if let usage = run.usage, usage.hasDisplayValues {
+                RunUsageSummary(usage: usage)
+            }
+
             if let approval = store.pendingApproval(for: run.id) {
                 RunApprovalCallout(approval: approval)
             }
+        }
+    }
+}
+
+private struct RunUsageSummary: View {
+    let usage: CommandRunUsage
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                if let input = usage.inputTokens {
+                    RunUsageChip(title: L10n.tr("Input Tokens"), value: formatTokens(input), symbol: "arrow.down.left")
+                }
+                if let output = usage.outputTokens {
+                    RunUsageChip(title: L10n.tr("Output Tokens"), value: formatTokens(output), symbol: "arrow.up.right")
+                }
+                if let reasoning = usage.reasoningTokens {
+                    RunUsageChip(title: L10n.tr("Reasoning Tokens"), value: formatTokens(reasoning), symbol: "brain")
+                }
+                if let total = usage.totalTokensOrDerived {
+                    RunUsageChip(title: L10n.tr("Total Tokens"), value: formatTokens(total), symbol: "sum")
+                }
+                if let cacheRead = usage.cacheReadTokens {
+                    RunUsageChip(title: L10n.tr("Cache Read"), value: formatTokens(cacheRead), symbol: "externaldrive")
+                }
+                if let cacheWrite = usage.cacheWriteTokens {
+                    RunUsageChip(title: L10n.tr("Cache Write"), value: formatTokens(cacheWrite), symbol: "square.and.pencil")
+                }
+                if let cost = usage.costUSD {
+                    RunUsageChip(
+                        title: L10n.tr(usage.actualCostUSD == nil ? "Estimated Cost" : "Actual Cost"),
+                        value: formatCost(cost),
+                        symbol: "dollarsign.circle"
+                    )
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .accessibilityLabel(L10n.tr("Run Usage"))
+    }
+
+    private func formatTokens(_ value: Int) -> String {
+        Self.tokenFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+
+    private func formatCost(_ value: Double) -> String {
+        value < 0.0001 ? String(format: "$%.6f", value) : String(format: "$%.4f", value)
+    }
+
+    private static let tokenFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        return formatter
+    }()
+}
+
+private struct RunUsageChip: View {
+    let title: String
+    let value: String
+    let symbol: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.caption2.weight(.semibold))
+            Text(title)
+            Text(value)
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+        }
+        .font(.caption)
+        .foregroundStyle(VQTheme.secondaryText)
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .background(VQTheme.control)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
         }
     }
 }

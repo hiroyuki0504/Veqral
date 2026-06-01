@@ -407,6 +407,15 @@
 "Review Notes" = "レビューメモ";
 "Review mode" = "レビュー方式";
 "Run ID" = "実行 ID";
+"Run Usage" = "実行使用量";
+"Input Tokens" = "入力";
+"Output Tokens" = "出力";
+"Reasoning Tokens" = "推論";
+"Total Tokens" = "合計";
+"Cache Read" = "キャッシュ読込";
+"Cache Write" = "キャッシュ書込";
+"Estimated Cost" = "概算費用";
+"Actual Cost" = "実費用";
 "Runs local shell commands only where local command execution is available." = "ローカルコマンド実行が利用可能な環境でのみ shell コマンドを実行します。";
 "Same memory, requirements, policies, repo context, and output contract are passed to every role." = "全ロールに同じ記憶・要件・ポリシー・repo 文脈・出力契約を渡します。";
 "Security Policy" = "セキュリティポリシー";
