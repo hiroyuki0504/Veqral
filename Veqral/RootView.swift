@@ -100,16 +100,16 @@ private struct CompactRootView: View {
             .tag(AppSection.home)
 
             NavigationStack {
+                PortfolioView()
+            }
+            .tabItem { Label(AppSection.portfolio.title, systemImage: AppSection.portfolio.symbol) }
+            .tag(AppSection.portfolio)
+
+            NavigationStack {
                 ApprovalsView()
             }
             .tabItem { Label(AppSection.approvals.title, systemImage: AppSection.approvals.symbol) }
             .tag(AppSection.approvals)
-
-            NavigationStack {
-                ProjectsView()
-            }
-            .tabItem { Label(AppSection.projects.title, systemImage: AppSection.projects.symbol) }
-            .tag(AppSection.projects)
 
             NavigationStack {
                 DevicesView()
@@ -231,6 +231,8 @@ private func sectionDestination(_ section: AppSection) -> some View {
     switch section {
     case .home:
         CommandCenterRunView()
+    case .portfolio:
+        PortfolioView()
     case .projects:
         ProjectsView()
     case .devices:

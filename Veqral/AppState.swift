@@ -447,6 +447,179 @@ struct RemoteDraftPRResponse: Codable, Sendable {
     var url: String
 }
 
+enum PortfolioAssetKind: String, Codable, CaseIterable, Identifiable, Sendable {
+    case app
+    case engagement
+    case content
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .app: L10n.tr("App")
+        case .engagement: L10n.tr("Engagement")
+        case .content: L10n.tr("Content")
+        }
+    }
+}
+
+enum PortfolioAssetStatus: String, Codable, CaseIterable, Identifiable, Sendable {
+    case running
+    case stopped
+    case unknown
+    case notApplicable = "n/a"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .running: L10n.tr("Running")
+        case .stopped: L10n.tr("Stopped")
+        case .unknown: L10n.tr("Unknown")
+        case .notApplicable: L10n.tr("N/A")
+        }
+    }
+}
+
+enum PortfolioBackupState: String, Codable, Sendable {
+    case git
+    case localOnly = "local-only"
+}
+
+struct PortfolioLocalPath: Codable, Equatable, Sendable {
+    var machineId: String
+    var path: String
+}
+
+struct PortfolioSourceRefs: Codable, Equatable, Sendable {
+    var github: String?
+    var driveUrl: String?
+    var localPaths: [PortfolioLocalPath]
+}
+
+struct PortfolioHealthSpec: Codable, Equatable, Sendable {
+    var type: String
+    var target: String
+}
+
+struct PortfolioLogSource: Codable, Equatable, Sendable {
+    var path: String?
+    var cmd: String?
+}
+
+struct PortfolioControls: Codable, Equatable, Sendable {
+    var start: String?
+    var stop: String?
+    var restart: String?
+    var deploy: String?
+}
+
+struct PortfolioDeliverable: Codable, Identifiable, Equatable, Sendable {
+    var id: String { "\(name):\(ref)" }
+    var name: String
+    var ref: String
+}
+
+struct PortfolioAsset: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var kind: PortfolioAssetKind
+    var name: String
+    var summary: String
+    var status: PortfolioAssetStatus
+    var sourceRefs: PortfolioSourceRefs
+    var tags: [String]
+    var runtimeHost: String?
+    var healthSpec: PortfolioHealthSpec?
+    var logSource: PortfolioLogSource?
+    var controls: PortfolioControls?
+    var linkedProjectId: String?
+    var backupState: PortfolioBackupState
+    var client: String?
+    var phase: String?
+    var deliverables: [PortfolioDeliverable]
+    var timeline: String?
+    var relatedAssetIds: [String]
+    var createdAt: Date
+    var updatedAt: Date
+
+    static func empty(kind: PortfolioAssetKind = .app) -> PortfolioAsset {
+        let now = Date()
+        return PortfolioAsset(
+            id: UUID().uuidString.lowercased(),
+            kind: kind,
+            name: "",
+            summary: "",
+            status: kind == .content ? .notApplicable : .unknown,
+            sourceRefs: PortfolioSourceRefs(github: nil, driveUrl: nil, localPaths: []),
+            tags: [],
+            runtimeHost: nil,
+            healthSpec: nil,
+            logSource: nil,
+            controls: PortfolioControls(start: nil, stop: nil, restart: nil, deploy: nil),
+            linkedProjectId: nil,
+            backupState: .localOnly,
+            client: nil,
+            phase: nil,
+            deliverables: [],
+            timeline: nil,
+            relatedAssetIds: [],
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+}
+
+struct RemotePortfolioAssetListResponse: Codable, Sendable {
+    var assets: [PortfolioAsset]
+}
+
+struct RemotePortfolioStatusResponse: Codable, Equatable, Sendable {
+    var assetID: String
+    var status: PortfolioAssetStatus
+    var health: String
+    var pid: Int32?
+    var cpuPercent: Double?
+    var memoryMB: Double?
+    var checkedAt: Date
+}
+
+struct RemotePortfolioLogsResponse: Codable, Sendable {
+    var assetID: String
+    var lines: [String]
+}
+
+struct RemotePortfolioSummaryResponse: Codable, Sendable {
+    var assetID: String
+    var summary: String
+    var generatedAt: Date
+}
+
+struct PortfolioRecentCommit: Codable, Identifiable, Equatable, Sendable {
+    var sha: String
+    var message: String
+    var author: String
+    var date: Date
+
+    var id: String { sha }
+    var shortSHA: String { String(sha.prefix(7)) }
+}
+
+struct RemotePortfolioCommitsResponse: Codable, Sendable {
+    var assetID: String
+    var commits: [PortfolioRecentCommit]
+}
+
+struct RemotePortfolioControlResponse: Codable, Sendable {
+    var runID: String
+    var approvalRequired: Bool
+    var status: String
+}
+
+struct RemotePortfolioPromoteResponse: Codable, Sendable {
+    var runID: String
+    var approvalRequired: Bool
+}
+
 struct RemoteMemoryFile: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var title: String
@@ -602,6 +775,14 @@ final class CommandCenterStore: ObservableObject {
     @Published var remoteGitHubStatus: RemoteGitHubStatus = .empty
     @Published var remoteArtifacts: [RemoteArtifactRecord] = []
     @Published var artifactImageData: [String: Data] = [:]
+    @Published var portfolioAssets: [PortfolioAsset] = []
+    @Published var selectedPortfolioAssetID: String?
+    @Published var selectedPortfolioStatus: RemotePortfolioStatusResponse?
+    @Published var portfolioLogLines: [String] = []
+    @Published var portfolioLogSummary: String = ""
+    @Published var portfolioCommits: [PortfolioRecentCommit] = []
+    @Published var portfolioMessage: String = ""
+    @Published var isLoadingPortfolio = false
     @Published var remoteHistorySessions: [RemoteHistorySession] = []
     @Published var remoteHistoryProjects: [String] = []
     @Published var selectedHistorySession: RemoteHistorySession?
@@ -704,6 +885,14 @@ final class CommandCenterStore: ObservableObject {
             return run
         }
         return runs.first
+    }
+
+    var selectedPortfolioAsset: PortfolioAsset? {
+        if let selectedPortfolioAssetID,
+           let asset = portfolioAssets.first(where: { $0.id == selectedPortfolioAssetID }) {
+            return asset
+        }
+        return portfolioAssets.first
     }
 
     var selectedAgentProject: AgentProjectSpace? {
@@ -1184,6 +1373,152 @@ final class CommandCenterStore: ObservableObject {
                 remoteHostMessage = Self.remoteFailureMessage(error, context: "Draft PR")
             }
         }
+    }
+
+    func refreshPortfolio() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            portfolioMessage = L10n.tr("Mac Host pairing is required.")
+            return
+        }
+        let configuration = remoteHost
+        isLoadingPortfolio = true
+        portfolioMessage = L10n.tr("Loading portfolio...")
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).portfolioAssets()
+                portfolioAssets = response.assets
+                selectedPortfolioAssetID = selectedPortfolioAssetID ?? response.assets.first?.id
+                portfolioMessage = response.assets.isEmpty ? L10n.tr("No assets registered yet.") : "\(response.assets.count) \(L10n.tr("assets loaded"))"
+                if selectedPortfolioAssetID != nil {
+                    refreshSelectedPortfolioDetail()
+                }
+            } catch {
+                portfolioMessage = Self.remoteFailureMessage(error, context: "Portfolio")
+            }
+            isLoadingPortfolio = false
+        }
+    }
+
+    func discoverPortfolio() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            portfolioMessage = L10n.tr("Mac Host pairing is required.")
+            return
+        }
+        let configuration = remoteHost
+        isLoadingPortfolio = true
+        portfolioMessage = L10n.tr("Discovering assets...")
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).discoverPortfolio()
+                portfolioAssets = response.assets
+                selectedPortfolioAssetID = selectedPortfolioAssetID ?? response.assets.first?.id
+                portfolioMessage = "\(response.assets.count) \(L10n.tr("assets loaded"))"
+            } catch {
+                portfolioMessage = Self.remoteFailureMessage(error, context: "Portfolio discover")
+            }
+            isLoadingPortfolio = false
+        }
+    }
+
+    func savePortfolioAsset(_ asset: PortfolioAsset) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            portfolioMessage = L10n.tr("Mac Host pairing is required.")
+            return
+        }
+        let configuration = remoteHost
+        portfolioMessage = L10n.tr("Saving asset...")
+        Task { @MainActor in
+            do {
+                let saved = try await RemoteHostClient(configuration: configuration).savePortfolioAsset(asset)
+                if let index = portfolioAssets.firstIndex(where: { $0.id == saved.id }) {
+                    portfolioAssets[index] = saved
+                } else {
+                    portfolioAssets.insert(saved, at: 0)
+                }
+                selectedPortfolioAssetID = saved.id
+                portfolioMessage = L10n.tr("Asset saved.")
+            } catch {
+                portfolioMessage = Self.remoteFailureMessage(error, context: "Portfolio save")
+            }
+        }
+    }
+
+    func selectPortfolioAsset(_ asset: PortfolioAsset) {
+        selectedPortfolioAssetID = asset.id
+        refreshSelectedPortfolioDetail()
+    }
+
+    func refreshSelectedPortfolioDetail() {
+        guard remoteHost.isEnabled, remoteHost.isPaired, let asset = selectedPortfolioAsset else { return }
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                async let status = RemoteHostClient(configuration: configuration).portfolioStatus(assetID: asset.id)
+                async let logs = RemoteHostClient(configuration: configuration).portfolioLogs(assetID: asset.id)
+                async let commits = RemoteHostClient(configuration: configuration).portfolioCommits(assetID: asset.id)
+                let statusResponse = try await status
+                let logsResponse = try await logs
+                let commitsResponse = try await commits
+                selectedPortfolioStatus = statusResponse
+                portfolioLogLines = logsResponse.lines
+                portfolioCommits = commitsResponse.commits
+            } catch {
+                portfolioMessage = Self.remoteFailureMessage(error, context: "Portfolio detail")
+            }
+        }
+    }
+
+    func summarizePortfolioLogs() {
+        guard remoteHost.isEnabled, remoteHost.isPaired, let asset = selectedPortfolioAsset else { return }
+        let configuration = remoteHost
+        portfolioMessage = L10n.tr("Summarizing logs...")
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).portfolioLogSummary(assetID: asset.id)
+                portfolioLogSummary = response.summary
+                portfolioMessage = L10n.tr("Summary updated.")
+            } catch {
+                portfolioMessage = Self.remoteFailureMessage(error, context: "Log summary")
+            }
+        }
+    }
+
+    func runPortfolioControl(_ action: String) {
+        guard remoteHost.isEnabled, remoteHost.isPaired, let asset = selectedPortfolioAsset else { return }
+        let configuration = remoteHost
+        portfolioMessage = L10n.tr("Queued for approval.")
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).portfolioControl(assetID: asset.id, action: action)
+                portfolioMessage = "\(L10n.tr("Approval required")): \(response.runID.prefix(8))"
+                refreshRemoteHostStatus()
+            } catch {
+                portfolioMessage = Self.remoteFailureMessage(error, context: "Portfolio control")
+            }
+        }
+    }
+
+    func promotePortfolioAsset() {
+        guard remoteHost.isEnabled, remoteHost.isPaired, let asset = selectedPortfolioAsset else { return }
+        let configuration = remoteHost
+        portfolioMessage = L10n.tr("Queued for approval.")
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).portfolioPromote(assetID: asset.id)
+                portfolioMessage = "\(L10n.tr("Approval required")): \(response.runID.prefix(8))"
+                refreshRemoteHostStatus()
+            } catch {
+                portfolioMessage = Self.remoteFailureMessage(error, context: "Promote")
+            }
+        }
+    }
+
+    func linkSelectedPortfolioAssetToProject() {
+        guard var asset = selectedPortfolioAsset else { return }
+        ensureAgentProjectForCurrentWorkspace()
+        asset.linkedProjectId = selectedAgentProject?.id
+        savePortfolioAsset(asset)
+        requestedSection = .projects
     }
 
     func revokeRemoteDevice(_ device: RemoteDeviceRecord) {
@@ -3037,7 +3372,7 @@ struct RemoteHostClient: Sendable {
         let body = try JSONEncoder.commandCenter.encode(Body(
             prompt: prompt,
             workingDirectory: workingDirectory,
-            engine: runtime == .localShell ? nil : runtime.remoteEngine,
+            engine: runtime.remoteEngine,
             resumeSessionID: resumeSessionID,
             projectID: projectID,
             chatID: chatID,
@@ -3141,6 +3476,63 @@ struct RemoteHostClient: Sendable {
         ))
         let data = try await request(path: "/v1/push/token", method: "POST", body: body)
         return try JSONDecoder.commandCenter.decode(RemotePushTokenResponse.self, from: data)
+    }
+
+    func portfolioAssets() async throws -> RemotePortfolioAssetListResponse {
+        let data = try await request(path: "/v1/portfolio/assets", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemotePortfolioAssetListResponse.self, from: data)
+    }
+
+    func discoverPortfolio() async throws -> RemotePortfolioAssetListResponse {
+        struct Body: Encodable {
+            var engagementRoots: [String]?
+            var codeRoots: [String]?
+        }
+        let body = try JSONEncoder.commandCenter.encode(Body(engagementRoots: nil, codeRoots: nil))
+        let data = try await request(path: "/v1/portfolio/discover", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemotePortfolioAssetListResponse.self, from: data)
+    }
+
+    func savePortfolioAsset(_ asset: PortfolioAsset) async throws -> PortfolioAsset {
+        struct Body: Encodable {
+            var asset: PortfolioAsset
+        }
+        let body = try JSONEncoder.commandCenter.encode(Body(asset: asset))
+        let method = asset.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "POST" : "PATCH"
+        let path = method == "POST" ? "/v1/portfolio/assets" : "/v1/portfolio/assets/\(asset.id)"
+        let data = try await request(path: path, method: method, body: body)
+        return try JSONDecoder.commandCenter.decode(PortfolioAsset.self, from: data)
+    }
+
+    func portfolioStatus(assetID: String) async throws -> RemotePortfolioStatusResponse {
+        let data = try await request(path: "/v1/portfolio/assets/\(assetID)/status", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemotePortfolioStatusResponse.self, from: data)
+    }
+
+    func portfolioLogs(assetID: String) async throws -> RemotePortfolioLogsResponse {
+        let data = try await request(path: "/v1/portfolio/assets/\(assetID)/logs", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemotePortfolioLogsResponse.self, from: data)
+    }
+
+    func portfolioLogSummary(assetID: String) async throws -> RemotePortfolioSummaryResponse {
+        let data = try await request(path: "/v1/portfolio/assets/\(assetID)/log-summary", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemotePortfolioSummaryResponse.self, from: data)
+    }
+
+    func portfolioCommits(assetID: String) async throws -> RemotePortfolioCommitsResponse {
+        let data = try await request(path: "/v1/portfolio/assets/\(assetID)/commits", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemotePortfolioCommitsResponse.self, from: data)
+    }
+
+    func portfolioControl(assetID: String, action: String) async throws -> RemotePortfolioControlResponse {
+        let body = try JSONEncoder.commandCenter.encode(["action": action])
+        let data = try await request(path: "/v1/portfolio/assets/\(assetID)/control", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemotePortfolioControlResponse.self, from: data)
+    }
+
+    func portfolioPromote(assetID: String) async throws -> RemotePortfolioPromoteResponse {
+        let data = try await request(path: "/v1/portfolio/assets/\(assetID)/promote", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemotePortfolioPromoteResponse.self, from: data)
     }
 
     func memoryList() async throws -> RemoteMemoryListResponse {
