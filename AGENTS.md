@@ -42,7 +42,7 @@ Device(Mac)
 ## 現状（重要）
 
 - `main` = `18b29b4`（PR #2〜#8 統合済み: P0 パイプライン + 実行時修正）
-- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き ← #15 PR1 core fixes ← #16 PR-A screen inventory ← #17 PR1 surface consolidation ← #18 PR2 portfolio command center ← #19 backlog #0 Hermes memory smoke ← #20 backlog #3 WebSocket reconnect ← #21 backlog #4 Discord notifications ← #22 backlog #5 Memory visibility ← #23 backlog #6 Run usage ← #24 backlog #7 Approval context
+- 未マージのスタック（順に積層）: `main` ← #9 foundation ← #10 使いやすさ+日本語 ← #11 push ← #12 free-build+QR+UI磨き（最新統合元 `veqral/free-device-polish`）← #13 AGENTS 引継ぎ ← #14 UI日本語磨き ← #15 PR1 core fixes ← #16 PR-A screen inventory ← #17 PR1 surface consolidation ← #18 PR2 portfolio command center ← #19 backlog #0 Hermes memory smoke ← #20 backlog #3 WebSocket reconnect ← #21 backlog #4 Discord notifications ← #22 backlog #5 Memory visibility ← #23 backlog #6 Run usage ← #24 backlog #7 Approval context ← #25 backlog #8 Saved command drafts
 - #9: Device→エージェント選択、Codex/Claude 直接、Hermes Project→Chat→model、History「Continue」resume。（更新耐性 adapter を同ブランチに足す指示済み → 入っているかブランチで確認）
 - #10: ワンタップ承認(一覧から)、Chat/セッション名前付け+フィルタ、画像 diff 3 モード+hunk 添付、swipe、日本語/English/System 切替（`Localizable.strings` 体系。`.xcstrings` 移行は未）
 - #11: APNs push（device build は free team では Push capability 非対応で停止 → #12 で外した）
@@ -59,6 +59,7 @@ Device(Mac)
 - #22 (`codex/backlog-5-memory-visibility`): Backlog #5。Memory 画面に「Hermes プロジェクト記憶」を追加し、選択中 Project の Hermes source、redact 済み `MEMORY.md`、`~/.hermes/state.db` の session 一覧を read-only 表示。Host は `POST /v1/memory/project` と `VeqralHost smoke-project-memory` を追加。自作 memory store は追加していない。
 - #23 (`codex/backlog-6-run-usage`): Backlog #6。Mac Host の `HostRun` に usage を追加し、Claude stream JSON / Codex usage JSON / usage テキストから redacted 後に token/cost を抽出。Hermes は `~/.hermes/state.db` の session usage を read-only 補完（列差分は `NULL` で吸収）。Run list/snapshot で iPhone/iPad に同期し、Run 詳細ヘッダーに入力/出力/推論/cache/合計/費用を表示。`VeqralHost smoke-run-usage` 通過。
 - #24 (`codex/backlog-7-approval-context`): Backlog #7。高リスク承認の Approve は即送信せず、確認シートで実行コマンド/指示本文、影響ファイル、差分統計、patch 冒頭を表示してから承認する。Run 詳細 callout と Approvals 一覧にも同じ `ApprovalImpactPreview` を表示。中リスク one-tap は維持。
+- #25 (`codex/backlog-8-saved-commands`): Backlog #8。Command composer に「定型コマンド」バーを追加し、現在の指令を保存、chip タップで再投入、menu から削除できるようにした。保存時の runtime も復元。`CommandCenterSnapshot` に加えて、iCloud Documents が使える端末では `Veqral/saved-command-drafts.json` へ best-effort 同期キャッシュ、使えない環境はローカル fallback。`SAVED_COMMANDS_PR8.md` に受け入れを記録。
 
 ## 未完了・次の手番
 
@@ -72,8 +73,9 @@ Device(Mac)
    - #22 Memory: paired Host で Hermes Project Chat を実行し、Memory 画面に `MEMORY.md` の事実と同 source の session 一覧が出ること（Host smoke は通過済み）
    - #23 Run usage: 実際の Codex/Claude/Hermes run 完了後、Run 詳細ヘッダーに token/cost が出ること（Host parser smoke は通過済み。provider が usage を出さない場合は空表示）
    - #24 Approval context: 高リスク Run を作成し、Approve タップで確認シートが出て、コマンドと差分/ファイルが承認前に見えること
+   - #25 Saved command drafts: 指令欄に入力→保存→chip 表示→tap で composer に戻ること。iCloud 同期は iCloud Documents が有効な端末同士で確認（未有効時はローカル fallback）。
    - UI 受け入れ確認: 日本語のみ、赤い 0 バッジなし、未ペアリング strip が細い、UUID/コンテナパスが主表示に出ない、Unavailable/Offline が緑でない
-2. スタック統合：実機 OK 後、#9→#24 を main にまとめて取り込む（和集合・落とさず・壊さず・build & smoke 検証）
+2. スタック統合：実機 OK 後、#9→#25 を main にまとめて取り込む（和集合・落とさず・壊さず・build & smoke 検証）
 3. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
 4. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
 5. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
