@@ -25,7 +25,7 @@ This file is the resume point for the clean main baseline. The former stacked Dr
 - [x] #A2 記憶の体験化 — Draft PR #32 (`codex/a2-memory-experience`)
 - [x] #A3 コストガバナンス — Draft PR #33 (`codex/a3-cost-governance`)
 - [x] #A4 司令塔を実データで — Draft PR #34 (`codex/a4-portfolio-real-data`)
-- [x] #A5 認証オンボーディング・ウィザード — Draft PR pending (`codex/a5-auth-onboarding`)
+- [x] #A5 認証オンボーディング・ウィザード — Draft PR #35 (`codex/a5-auth-onboarding`)
 - [ ] #A6 Apple Watch 承認アプリ
 - [ ] #A7 クロスベンダー #0 再実走
 - [ ] Final main 統合 — ユーザー GO 待ち
