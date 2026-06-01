@@ -1,12 +1,12 @@
 # Hermes Memory Inheritance PR0
 
-- Source: `veqral-memtest-20260601-052940-5a8e6e14`
+- Source: `veqral-memtest-20260601-061345-fca4c248`
 - Hermes home: isolated temporary home (`hermes-home`)
 - Chat A: `openai-codex/gpt-5.5`
 - Chat B: `openai-codex/gpt-5.4`
 - Chat A credential source: Hermes ChatGPT subscription login (`auth.json`)
 - Chat B credential source: Hermes ChatGPT subscription login (`auth.json`)
-- Code name: `Tachibana-7-E7A3D834`
+- Code name: `Tachibana-7-27121434`
 
 ## Backend Capability Check
 
@@ -19,10 +19,10 @@
 
 ```text
 ⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
-MEMWRITE:Tachibana-7-E7A3D834
+MEMWRITE:Tachibana-7-27121434
 
 
-session_id: 20260601_142941_809abf
+session_id: 20260601_151347_8e035e
 ```
 
 ## Native Memory Check
@@ -34,10 +34,11 @@ session_id: 20260601_142941_809abf
 ## Chat B Transcript
 
 ```text
-CODENAME:Tachibana-7-E7A3D834
+⚠ tirith security scanner enabled but not available — command scanning will use pattern matching only
+CODENAME:Tachibana-7-27121434
 
 
-session_id: 20260601_142950_d9ab90
+session_id: 20260601_151358_e7c2c7
 ```
 
 ## Result
