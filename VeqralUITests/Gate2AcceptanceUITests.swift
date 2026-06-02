@@ -49,7 +49,9 @@ final class Gate2AcceptanceUITests: XCTestCase {
         app.tap()
 
         let stop = app.buttons["gate2.voice.stop"]
-        _ = stop.waitForExistence(timeout: 5)
+        let status = app.staticTexts["gate2.voice.status"]
+        _ = status.waitForText(containing: ["準備"], timeout: 5)
+        _ = stop.waitForExistence(timeout: 1)
         XCTAssertEqual(app.state, .runningForeground, "App should stay alive after microphone permission is granted.")
         if stop.exists {
             stop.tap()

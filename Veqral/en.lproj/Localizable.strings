@@ -115,6 +115,7 @@
 "Ready" = "Ready";
 "Voice Error" = "Voice Error";
 "Requesting microphone and speech recognition permission." = "Requesting microphone and speech recognition permission.";
+"Voice permissions are ready. Tap Start Recording again." = "Voice permissions are ready. Tap Start Recording again.";
 "Speech recognition is unavailable." = "Speech recognition is unavailable.";
 "Speech recognition permission was denied." = "Speech recognition permission was denied.";
 "Speech recognition is restricted on this device." = "Speech recognition is restricted on this device.";
