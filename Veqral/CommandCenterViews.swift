@@ -2196,9 +2196,11 @@ private struct VoiceCommandSheet: View {
 
     private func stopAndClean() {
         guard session.phase == .listening else { return }
-        session.stopListening()
         Task {
-            await cleanupWithAgent()
+            let capturedText = await session.stopListening()
+            if capturedText {
+                await cleanupWithAgent()
+            }
         }
     }
 
@@ -2313,11 +2315,9 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
 
     #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
     private var speechRecognizer: SFSpeechRecognizer?
-    private var audioEngine: AVAudioEngine?
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var audioRecorder: AVAudioRecorder?
+    private var recordingURL: URL?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private var activeRecognitionID = UUID()
-    private var hasInputTap = false
     private var hasActiveAudioSession = false
     private var interruptionObserver: NSObjectProtocol?
     #endif
@@ -2347,11 +2347,6 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         }
 
         #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-        let speechRecognizer = currentSpeechRecognizer()
-        guard let speechRecognizer, speechRecognizer.isAvailable else {
-            fail(L10n.tr("Speech recognition is unavailable."))
-            return
-        }
         let speechPermissionWasUndetermined = SFSpeechRecognizer.authorizationStatus() == .notDetermined
         requestSpeechAuthorization { [weak self] status in
             guard let self else { return }
@@ -2359,6 +2354,10 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
             case .authorized:
                 if speechPermissionWasUndetermined {
                     self.finishPermissionWarmup()
+                    return
+                }
+                guard let speechRecognizer = self.currentSpeechRecognizer(), speechRecognizer.isAvailable else {
+                    self.fail(L10n.tr("Speech recognition is unavailable."))
                     return
                 }
                 let microphonePermissionWasUndetermined = self.isMicrophonePermissionUndetermined
@@ -2373,7 +2372,7 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
                         return
                     }
                     do {
-                        try self.startAudioRecognition()
+                        try self.startAudioRecording()
                     } catch {
                         self.fail(error.localizedDescription)
                     }
@@ -2393,18 +2392,32 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         #endif
     }
 
-    func stopListening() {
-        guard phase == .listening else { return }
+    func stopListening() async -> Bool {
+        guard phase == .listening else { return false }
         #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-        stopAudioCapture(cancelTask: false)
+        let recordedURL = stopAudioCapture(cancelTask: false)
+        if rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let recordedURL {
+            phase = .cleaning
+            statusMessage = L10n.tr("Transcribing recorded audio.")
+            do {
+                rawText = try await transcribeRecordedAudio(url: recordedURL)
+            } catch {
+                fail(error.localizedDescription)
+                try? FileManager.default.removeItem(at: recordedURL)
+                return false
+            }
+            try? FileManager.default.removeItem(at: recordedURL)
+        }
         #endif
         ruleBasedText = VoiceCommandRuleCleaner.clean(rawText)
         cleanedText = ruleBasedText
         if ruleBasedText.isEmpty {
             fail(L10n.tr("Dictation was too short."))
+            return false
         } else {
             phase = .ready
             statusMessage = L10n.tr("Review the command before sending.")
+            return true
         }
     }
 
@@ -2493,7 +2506,7 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         statusMessage = L10n.tr("Voice permissions are ready. Tap Start Recording again.")
     }
 
-    private func startAudioRecognition() throws {
+    private func startAudioRecording() throws {
         stopAudioCapture(cancelTask: true)
         let speechRecognizer = currentSpeechRecognizer()
         guard let speechRecognizer, speechRecognizer.isAvailable else {
@@ -2501,7 +2514,7 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         }
 
         let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.record, mode: .measurement, options: [.duckOthers])
+        try audioSession.setCategory(.playAndRecord, mode: .spokenAudio, options: [.duckOthers, .defaultToSpeaker, .allowBluetooth])
         try audioSession.setActive(true)
         hasActiveAudioSession = true
         guard audioSession.isInputAvailable else {
@@ -2509,69 +2522,40 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         }
         installInterruptionObserver()
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        recognitionRequest = request
+        let url = Self.makeRecordingURL()
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+            AVSampleRateKey: 44_100.0,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue
+        ]
+        let recorder = try AVAudioRecorder(url: url, settings: settings)
+        recorder.isMeteringEnabled = false
+        guard recorder.prepareToRecord(), recorder.record() else {
+            throw VoiceCommandCaptureError.recordingUnavailable
+        }
 
-        let engine = AVAudioEngine()
-        audioEngine = engine
-        let inputNode = engine.inputNode
-        let inputFormat = inputNode.inputFormat(forBus: 0)
-        let outputFormat = inputNode.outputFormat(forBus: 0)
-        let format = Self.isValidAudioFormat(inputFormat) ? inputFormat : outputFormat
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            throw VoiceCommandCaptureError.invalidInputFormat
-        }
-        if hasInputTap {
-            inputNode.removeTap(onBus: 0)
-            hasInputTap = false
-        }
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            request.append(buffer)
-        }
-        hasInputTap = true
-
-        engine.prepare()
-        try engine.start()
+        audioRecorder = recorder
+        recordingURL = url
         phase = .listening
         statusMessage = L10n.tr("Listening. Speak your command in Japanese.")
-
-        let recognitionID = UUID()
-        activeRecognitionID = recognitionID
-        recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
-            Task { @MainActor in
-                guard let self else { return }
-                guard self.activeRecognitionID == recognitionID else { return }
-                if let result {
-                    self.rawText = result.bestTranscription.formattedString
-                }
-                if let error, self.phase == .listening {
-                    self.fail(error.localizedDescription)
-                }
-            }
-        }
     }
 
-    private func stopAudioCapture(cancelTask: Bool) {
-        activeRecognitionID = UUID()
-        if let audioEngine, audioEngine.isRunning {
-            audioEngine.stop()
+    @discardableResult
+    private func stopAudioCapture(cancelTask: Bool) -> URL? {
+        let recordedURL = recordingURL
+        if let audioRecorder, audioRecorder.isRecording {
+            audioRecorder.stop()
         }
-        if hasInputTap {
-            if let audioEngine {
-                audioEngine.inputNode.removeTap(onBus: 0)
-            }
-            hasInputTap = false
+        audioRecorder = nil
+        recordingURL = nil
+        if cancelTask, let recordedURL {
+            try? FileManager.default.removeItem(at: recordedURL)
         }
-        audioEngine = nil
-        recognitionRequest?.endAudio()
-        if cancelTask {
+        if cancelTask, recognitionTask != nil {
             recognitionTask?.cancel()
-        } else {
-            recognitionTask?.finish()
+            recognitionTask = nil
         }
-        recognitionTask = nil
-        recognitionRequest = nil
         if hasActiveAudioSession {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             hasActiveAudioSession = false
@@ -2580,6 +2564,7 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
             NotificationCenter.default.removeObserver(interruptionObserver)
             self.interruptionObserver = nil
         }
+        return cancelTask ? nil : recordedURL
     }
 
     private func installInterruptionObserver() {
@@ -2602,10 +2587,6 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         }
     }
 
-    private static func isValidAudioFormat(_ format: AVAudioFormat) -> Bool {
-        format.sampleRate > 0 && format.channelCount > 0
-    }
-
     private func currentSpeechRecognizer() -> SFSpeechRecognizer? {
         if let speechRecognizer {
             return speechRecognizer
@@ -2613,6 +2594,50 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "ja-JP"))
         speechRecognizer = recognizer
         return recognizer
+    }
+
+    private func transcribeRecordedAudio(url: URL) async throws -> String {
+        guard let speechRecognizer = currentSpeechRecognizer(), speechRecognizer.isAvailable else {
+            throw VoiceCommandCaptureError.speechUnavailable
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            let request = SFSpeechURLRecognitionRequest(url: url)
+            request.shouldReportPartialResults = false
+            let lock = NSLock()
+            var didResume = false
+
+            func resumeOnce(_ result: Result<String, Error>) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !didResume else { return }
+                didResume = true
+                Task { @MainActor in
+                    self.recognitionTask = nil
+                    switch result {
+                    case .success(let text):
+                        continuation.resume(returning: text)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+
+            recognitionTask = speechRecognizer.recognitionTask(with: request) { result, error in
+                if let error {
+                    resumeOnce(.failure(error))
+                    return
+                }
+                if let result, result.isFinal {
+                    resumeOnce(.success(result.bestTranscription.formattedString))
+                }
+            }
+        }
+    }
+
+    private static func makeRecordingURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("veqral-voice-\(UUID().uuidString)")
+            .appendingPathExtension("m4a")
     }
 
     private var isMicrophonePermissionUndetermined: Bool {
@@ -2642,7 +2667,7 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
 private enum VoiceCommandCaptureError: LocalizedError {
     case speechUnavailable
     case inputUnavailable
-    case invalidInputFormat
+    case recordingUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -2650,7 +2675,7 @@ private enum VoiceCommandCaptureError: LocalizedError {
             L10n.tr("Speech recognition is unavailable.")
         case .inputUnavailable:
             L10n.tr("Microphone input is unavailable.")
-        case .invalidInputFormat:
+        case .recordingUnavailable:
             L10n.tr("Microphone input is unavailable.")
         }
     }
