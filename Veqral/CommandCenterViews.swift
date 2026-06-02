@@ -2089,6 +2089,13 @@ private struct VoiceCommandSheet: View {
                     Spacer()
                 }
 
+                if session.phase == .listening {
+                    VoiceRecordingActivityView(
+                        elapsedSeconds: session.elapsedSeconds,
+                        audioLevel: session.audioLevel
+                    )
+                }
+
                 VStack(alignment: .leading, spacing: 8) {
                     Label(L10n.tr("Raw Dictation"), systemImage: "waveform")
                         .font(.caption.weight(.semibold))
@@ -2146,9 +2153,6 @@ private struct VoiceCommandSheet: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .contentShape(Rectangle())
-                        .simultaneousGesture(TapGesture().onEnded {
-                            stopAndClean()
-                        })
                         .accessibilityIdentifier("gate2.voice.stop")
                     } else {
                         Button {
@@ -2247,6 +2251,63 @@ private struct VoiceCommandSheet: View {
     }
 }
 
+private struct VoiceRecordingActivityView: View {
+    let elapsedSeconds: TimeInterval
+    let audioLevel: Double
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(VQTheme.red)
+                .frame(width: 9, height: 9)
+                .accessibilityHidden(true)
+
+            Text(L10n.tr("Recording"))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+
+            Text(Self.durationText(elapsedSeconds))
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(VQTheme.secondaryText)
+                .frame(minWidth: 44, alignment: .leading)
+
+            Spacer(minLength: 8)
+
+            HStack(alignment: .center, spacing: 3) {
+                ForEach(0..<12, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(barIsActive(index) ? VQTheme.accent : VQTheme.hairline)
+                        .frame(width: 4, height: CGFloat(8 + (index % 4) * 4))
+                }
+            }
+            .frame(width: 82, height: 24)
+            .accessibilityLabel(L10n.tr("Recording level"))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(VQTheme.control.opacity(0.46))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(VQTheme.hairline.opacity(0.75), lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(L10n.tr("Recording"))
+        .accessibilityValue(Self.durationText(elapsedSeconds))
+        .accessibilityIdentifier("gate2.voice.recordingIndicator")
+    }
+
+    private func barIsActive(_ index: Int) -> Bool {
+        let activeCount = max(1, Int((audioLevel * 12).rounded(.up)))
+        return index < activeCount
+    }
+
+    private static func durationText(_ seconds: TimeInterval) -> String {
+        let clamped = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%02d:%02d", clamped / 60, clamped % 60)
+    }
+}
+
 @MainActor
 private final class VoiceCommandSession: NSObject, ObservableObject {
     enum Phase: Equatable {
@@ -2308,6 +2369,8 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     @Published var cleanedText: String = ""
     @Published var cleanupNote: String = ""
     @Published var statusMessage: String = L10n.tr("Tap Start Recording to begin.")
+    @Published var elapsedSeconds: TimeInterval = 0
+    @Published var audioLevel: Double = 0
 
     var canSend: Bool {
         phase == .ready && !cleanedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2320,6 +2383,8 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     private var recognitionTask: SFSpeechRecognitionTask?
     private var hasActiveAudioSession = false
     private var interruptionObserver: NSObjectProtocol?
+    private var meterTimer: Timer?
+    private var recordingStartedAt: Date?
     #endif
 
     func startListening() {
@@ -2328,6 +2393,8 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         ruleBasedText = ""
         cleanedText = ""
         cleanupNote = ""
+        elapsedSeconds = 0
+        audioLevel = 0
         statusMessage = L10n.tr("Requesting microphone and speech recognition permission.")
 
         let forcedError = ProcessInfo.processInfo.environment["VEQRAL_UI_TEST_VOICE_FORCE_ERROR"]?
@@ -2395,14 +2462,28 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     func stopListening() async -> Bool {
         guard phase == .listening else { return false }
         #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+        let duration = elapsedSeconds
         let recordedURL = stopAudioCapture(cancelTask: false)
+        guard duration >= 0.8 else {
+            if let recordedURL {
+                try? FileManager.default.removeItem(at: recordedURL)
+            }
+            finishWithManualEntry(message: L10n.tr("Recording was too short. Speak for at least one second."))
+            return false
+        }
         if rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let recordedURL {
             phase = .cleaning
-            statusMessage = L10n.tr("Transcribing recorded audio.")
+            statusMessage = String(
+                format: L10n.tr("Recorded %@. Transcribing now."),
+                Self.durationText(duration)
+            )
             do {
                 rawText = try await transcribeRecordedAudio(url: recordedURL)
             } catch {
-                fail(error.localizedDescription)
+                finishWithManualEntry(
+                    message: L10n.tr("Could not transcribe the recording. Please try again or type the command below."),
+                    note: error.localizedDescription
+                )
                 try? FileManager.default.removeItem(at: recordedURL)
                 return false
             }
@@ -2412,7 +2493,7 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         ruleBasedText = VoiceCommandRuleCleaner.clean(rawText)
         cleanedText = ruleBasedText
         if ruleBasedText.isEmpty {
-            fail(L10n.tr("Dictation was too short."))
+            finishWithManualEntry(message: L10n.tr("No speech was detected. Please try again or type the command below."))
             return false
         } else {
             phase = .ready
@@ -2503,6 +2584,8 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     private func finishPermissionWarmup() {
         stopAudioCapture(cancelTask: true)
         phase = .idle
+        elapsedSeconds = 0
+        audioLevel = 0
         statusMessage = L10n.tr("Voice permissions are ready. Tap Start Recording again.")
     }
 
@@ -2524,31 +2607,41 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
 
         let url = Self.makeRecordingURL()
         let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 44_100.0,
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: max(16_000.0, audioSession.sampleRate),
             AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false
         ]
         let recorder = try AVAudioRecorder(url: url, settings: settings)
-        recorder.isMeteringEnabled = false
+        recorder.isMeteringEnabled = true
         guard recorder.prepareToRecord(), recorder.record() else {
             throw VoiceCommandCaptureError.recordingUnavailable
         }
 
         audioRecorder = recorder
         recordingURL = url
+        recordingStartedAt = Date()
+        elapsedSeconds = 0
+        audioLevel = 0.08
+        startMeteringTimer()
         phase = .listening
-        statusMessage = L10n.tr("Listening. Speak your command in Japanese.")
+        statusMessage = L10n.tr("Recording. Speak now, then tap Stop.")
     }
 
     @discardableResult
     private func stopAudioCapture(cancelTask: Bool) -> URL? {
         let recordedURL = recordingURL
+        meterTimer?.invalidate()
+        meterTimer = nil
         if let audioRecorder, audioRecorder.isRecording {
             audioRecorder.stop()
         }
         audioRecorder = nil
         recordingURL = nil
+        recordingStartedAt = nil
+        audioLevel = 0
         if cancelTask, let recordedURL {
             try? FileManager.default.removeItem(at: recordedURL)
         }
@@ -2565,6 +2658,30 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
             self.interruptionObserver = nil
         }
         return cancelTask ? nil : recordedURL
+    }
+
+    private func startMeteringTimer() {
+        meterTimer?.invalidate()
+        meterTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshRecordingMeter()
+            }
+        }
+    }
+
+    private func refreshRecordingMeter() {
+        guard let audioRecorder, phase == .listening else { return }
+        audioRecorder.updateMeters()
+        elapsedSeconds = max(
+            audioRecorder.currentTime,
+            recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        )
+        let power = audioRecorder.averagePower(forChannel: 0)
+        guard power.isFinite else {
+            audioLevel = 0.08
+            return
+        }
+        audioLevel = min(1, max(0.08, (Double(power) + 54) / 54))
     }
 
     private func installInterruptionObserver() {
@@ -2600,11 +2717,50 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         guard let speechRecognizer = currentSpeechRecognizer(), speechRecognizer.isAvailable else {
             throw VoiceCommandCaptureError.speechUnavailable
         }
+        do {
+            return try await recognizeRecordedAudio(url: url, using: speechRecognizer, requiresOnDeviceRecognition: false)
+        } catch {
+            if #available(iOS 13.0, *), speechRecognizer.supportsOnDeviceRecognition {
+                statusMessage = L10n.tr("Retrying transcription on device.")
+                return try await recognizeRecordedAudio(url: url, using: speechRecognizer, requiresOnDeviceRecognition: true)
+            }
+            throw error
+        }
+    }
+
+    private func recognizeRecordedAudio(
+        url: URL,
+        using speechRecognizer: SFSpeechRecognizer,
+        requiresOnDeviceRecognition: Bool
+    ) async throws -> String {
         return try await withCheckedThrowingContinuation { continuation in
             let request = SFSpeechURLRecognitionRequest(url: url)
-            request.shouldReportPartialResults = false
+            request.shouldReportPartialResults = true
+            request.taskHint = .dictation
+            if #available(iOS 13.0, *) {
+                request.requiresOnDeviceRecognition = requiresOnDeviceRecognition
+            }
             let lock = NSLock()
             var didResume = false
+            var bestText = ""
+
+            func updateBestText(_ text: String) {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                lock.lock()
+                bestText = trimmed
+                lock.unlock()
+                Task { @MainActor in
+                    self.rawText = trimmed
+                    self.statusMessage = L10n.tr("Transcribing recorded audio.")
+                }
+            }
+
+            func currentBestText() -> String {
+                lock.lock()
+                defer { lock.unlock() }
+                return bestText
+            }
 
             func resumeOnce(_ result: Result<String, Error>) {
                 lock.lock()
@@ -2623,12 +2779,30 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
             }
 
             recognitionTask = speechRecognizer.recognitionTask(with: request) { result, error in
-                if let error {
-                    resumeOnce(.failure(error))
-                    return
+                if let result {
+                    let text = result.bestTranscription.formattedString
+                    updateBestText(text)
+                    if result.isFinal {
+                        resumeOnce(.success(text))
+                        return
+                    }
                 }
-                if let result, result.isFinal {
-                    resumeOnce(.success(result.bestTranscription.formattedString))
+                if let error {
+                    let fallbackText = currentBestText()
+                    if fallbackText.isEmpty {
+                        resumeOnce(.failure(error))
+                    } else {
+                        resumeOnce(.success(fallbackText))
+                    }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in
+                let fallbackText = currentBestText()
+                if fallbackText.isEmpty {
+                    self?.recognitionTask?.cancel()
+                    resumeOnce(.failure(VoiceCommandCaptureError.transcriptionTimedOut))
+                } else {
+                    resumeOnce(.success(fallbackText))
                 }
             }
         }
@@ -2637,7 +2811,12 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     private static func makeRecordingURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("veqral-voice-\(UUID().uuidString)")
-            .appendingPathExtension("m4a")
+            .appendingPathExtension("caf")
+    }
+
+    private static func durationText(_ seconds: TimeInterval) -> String {
+        let clamped = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%02d:%02d", clamped / 60, clamped % 60)
     }
 
     private var isMicrophonePermissionUndetermined: Bool {
@@ -2661,6 +2840,17 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
             L10n.tr("Voice input is unavailable.")
         }
     }
+
+    private func finishWithManualEntry(message: String, note: String = "") {
+        #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+        stopAudioCapture(cancelTask: true)
+        #endif
+        ruleBasedText = VoiceCommandRuleCleaner.clean(rawText)
+        cleanedText = ruleBasedText
+        cleanupNote = note.isEmpty ? message : "\(message) \(note)"
+        phase = .ready
+        statusMessage = message
+    }
 }
 
 #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
@@ -2668,6 +2858,7 @@ private enum VoiceCommandCaptureError: LocalizedError {
     case speechUnavailable
     case inputUnavailable
     case recordingUnavailable
+    case transcriptionTimedOut
 
     var errorDescription: String? {
         switch self {
@@ -2677,6 +2868,8 @@ private enum VoiceCommandCaptureError: LocalizedError {
             L10n.tr("Microphone input is unavailable.")
         case .recordingUnavailable:
             L10n.tr("Microphone input is unavailable.")
+        case .transcriptionTimedOut:
+            L10n.tr("No speech was detected. Please try again or type the command below.")
         }
     }
 }

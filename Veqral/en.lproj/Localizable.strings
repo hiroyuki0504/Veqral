@@ -118,6 +118,8 @@
 "Requesting microphone and speech recognition permission." = "Requesting microphone and speech recognition permission.";
 "Voice permissions are ready. Tap Start Recording again." = "Voice permissions are ready. Tap Start Recording again.";
 "Transcribing recorded audio." = "Transcribing recorded audio.";
+"Recorded %@. Transcribing now." = "Recorded %@. Transcribing now.";
+"Retrying transcription on device." = "Retrying transcription on device.";
 "Speech recognition is unavailable." = "Speech recognition is unavailable.";
 "Speech recognition permission was denied." = "Speech recognition permission was denied.";
 "Speech recognition is restricted on this device." = "Speech recognition is restricted on this device.";
@@ -128,9 +130,15 @@
 "Microphone input is unavailable." = "Microphone input is unavailable.";
 "Recording was interrupted." = "Recording was interrupted.";
 "Dictation was too short." = "Dictation was too short.";
+"Recording was too short. Speak for at least one second." = "Recording was too short. Speak for at least one second.";
+"Could not transcribe the recording. Please try again or type the command below." = "Could not transcribe the recording. Please try again or type the command below.";
+"No speech was detected. Please try again or type the command below." = "No speech was detected. Please try again or type the command below.";
 "Review the command before sending." = "Review the command before sending.";
 "Cleaning dictated text with the selected agent." = "Cleaning dictated text with the selected agent.";
 "Listening. Speak your command in Japanese." = "Listening. Speak your command in Japanese.";
+"Recording" = "Recording";
+"Recording level" = "Recording level";
+"Recording. Speak now, then tap Stop." = "Recording. Speak now, then tap Stop.";
 "Mac Host is not connected. Using rule-based cleanup." = "Mac Host is not connected. Using rule-based cleanup.";
 "LLM cleanup was unavailable. Using rule-based cleanup." = "LLM cleanup was unavailable. Using rule-based cleanup.";
 "LLM cleanup finished. Review before sending." = "LLM cleanup finished. Review before sending.";

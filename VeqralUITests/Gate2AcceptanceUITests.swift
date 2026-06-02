@@ -79,6 +79,26 @@ final class Gate2AcceptanceUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground, "App should stay alive after microphone permission is denied.")
     }
 
+    func testVoiceRecordingIndicatorIsVisible() throws {
+        continueAfterFailure = false
+        launchApp(extraEnvironment: [
+            "VEQRAL_UI_TEST_VOICE_TRANSCRIPT": "えっと 余白を詰めて"
+        ])
+        openSection(.command)
+        let voice = app.buttons["gate2.voice.open"]
+        XCTAssertTrue(voice.waitForExistenceWithScrolling(in: app, timeout: 20), "Voice button was not visible.")
+        scrollTo(voice)
+        voice.tap()
+        tapVoiceStart()
+
+        let indicator = app.otherElements["gate2.voice.recordingIndicator"]
+        XCTAssertTrue(indicator.waitForExistence(timeout: 8), "Recording indicator was not visible while listening.")
+
+        let stop = app.buttons["gate2.voice.stop"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 5), "Stop button was not visible while listening.")
+        stop.tap()
+    }
+
     private func launchApp(extraEnvironment: [String: String] = [:]) {
         app = XCUIApplication()
         app.launchArguments = [
