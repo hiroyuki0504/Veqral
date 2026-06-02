@@ -2188,11 +2188,6 @@ private struct VoiceCommandSheet: View {
                     }
                 }
             }
-            .onAppear {
-                if session.phase == .idle {
-                    session.startListening()
-                }
-            }
             .onDisappear {
                 session.cancel()
             }
@@ -2310,15 +2305,15 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     @Published var ruleBasedText: String = ""
     @Published var cleanedText: String = ""
     @Published var cleanupNote: String = ""
-    @Published var statusMessage: String = L10n.tr("Tap stop when you finish speaking.")
+    @Published var statusMessage: String = L10n.tr("Tap Start Recording to begin.")
 
     var canSend: Bool {
         phase == .ready && !cleanedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "ja-JP"))
-    private let audioEngine = AVAudioEngine()
+    private var speechRecognizer: SFSpeechRecognizer?
+    private var audioEngine: AVAudioEngine?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var activeRecognitionID = UUID()
@@ -2352,6 +2347,7 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         }
 
         #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+        let speechRecognizer = currentSpeechRecognizer()
         guard let speechRecognizer, speechRecognizer.isAvailable else {
             fail(L10n.tr("Speech recognition is unavailable."))
             return
@@ -2499,6 +2495,7 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
 
     private func startAudioRecognition() throws {
         stopAudioCapture(cancelTask: true)
+        let speechRecognizer = currentSpeechRecognizer()
         guard let speechRecognizer, speechRecognizer.isAvailable else {
             throw VoiceCommandCaptureError.speechUnavailable
         }
@@ -2516,7 +2513,9 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         request.shouldReportPartialResults = true
         recognitionRequest = request
 
-        let inputNode = audioEngine.inputNode
+        let engine = AVAudioEngine()
+        audioEngine = engine
+        let inputNode = engine.inputNode
         let inputFormat = inputNode.inputFormat(forBus: 0)
         let outputFormat = inputNode.outputFormat(forBus: 0)
         let format = Self.isValidAudioFormat(inputFormat) ? inputFormat : outputFormat
@@ -2532,8 +2531,8 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         }
         hasInputTap = true
 
-        audioEngine.prepare()
-        try audioEngine.start()
+        engine.prepare()
+        try engine.start()
         phase = .listening
         statusMessage = L10n.tr("Listening. Speak your command in Japanese.")
 
@@ -2555,13 +2554,16 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
 
     private func stopAudioCapture(cancelTask: Bool) {
         activeRecognitionID = UUID()
-        if audioEngine.isRunning {
+        if let audioEngine, audioEngine.isRunning {
             audioEngine.stop()
         }
         if hasInputTap {
-            audioEngine.inputNode.removeTap(onBus: 0)
+            if let audioEngine {
+                audioEngine.inputNode.removeTap(onBus: 0)
+            }
             hasInputTap = false
         }
+        audioEngine = nil
         recognitionRequest?.endAudio()
         if cancelTask {
             recognitionTask?.cancel()
@@ -2602,6 +2604,15 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
 
     private static func isValidAudioFormat(_ format: AVAudioFormat) -> Bool {
         format.sampleRate > 0 && format.channelCount > 0
+    }
+
+    private func currentSpeechRecognizer() -> SFSpeechRecognizer? {
+        if let speechRecognizer {
+            return speechRecognizer
+        }
+        let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "ja-JP"))
+        speechRecognizer = recognizer
+        return recognizer
     }
 
     private var isMicrophonePermissionUndetermined: Bool {

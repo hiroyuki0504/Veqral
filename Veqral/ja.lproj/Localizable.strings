@@ -102,6 +102,7 @@
 "Saved Commands" = "定型コマンド";
 "Voice input" = "音声入力";
 "Voice Command" = "音声コマンド";
+"Tap Start Recording to begin." = "「録音開始」を押すと始まります。";
 "Tap stop when you finish speaking." = "話し終えたら停止してください。";
 "Raw Dictation" = "聞き取り";
 "Listening text appears here." = "聞き取った文字がここに表示されます。";

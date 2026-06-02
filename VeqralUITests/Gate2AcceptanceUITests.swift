@@ -29,6 +29,7 @@ final class Gate2AcceptanceUITests: XCTestCase {
         XCTAssertTrue(voice.waitForExistenceWithScrolling(in: app, timeout: 20), "Voice button was not visible.")
         scrollTo(voice)
         voice.tap()
+        tapVoiceStart()
 
         let status = app.staticTexts["gate2.voice.status"]
         XCTAssertTrue(status.waitForText(containing: ["マイク"], timeout: 10), "Voice permission error did not render.")
@@ -46,6 +47,7 @@ final class Gate2AcceptanceUITests: XCTestCase {
         XCTAssertTrue(voice.waitForExistenceWithScrolling(in: app, timeout: 20), "Voice button was not visible.")
         scrollTo(voice)
         voice.tap()
+        tapVoiceStart()
         app.tap()
 
         let stop = app.buttons["gate2.voice.stop"]
@@ -69,6 +71,7 @@ final class Gate2AcceptanceUITests: XCTestCase {
         XCTAssertTrue(voice.waitForExistenceWithScrolling(in: app, timeout: 20), "Voice button was not visible.")
         scrollTo(voice)
         voice.tap()
+        tapVoiceStart()
         app.tap()
 
         let status = app.staticTexts["gate2.voice.status"]
@@ -189,6 +192,7 @@ final class Gate2AcceptanceUITests: XCTestCase {
         XCTAssertTrue(voice.waitForExistenceWithScrolling(in: app, timeout: 20), "Voice button was not visible.")
         scrollTo(voice)
         voice.tap()
+        tapVoiceStart()
 
         let raw = app.staticTexts["gate2.voice.raw"]
         XCTAssertTrue(raw.waitForText(containing: ["deploy", ".env", "token"], timeout: 15), "Injected voice transcript did not appear as raw dictation.")
@@ -205,6 +209,13 @@ final class Gate2AcceptanceUITests: XCTestCase {
 
         let pendingCount = app.staticTexts["gate2.approval.pendingCount"]
         XCTAssertTrue(pendingCount.waitForCount(atLeast: 1, timeout: 45), "High severity voice command did not land in the approval gate.")
+    }
+
+    private func tapVoiceStart() {
+        let start = app.buttons["gate2.voice.start"]
+        XCTAssertTrue(start.waitForExistence(timeout: 10), "Voice start button was not visible.")
+        waitUntilEnabled(start, timeout: 10)
+        start.tap()
     }
 
     private func openSection(_ section: Gate2Section) {
