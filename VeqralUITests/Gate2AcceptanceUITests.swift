@@ -3,6 +3,7 @@ import XCTest
 @MainActor
 final class Gate2AcceptanceUITests: XCTestCase {
     private var app: XCUIApplication!
+    private var systemPromptPlan: [SystemPromptChoice] = [.allow]
 
     func testGate2Acceptance() throws {
         continueAfterFailure = false
@@ -32,6 +33,45 @@ final class Gate2AcceptanceUITests: XCTestCase {
         let status = app.staticTexts["gate2.voice.status"]
         XCTAssertTrue(status.waitForText(containing: ["マイク"], timeout: 10), "Voice permission error did not render.")
         XCTAssertEqual(app.state, .runningForeground, "App should stay alive after a voice permission error.")
+    }
+
+    func testVoicePermissionGrantDoesNotCrash() throws {
+        continueAfterFailure = false
+        systemPromptPlan = [.allow, .allow]
+        launchApp(extraEnvironment: [
+            "VEQRAL_UI_TEST_VOICE_TRANSCRIPT": ""
+        ])
+        openSection(.command)
+        let voice = app.buttons["gate2.voice.open"]
+        XCTAssertTrue(voice.waitForExistenceWithScrolling(in: app, timeout: 20), "Voice button was not visible.")
+        scrollTo(voice)
+        voice.tap()
+        app.tap()
+
+        let stop = app.buttons["gate2.voice.stop"]
+        _ = stop.waitForExistence(timeout: 5)
+        XCTAssertEqual(app.state, .runningForeground, "App should stay alive after microphone permission is granted.")
+        if stop.exists {
+            stop.tap()
+        }
+    }
+
+    func testVoicePermissionDenyDoesNotCrash() throws {
+        continueAfterFailure = false
+        systemPromptPlan = [.deny]
+        launchApp(extraEnvironment: [
+            "VEQRAL_UI_TEST_VOICE_TRANSCRIPT": ""
+        ])
+        openSection(.command)
+        let voice = app.buttons["gate2.voice.open"]
+        XCTAssertTrue(voice.waitForExistenceWithScrolling(in: app, timeout: 20), "Voice button was not visible.")
+        scrollTo(voice)
+        voice.tap()
+        app.tap()
+
+        let status = app.staticTexts["gate2.voice.status"]
+        _ = status.waitForText(containing: ["拒否", "denied"], timeout: 10)
+        XCTAssertEqual(app.state, .runningForeground, "App should stay alive after microphone permission is denied.")
     }
 
     private func launchApp(extraEnvironment: [String: String] = [:]) {
@@ -332,16 +372,8 @@ final class Gate2AcceptanceUITests: XCTestCase {
 
     private func addSystemPromptHandler() {
         addUIInterruptionMonitor(withDescription: "Gate2 system prompts") { alert -> Bool in
-            let preferredButtons = [
-                "音声入力を有効にする",
-                "有効にする",
-                "許可",
-                "OK",
-                "Allow",
-                "Enable Dictation",
-                "Continue"
-            ]
-            for label in preferredButtons {
+            let choice = self.systemPromptPlan.isEmpty ? .allow : self.systemPromptPlan.removeFirst()
+            for label in choice.buttonLabels {
                 let button = alert.buttons[label]
                 if button.exists {
                     button.tap()
@@ -432,6 +464,34 @@ final class Gate2AcceptanceUITests: XCTestCase {
         let predicate = NSPredicate(format: "exists == true AND hittable == true AND enabled == true")
         expectation(for: predicate, evaluatedWith: element)
         waitForExpectations(timeout: timeout)
+    }
+}
+
+private enum SystemPromptChoice {
+    case allow
+    case deny
+
+    var buttonLabels: [String] {
+        switch self {
+        case .allow:
+            [
+                "音声入力を有効にする",
+                "有効にする",
+                "許可",
+                "OK",
+                "Allow",
+                "Enable Dictation",
+                "Continue"
+            ]
+        case .deny:
+            [
+                "許可しない",
+                "許可しないでください",
+                "Don't Allow",
+                "Do Not Allow",
+                "Not Now"
+            ]
+        }
     }
 }
 
