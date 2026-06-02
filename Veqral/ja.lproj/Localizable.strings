@@ -115,6 +115,7 @@
 "Ready" = "送信準備完了";
 "Voice Error" = "音声エラー";
 "Requesting microphone and speech recognition permission." = "マイクと音声認識の権限を確認しています。";
+"Voice permissions are ready. Tap Start Recording again." = "音声入力の権限が準備できました。もう一度「録音開始」を押してください。";
 "Speech recognition is unavailable." = "音声認識を利用できません。";
 "Speech recognition permission was denied." = "音声認識の権限が拒否されています。";
 "Speech recognition is restricted on this device." = "このデバイスでは音声認識が制限されています。";

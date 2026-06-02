@@ -2356,14 +2356,24 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
             fail(L10n.tr("Speech recognition is unavailable."))
             return
         }
+        let speechPermissionWasUndetermined = SFSpeechRecognizer.authorizationStatus() == .notDetermined
         requestSpeechAuthorization { [weak self] status in
             guard let self else { return }
             switch status {
             case .authorized:
+                if speechPermissionWasUndetermined {
+                    self.finishPermissionWarmup()
+                    return
+                }
+                let microphonePermissionWasUndetermined = self.isMicrophonePermissionUndetermined
                 self.requestMicrophonePermission { [weak self] granted in
                     guard let self else { return }
                     guard granted else {
                         self.fail(L10n.tr("Microphone permission was denied."))
+                        return
+                    }
+                    if speechPermissionWasUndetermined || microphonePermissionWasUndetermined {
+                        self.finishPermissionWarmup()
                         return
                     }
                     do {
@@ -2481,6 +2491,12 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         }
     }
 
+    private func finishPermissionWarmup() {
+        stopAudioCapture(cancelTask: true)
+        phase = .idle
+        statusMessage = L10n.tr("Voice permissions are ready. Tap Start Recording again.")
+    }
+
     private func startAudioRecognition() throws {
         stopAudioCapture(cancelTask: true)
         guard let speechRecognizer, speechRecognizer.isAvailable else {
@@ -2586,6 +2602,14 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
 
     private static func isValidAudioFormat(_ format: AVAudioFormat) -> Bool {
         format.sampleRate > 0 && format.channelCount > 0
+    }
+
+    private var isMicrophonePermissionUndetermined: Bool {
+        if #available(iOS 17.0, *) {
+            AVAudioApplication.shared.recordPermission == .undetermined
+        } else {
+            AVAudioSession.sharedInstance().recordPermission == .undetermined
+        }
     }
     #endif
 
