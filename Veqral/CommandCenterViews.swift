@@ -2357,33 +2357,29 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
             return
         }
         requestSpeechAuthorization { [weak self] status in
-            Task { @MainActor in
-                guard let self else { return }
-                switch status {
-                case .authorized:
-                    self.requestMicrophonePermission { [weak self] granted in
-                        Task { @MainActor in
-                            guard let self else { return }
-                            guard granted else {
-                                self.fail(L10n.tr("Microphone permission was denied."))
-                                return
-                            }
-                            do {
-                                try self.startAudioRecognition()
-                            } catch {
-                                self.fail(error.localizedDescription)
-                            }
-                        }
+            guard let self else { return }
+            switch status {
+            case .authorized:
+                self.requestMicrophonePermission { [weak self] granted in
+                    guard let self else { return }
+                    guard granted else {
+                        self.fail(L10n.tr("Microphone permission was denied."))
+                        return
                     }
-                case .denied:
-                    self.fail(L10n.tr("Speech recognition permission was denied."))
-                case .restricted:
-                    self.fail(L10n.tr("Speech recognition is restricted on this device."))
-                case .notDetermined:
-                    self.fail(L10n.tr("Speech recognition permission is not decided."))
-                @unknown default:
-                    self.fail(L10n.tr("Speech recognition is unavailable."))
+                    do {
+                        try self.startAudioRecognition()
+                    } catch {
+                        self.fail(error.localizedDescription)
+                    }
                 }
+            case .denied:
+                self.fail(L10n.tr("Speech recognition permission was denied."))
+            case .restricted:
+                self.fail(L10n.tr("Speech recognition is restricted on this device."))
+            case .notDetermined:
+                self.fail(L10n.tr("Speech recognition permission is not decided."))
+            @unknown default:
+                self.fail(L10n.tr("Speech recognition is unavailable."))
             }
         }
         #else
@@ -2431,27 +2427,57 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     }
 
     #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-    private func requestSpeechAuthorization(_ completion: @escaping (SFSpeechRecognizerAuthorizationStatus) -> Void) {
+    private func requestSpeechAuthorization(_ completion: @escaping @MainActor (SFSpeechRecognizerAuthorizationStatus) -> Void) {
+        let deliver: @Sendable (SFSpeechRecognizerAuthorizationStatus) -> Void = { status in
+            Task { @MainActor in
+                completion(status)
+            }
+        }
         switch SFSpeechRecognizer.authorizationStatus() {
         case .authorized, .denied, .restricted:
-            completion(SFSpeechRecognizer.authorizationStatus())
+            deliver(SFSpeechRecognizer.authorizationStatus())
         case .notDetermined:
-            SFSpeechRecognizer.requestAuthorization(completion)
+            SFSpeechRecognizer.requestAuthorization { status in
+                deliver(status)
+            }
         @unknown default:
-            completion(.denied)
+            deliver(.denied)
         }
     }
 
-    private func requestMicrophonePermission(_ completion: @escaping @Sendable (Bool) -> Void) {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            completion(true)
-        case .denied, .restricted:
-            completion(false)
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio, completionHandler: completion)
-        @unknown default:
-            completion(false)
+    private func requestMicrophonePermission(_ completion: @escaping @MainActor (Bool) -> Void) {
+        let deliver: @Sendable (Bool) -> Void = { granted in
+            Task { @MainActor in
+                completion(granted)
+            }
+        }
+
+        if #available(iOS 17.0, *) {
+            switch AVAudioApplication.shared.recordPermission {
+            case .granted:
+                deliver(true)
+            case .denied:
+                deliver(false)
+            case .undetermined:
+                AVAudioApplication.requestRecordPermission { granted in
+                    deliver(granted)
+                }
+            @unknown default:
+                deliver(false)
+            }
+        } else {
+            switch AVAudioSession.sharedInstance().recordPermission {
+            case .granted:
+                deliver(true)
+            case .denied:
+                deliver(false)
+            case .undetermined:
+                AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                    deliver(granted)
+                }
+            @unknown default:
+                deliver(false)
+            }
         }
     }
 
@@ -2465,6 +2491,9 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         try audioSession.setCategory(.record, mode: .measurement, options: [.duckOthers])
         try audioSession.setActive(true)
         hasActiveAudioSession = true
+        guard audioSession.isInputAvailable else {
+            throw VoiceCommandCaptureError.inputUnavailable
+        }
         installInterruptionObserver()
 
         let request = SFSpeechAudioBufferRecognitionRequest()
@@ -2472,7 +2501,9 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         recognitionRequest = request
 
         let inputNode = audioEngine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
+        let inputFormat = inputNode.inputFormat(forBus: 0)
+        let outputFormat = inputNode.outputFormat(forBus: 0)
+        let format = Self.isValidAudioFormat(inputFormat) ? inputFormat : outputFormat
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw VoiceCommandCaptureError.invalidInputFormat
         }
@@ -2552,6 +2583,10 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
             }
         }
     }
+
+    private static func isValidAudioFormat(_ format: AVAudioFormat) -> Bool {
+        format.sampleRate > 0 && format.channelCount > 0
+    }
     #endif
 
     private static func forcedVoiceErrorMessage(_ value: String) -> String {
@@ -2571,12 +2606,15 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
 #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
 private enum VoiceCommandCaptureError: LocalizedError {
     case speechUnavailable
+    case inputUnavailable
     case invalidInputFormat
 
     var errorDescription: String? {
         switch self {
         case .speechUnavailable:
             L10n.tr("Speech recognition is unavailable.")
+        case .inputUnavailable:
+            L10n.tr("Microphone input is unavailable.")
         case .invalidInputFormat:
             L10n.tr("Microphone input is unavailable.")
         }
