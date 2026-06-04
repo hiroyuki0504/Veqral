@@ -17,7 +17,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .home: L10n.tr("Command")
+        case .home: L10n.tr("Codex / Claude")
         case .portfolio: L10n.tr("Portfolio")
         case .projects: L10n.tr("Projects")
         case .devices: L10n.tr("Devices")
@@ -47,10 +47,11 @@ enum AppSection: String, CaseIterable, Identifiable {
         }
     }
 
-    static let primaryTabs: [AppSection] = [.home, .portfolio, .approvals, .devices]
-    static let commandGroup: [AppSection] = [.home, .portfolio]
-    static let operationGroup: [AppSection] = [.projects, .runs, .diff, .artifacts, .history]
-    static let systemGroup: [AppSection] = [.devices, .approvals, .memory, .github]
+    static let primaryTabs: [AppSection] = [.home, .history, .approvals, .devices]
+    static let commandGroup: [AppSection] = [.home, .history, .approvals]
+    static let operationGroup: [AppSection] = [.runs, .diff, .artifacts, .github]
+    static let systemGroup: [AppSection] = [.devices]
+    static let parkedGroup: [AppSection] = [.projects, .memory, .portfolio]
 }
 
 enum RunPhase: String, CaseIterable, Identifiable, Codable {

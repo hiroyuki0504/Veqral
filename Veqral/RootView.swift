@@ -284,20 +284,14 @@ private struct MobileNavigationDrawer: View {
                     .buttonStyle(.borderedProminent)
                     .buttonBorderShape(.roundedRectangle(radius: 10))
 
-                    drawerSection(L10n.tr("Today")) {
+                    drawerSection(L10n.tr("Native Agents")) {
                         drawerRow(.home, identifier: "gate2.sidebar.home")
-                        drawerRow(.approvals, count: store.pendingApprovals().count, identifier: "gate2.sidebar.approvals")
                         drawerRow(.history, identifier: "gate2.more.history")
-                    }
-
-                    drawerSection(L10n.tr("Workspaces")) {
-                        drawerRow(.projects, identifier: "gate2.more.projects")
-                        drawerRow(.portfolio, identifier: "gate2.sidebar.portfolio")
-                        drawerRow(.memory, identifier: "gate2.more.memory")
-                    }
-
-                    drawerSection(L10n.tr("Tools")) {
+                        drawerRow(.approvals, count: store.pendingApprovals().count, identifier: "gate2.sidebar.approvals")
                         drawerRow(.runs, identifier: "gate2.more.runs")
+                    }
+
+                    drawerSection(L10n.tr("Run Tools")) {
                         drawerRow(.diff, identifier: "gate2.more.diff")
                         drawerRow(.artifacts, identifier: "gate2.more.artifacts")
                         drawerRow(.github, identifier: "gate2.more.github")
@@ -311,6 +305,17 @@ private struct MobileNavigationDrawer: View {
                             }
                         }
                         .pickerStyle(.segmented)
+                    }
+
+                    drawerSection(L10n.tr("Parked")) {
+                        Text(L10n.tr("Hermes orchestration and project memory now live in Hermes Desktop. These Veqral surfaces stay available for review while they are parked."))
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, 12)
+                        drawerRow(.projects, identifier: "gate2.more.projects")
+                        drawerRow(.memory, identifier: "gate2.more.memory")
+                        drawerRow(.portfolio, identifier: "gate2.sidebar.portfolio")
                     }
                 }
                 .padding(18)
@@ -384,7 +389,7 @@ private struct MoreView: View {
 
     var body: some View {
         List {
-            Section(L10n.tr("Operations")) {
+            Section(L10n.tr("Run Tools")) {
                 ForEach(AppSection.operationGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
                     NavigationLink(value: section) {
                         Label(section.title, systemImage: section.symbol)
@@ -396,6 +401,19 @@ private struct MoreView: View {
 
             Section(L10n.tr("System")) {
                 ForEach(AppSection.systemGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
+                    NavigationLink(value: section) {
+                        Label(section.title, systemImage: section.symbol)
+                            .accessibilityIdentifier("gate2.more.\(section.rawValue)")
+                    }
+                    .accessibilityIdentifier("gate2.more.\(section.rawValue)")
+                }
+            }
+
+            Section(L10n.tr("Parked")) {
+                Text(L10n.tr("Hermes orchestration and project memory now live in Hermes Desktop."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(AppSection.parkedGroup.filter { !AppSection.primaryTabs.contains($0) }) { section in
                     NavigationLink(value: section) {
                         Label(section.title, systemImage: section.symbol)
                             .accessibilityIdentifier("gate2.more.\(section.rawValue)")

@@ -556,7 +556,7 @@ struct DevicesView: View {
                         CompactKeyValueLine(key: "Git root", value: store.workspace.rootPath.isEmpty ? L10n.tr("Not detected") : store.workspace.rootPath, monospaced: true)
                         KeyValueLine(key: "Branch", value: store.workspace.branchLabel)
                         KeyValueLine(key: "State", value: VQDisplay.workspaceStatus(store.workspace))
-                        CompactKeyValueLine(key: "Hermes path", value: store.workspace.hermesPath.isEmpty ? L10n.tr("Not detected") : store.workspace.hermesPath, monospaced: true)
+                        CompactKeyValueLine(key: "Hermes Desktop", value: store.workspace.hermesPath.isEmpty ? L10n.tr("Not detected") : L10n.tr("Delegated"), monospaced: false)
                         KeyValueLine(key: "Tailscale", value: store.workspace.tailscaleIP.isEmpty ? L10n.tr("Not detected") : store.workspace.tailscaleIP)
                         if let error = store.workspace.errorMessage {
                             Text(error)
@@ -627,9 +627,9 @@ struct DevicesView: View {
                         KeyValueLine(key: "Device ID", value: store.remoteHost.deviceID.isEmpty ? L10n.tr("Not Paired") : "\(store.remoteHost.deviceID.prefix(8))...")
                         KeyValueLine(key: "Tailscale", value: store.remoteHostHealth?.tailscaleIP ?? (store.workspace.tailscaleIP.isEmpty ? L10n.tr("Not verified") : store.workspace.tailscaleIP))
                         KeyValueLine(key: "Host", value: store.remoteHostHealth?.host ?? L10n.tr("Not connected"))
-                        KeyValueLine(key: "Hermes", value: store.remoteHostHealth?.hermesVersion ?? L10n.tr("Not checked"))
+                        KeyValueLine(key: "Hermes Desktop", value: L10n.tr("Delegated"))
                         KeyValueLine(key: "Push", value: store.pushNotificationMessage.isEmpty ? VeqralFeatureFlags.pushUnavailableMessage : store.pushNotificationMessage)
-                        KeyValueLine(key: "Execution", value: store.remoteHost.isEnabled ? L10n.tr("iPhone/iPad -> Tailscale -> Mac Host -> Hermes") : L10n.tr("Pair a Mac Host before running on iPhone/iPad"))
+                        KeyValueLine(key: "Execution", value: store.remoteHost.isEnabled ? L10n.tr("iPhone/iPad -> Tailscale -> Mac Host -> Codex/Claude CLI") : L10n.tr("Pair a Mac Host before running on iPhone/iPad"))
 
                         HStack(spacing: 8) {
                             Button {
@@ -716,7 +716,7 @@ struct DevicesView: View {
                                 }
                             }
                         } else {
-                            Text(store.remoteHost.isPaired ? L10n.tr("Refresh the Mac Host to inspect Codex, Claude, and Hermes adapters.") : L10n.tr("Pair a Mac Host to inspect CLI versions."))
+                            Text(store.remoteHost.isPaired ? L10n.tr("Refresh the Mac Host to inspect Codex and Claude adapters.") : L10n.tr("Pair a Mac Host to inspect CLI versions."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -732,14 +732,14 @@ struct DevicesView: View {
                     )
                 }
 
-                VQPanel("Run Agent on This Mac", systemImage: "switch.2") {
+                VQPanel("Run Native Agent on This Mac", systemImage: "switch.2") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text(L10n.tr("Choose which native agent the paired Mac Host should spawn for the next command."))
+                        Text(L10n.tr("Choose which native CLI the paired Mac Host should spawn for the next direct command."))
                             .font(.caption)
                             .foregroundStyle(VQTheme.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
 
-                        ForEach([CommandRuntime.codexDirect, .claudeDirect, .hermesAgent]) { runtime in
+                        ForEach([CommandRuntime.codexDirect, .claudeDirect]) { runtime in
                             Button {
                                 store.selectRuntime(runtime)
                             } label: {
@@ -771,7 +771,7 @@ struct DevicesView: View {
                         }
 
                         KeyValueLine(key: "Direct mode", value: L10n.tr("Codex and Claude keep their own native history."))
-                        KeyValueLine(key: "Hermes mode", value: L10n.tr("Project chats share Hermes memory across model changes."))
+                        KeyValueLine(key: "Hermes", value: L10n.tr("Use Hermes Desktop for orchestration, delegation, and project memory."))
                     }
                 }
 
@@ -1428,7 +1428,7 @@ private struct AuthOnboardingPanel: View {
                         }
                     }
                 } else {
-                    Text("Codex / Claude / Hermes のログイン状態は Host 接続後に表示されます。")
+                    Text("Codex / Claude のログイン状態は Host 接続後に表示されます。")
                         .font(.subheadline)
                         .foregroundStyle(VQTheme.secondaryText)
                 }
@@ -1453,7 +1453,6 @@ private struct AuthProviderRow: View {
                     .foregroundStyle(VQTheme.ink)
                 StatusPill(title: provider.isInstalled ? "CLI" : "未インストール", tint: provider.isInstalled ? VQTheme.green : VQTheme.amber)
                 StatusPill(title: provider.isLoggedIn ? "login 済み" : "login 未確認", tint: provider.isLoggedIn ? VQTheme.green : VQTheme.amber)
-                StatusPill(title: provider.hermesProviderReady ? "Hermes OK" : "Hermes 未確認", tint: provider.hermesProviderReady ? VQTheme.green : VQTheme.amber)
                 if provider.keychainMarkerPresent {
                     StatusPill(title: "Keychain", tint: VQTheme.green)
                 }
@@ -2253,7 +2252,7 @@ struct HistoryView: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: "History", systemImage: "clock.arrow.circlepath") {
+        ScreenScaffold(title: L10n.tr("Codex / Claude History"), systemImage: "clock.arrow.circlepath") {
             VQPanel("Filters", systemImage: "line.3.horizontal.decrease.circle") {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 10) {
