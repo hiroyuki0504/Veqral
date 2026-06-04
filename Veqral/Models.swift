@@ -9,6 +9,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     case diff
     case artifacts
     case history
+    case salesLab
     case approvals
     case memory
     case github
@@ -25,6 +26,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .diff: L10n.tr("Diff")
         case .artifacts: L10n.tr("Artifacts")
         case .history: L10n.tr("History")
+        case .salesLab: "営業ラボ"
         case .approvals: L10n.tr("Approvals")
         case .memory: L10n.tr("Memory")
         case .github: "GitHub"
@@ -41,6 +43,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .diff: "plus.forwardslash.minus"
         case .artifacts: "shippingbox"
         case .history: "clock.arrow.circlepath"
+        case .salesLab: "chart.line.uptrend.xyaxis"
         case .approvals: "hand.raised"
         case .memory: "brain.head.profile"
         case .github: "point.3.connected.trianglepath.dotted"
@@ -49,7 +52,7 @@ enum AppSection: String, CaseIterable, Identifiable {
 
     static let primaryTabs: [AppSection] = [.home, .portfolio, .approvals, .devices]
     static let commandGroup: [AppSection] = [.home, .portfolio]
-    static let operationGroup: [AppSection] = [.projects, .runs, .diff, .artifacts, .history]
+    static let operationGroup: [AppSection] = [.projects, .runs, .diff, .artifacts, .history, .salesLab]
     static let systemGroup: [AppSection] = [.devices, .approvals, .memory, .github]
 }
 

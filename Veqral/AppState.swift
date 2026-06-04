@@ -851,6 +851,180 @@ struct RemotePortfolioPromoteResponse: Codable, Sendable {
     var approvalRequired: Bool
 }
 
+enum SalesLeadStatus: String, Codable, CaseIterable, Identifiable, Sendable {
+    case new
+    case auditReady = "audit_ready"
+    case proposalReady = "proposal_ready"
+    case contacted
+    case won
+    case lost
+    case doNotContact = "do_not_contact"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .new: "未対応"
+        case .auditReady: "監査済み"
+        case .proposalReady: "提案準備"
+        case .contacted: "連絡済み"
+        case .won: "受注"
+        case .lost: "失注"
+        case .doNotContact: "連絡しない"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .new: VQTheme.steel
+        case .auditReady: VQTheme.accent
+        case .proposalReady: VQTheme.amber
+        case .contacted: VQTheme.ink
+        case .won: VQTheme.green
+        case .lost, .doNotContact: VQTheme.unavailable
+        }
+    }
+}
+
+struct SalesLead: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var businessName: String
+    var category: String
+    var area: String
+    var officialWebsiteURL: String?
+    var googleMapsURL: String?
+    var googlePlaceID: String?
+    var phone: String?
+    var email: String?
+    var status: SalesLeadStatus
+    var notes: String
+    var latestAudit: WebsiteAudit?
+    var latestRedesignMock: RedesignMock?
+    var latestProposal: Proposal?
+    var portfolioAssetID: String?
+    var hermesHandoffPath: String?
+    var outreachLogs: [OutreachLog]
+    var createdAt: Date
+    var updatedAt: Date
+
+    static func empty() -> SalesLead {
+        let now = Date()
+        return SalesLead(
+            id: UUID().uuidString.lowercased(),
+            businessName: "",
+            category: "",
+            area: "",
+            officialWebsiteURL: nil,
+            googleMapsURL: nil,
+            googlePlaceID: nil,
+            phone: nil,
+            email: nil,
+            status: .new,
+            notes: "",
+            latestAudit: nil,
+            latestRedesignMock: nil,
+            latestProposal: nil,
+            portfolioAssetID: nil,
+            hermesHandoffPath: nil,
+            outreachLogs: [],
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+}
+
+struct WebsiteAudit: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var leadID: String
+    var url: String
+    var mobileViewport: String
+    var score: Int
+    var summary: String
+    var findings: [WebsiteAuditFinding]
+    var businessImpacts: [String]
+    var screenshotPath: String
+    var lighthouseSummaryPath: String?
+    var createdAt: Date
+}
+
+struct WebsiteAuditFinding: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var severity: String
+    var title: String
+    var detail: String
+    var recommendation: String
+}
+
+struct RedesignMock: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var leadID: String
+    var headline: String
+    var subheadline: String
+    var cta: String
+    var htmlPath: String
+    var screenshotPath: String
+    var notes: String
+    var createdAt: Date
+    var approvedAt: Date?
+}
+
+struct Proposal: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var leadID: String
+    var title: String
+    var htmlPath: String
+    var pdfPath: String?
+    var imagePath: String?
+    var summary: String
+    var pricing: [String]
+    var emailDraft: String
+    var dmDraft: String
+    var phoneScript: String
+    var approvalStatus: String
+    var createdAt: Date
+    var approvedAt: Date?
+}
+
+struct OutreachLog: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var channel: String
+    var note: String
+    var createdAt: Date
+}
+
+struct RemoteSalesLeadListResponse: Codable, Sendable {
+    var leads: [SalesLead]
+}
+
+struct RemoteSalesCSVImportResponse: Codable, Sendable {
+    var imported: Int
+    var skipped: Int
+    var leads: [SalesLead]
+}
+
+struct RemoteSalesLeadAsset: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var kind: String
+    var path: String
+    var createdAt: Date?
+}
+
+struct RemoteSalesLeadAssetsResponse: Codable, Sendable {
+    var leadID: String
+    var assets: [RemoteSalesLeadAsset]
+}
+
+struct RemoteSalesPortfolioPromotionResponse: Codable, Sendable {
+    var lead: SalesLead
+    var asset: PortfolioAsset
+}
+
+struct RemoteSalesHermesHandoffResponse: Codable, Sendable {
+    var lead: SalesLead
+    var notePath: String
+    var note: String
+}
+
 struct RemoteMemoryFile: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var title: String
@@ -1050,9 +1224,15 @@ final class CommandCenterStore: ObservableObject {
     @Published var portfolioLogSummary: String = ""
     @Published var portfolioCommits: [PortfolioRecentCommit] = []
     @Published var portfolioMessage: String = ""
+    @Published var salesLeads: [SalesLead] = []
+    @Published var selectedSalesLeadID: String?
+    @Published var salesLeadAssets: [RemoteSalesLeadAsset] = []
+    @Published var salesLabMessage: String = ""
+    @Published var salesHermesHandoffNote: String = ""
     @Published var projectCostSummaries: [RemoteProjectCostSummary] = []
     @Published var costGovernanceMessage: String = ""
     @Published var isLoadingPortfolio = false
+    @Published var isLoadingSalesLab = false
     @Published var remoteHistorySessions: [RemoteHistorySession] = []
     @Published var remoteHistoryProjects: [String] = []
     @Published var selectedHistorySession: RemoteHistorySession?
@@ -1166,6 +1346,14 @@ final class CommandCenterStore: ObservableObject {
             return asset
         }
         return portfolioAssets.first
+    }
+
+    var selectedSalesLead: SalesLead? {
+        if let selectedSalesLeadID,
+           let lead = salesLeads.first(where: { $0.id == selectedSalesLeadID }) {
+            return lead
+        }
+        return salesLeads.first
     }
 
     var selectedAgentProject: AgentProjectSpace? {
@@ -2033,6 +2221,191 @@ final class CommandCenterStore: ObservableObject {
         asset.linkedProjectId = selectedAgentProject?.id
         savePortfolioAsset(asset)
         requestedSection = .projects
+    }
+
+    func refreshSalesLeads() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            salesLabMessage = "Mac Host とペアリングすると営業ラボを読み込めます。"
+            return
+        }
+        let configuration = remoteHost
+        isLoadingSalesLab = true
+        salesLabMessage = "営業案件を読み込み中..."
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).salesLeads()
+                salesLeads = response.leads
+                selectedSalesLeadID = selectedSalesLeadID ?? response.leads.first?.id
+                salesLabMessage = response.leads.isEmpty ? "案件はまだありません。" : "\(response.leads.count)件の案件を読み込みました。"
+                refreshSalesLeadAssets()
+            } catch {
+                salesLabMessage = Self.remoteFailureMessage(error, context: "Sales Lab")
+            }
+            isLoadingSalesLab = false
+        }
+    }
+
+    func saveSalesLead(_ lead: SalesLead) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            salesLabMessage = "Mac Host とペアリングしてください。"
+            return
+        }
+        let configuration = remoteHost
+        salesLabMessage = "案件を保存中..."
+        Task { @MainActor in
+            do {
+                let saved = try await RemoteHostClient(configuration: configuration).saveSalesLead(lead)
+                upsertSalesLeadLocally(saved)
+                selectedSalesLeadID = saved.id
+                salesLabMessage = "案件を保存しました。"
+                refreshSalesLeadAssets()
+            } catch {
+                salesLabMessage = Self.remoteFailureMessage(error, context: "Sales lead save")
+            }
+        }
+    }
+
+    func importSalesCSV(_ csv: String) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            salesLabMessage = "Mac Host とペアリングしてください。"
+            return
+        }
+        let configuration = remoteHost
+        isLoadingSalesLab = true
+        salesLabMessage = "CSVを取り込み中..."
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).importSalesCSV(csv)
+                refreshSalesLeads()
+                salesLabMessage = "\(response.imported)件を取り込みました。スキップ \(response.skipped)件。"
+            } catch {
+                salesLabMessage = Self.remoteFailureMessage(error, context: "Sales CSV")
+            }
+            isLoadingSalesLab = false
+        }
+    }
+
+    func selectSalesLead(_ lead: SalesLead) {
+        selectedSalesLeadID = lead.id
+        salesHermesHandoffNote = ""
+        refreshSalesLeadAssets()
+    }
+
+    func auditSelectedSalesLead() {
+        guard let lead = selectedSalesLead else { return }
+        performSalesAction(message: "公式サイトを監査中...") { client in
+            let audit = try await client.auditSalesLead(id: lead.id)
+            var updated = lead
+            updated.latestAudit = audit
+            updated.status = updated.status == .new ? .auditReady : updated.status
+            return updated
+        }
+    }
+
+    func generateSelectedSalesRedesign() {
+        guard let lead = selectedSalesLead else { return }
+        performSalesAction(message: "スマホ改善案を生成中...") { client in
+            let mock = try await client.generateSalesRedesign(id: lead.id)
+            var updated = lead
+            updated.latestRedesignMock = mock
+            return updated
+        }
+    }
+
+    func generateSelectedSalesProposal() {
+        guard let lead = selectedSalesLead else { return }
+        performSalesAction(message: "提案書を生成中...") { client in
+            let proposal = try await client.generateSalesProposal(id: lead.id)
+            var updated = lead
+            updated.latestProposal = proposal
+            updated.status = .proposalReady
+            return updated
+        }
+    }
+
+    func approveSelectedSalesProposal() {
+        guard let lead = selectedSalesLead else { return }
+        performSalesAction(message: "提案書を承認中...") { client in
+            let proposal = try await client.approveSalesProposal(id: lead.id)
+            var updated = lead
+            updated.latestProposal = proposal
+            return updated
+        }
+    }
+
+    func markSelectedSalesLeadContacted(channel: String, note: String?) {
+        guard let lead = selectedSalesLead else { return }
+        performSalesAction(message: "連絡済みに更新中...") { client in
+            try await client.markSalesLeadContacted(id: lead.id, channel: channel, note: note)
+        }
+    }
+
+    func updateSelectedSalesLeadStatus(_ status: SalesLeadStatus) {
+        guard var lead = selectedSalesLead else { return }
+        lead.status = status
+        saveSalesLead(lead)
+    }
+
+    func promoteSelectedSalesLeadToPortfolio() {
+        guard let lead = selectedSalesLead else { return }
+        performSalesAction(message: "Portfolioへ昇格中...") { [self] client in
+            let response = try await client.promoteSalesLeadToPortfolio(id: lead.id)
+            self.portfolioAssets.insert(response.asset, at: 0)
+            return response.lead
+        }
+    }
+
+    func createSelectedSalesHermesHandoff() {
+        guard let lead = selectedSalesLead else { return }
+        performSalesAction(message: "Hermes Desktop向けメモを作成中...") { [self] client in
+            let response = try await client.createSalesHermesHandoff(id: lead.id)
+            self.salesHermesHandoffNote = response.note
+            return response.lead
+        }
+    }
+
+    func refreshSalesLeadAssets() {
+        guard remoteHost.isEnabled, remoteHost.isPaired, let lead = selectedSalesLead else { return }
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).salesLeadAssets(id: lead.id)
+                salesLeadAssets = response.assets
+            } catch {
+                salesLabMessage = Self.remoteFailureMessage(error, context: "Sales assets")
+            }
+        }
+    }
+
+    private func performSalesAction(message: String, action: @escaping (RemoteHostClient) async throws -> SalesLead) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            salesLabMessage = "Mac Host とペアリングしてください。"
+            return
+        }
+        let configuration = remoteHost
+        isLoadingSalesLab = true
+        salesLabMessage = message
+        Task { @MainActor in
+            do {
+                let updated = try await action(RemoteHostClient(configuration: configuration))
+                upsertSalesLeadLocally(updated)
+                selectedSalesLeadID = updated.id
+                salesLabMessage = "更新しました。"
+                refreshSalesLeadAssets()
+            } catch {
+                salesLabMessage = Self.remoteFailureMessage(error, context: "Sales Lab")
+            }
+            isLoadingSalesLab = false
+        }
+    }
+
+    private func upsertSalesLeadLocally(_ lead: SalesLead) {
+        if let index = salesLeads.firstIndex(where: { $0.id == lead.id }) {
+            salesLeads[index] = lead
+        } else {
+            salesLeads.insert(lead, at: 0)
+        }
+        salesLeads.sort { $0.updatedAt > $1.updatedAt }
     }
 
     func revokeRemoteDevice(_ device: RemoteDeviceRecord) {
@@ -4659,6 +5032,71 @@ struct RemoteHostClient: Sendable {
     func portfolioPromote(assetID: String) async throws -> RemotePortfolioPromoteResponse {
         let data = try await request(path: "/v1/portfolio/assets/\(assetID)/promote", method: "POST", body: Data())
         return try JSONDecoder.commandCenter.decode(RemotePortfolioPromoteResponse.self, from: data)
+    }
+
+    func salesLeads() async throws -> RemoteSalesLeadListResponse {
+        let data = try await request(path: "/v1/sales/leads", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteSalesLeadListResponse.self, from: data)
+    }
+
+    func saveSalesLead(_ lead: SalesLead) async throws -> SalesLead {
+        struct Body: Encodable {
+            var lead: SalesLead
+        }
+        let body = try JSONEncoder.commandCenter.encode(Body(lead: lead))
+        let data = try await request(path: "/v1/sales/leads/\(lead.id)", method: "PATCH", body: body)
+        return try JSONDecoder.commandCenter.decode(SalesLead.self, from: data)
+    }
+
+    func importSalesCSV(_ csv: String) async throws -> RemoteSalesCSVImportResponse {
+        let body = try JSONEncoder.commandCenter.encode(["csv": csv])
+        let data = try await request(path: "/v1/sales/leads/import-csv", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteSalesCSVImportResponse.self, from: data)
+    }
+
+    func auditSalesLead(id: String) async throws -> WebsiteAudit {
+        let data = try await request(path: "/v1/sales/leads/\(id)/audit", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(WebsiteAudit.self, from: data)
+    }
+
+    func generateSalesRedesign(id: String) async throws -> RedesignMock {
+        let data = try await request(path: "/v1/sales/leads/\(id)/generate-mock", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(RedesignMock.self, from: data)
+    }
+
+    func generateSalesProposal(id: String) async throws -> Proposal {
+        let data = try await request(path: "/v1/sales/leads/\(id)/generate-proposal", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(Proposal.self, from: data)
+    }
+
+    func approveSalesProposal(id: String) async throws -> Proposal {
+        let data = try await request(path: "/v1/sales/leads/\(id)/approve-proposal", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(Proposal.self, from: data)
+    }
+
+    func markSalesLeadContacted(id: String, channel: String, note: String?) async throws -> SalesLead {
+        struct Body: Encodable {
+            var channel: String
+            var note: String?
+        }
+        let body = try JSONEncoder.commandCenter.encode(Body(channel: channel, note: note))
+        let data = try await request(path: "/v1/sales/leads/\(id)/mark-contacted", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(SalesLead.self, from: data)
+    }
+
+    func salesLeadAssets(id: String) async throws -> RemoteSalesLeadAssetsResponse {
+        let data = try await request(path: "/v1/sales/leads/\(id)/assets", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteSalesLeadAssetsResponse.self, from: data)
+    }
+
+    func promoteSalesLeadToPortfolio(id: String) async throws -> RemoteSalesPortfolioPromotionResponse {
+        let data = try await request(path: "/v1/sales/leads/\(id)/promote-to-portfolio", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteSalesPortfolioPromotionResponse.self, from: data)
+    }
+
+    func createSalesHermesHandoff(id: String) async throws -> RemoteSalesHermesHandoffResponse {
+        let data = try await request(path: "/v1/sales/leads/\(id)/create-hermes-handoff", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteSalesHermesHandoffResponse.self, from: data)
     }
 
     func memoryList() async throws -> RemoteMemoryListResponse {

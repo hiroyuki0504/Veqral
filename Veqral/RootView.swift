@@ -355,6 +355,8 @@ private func sectionDestination(_ section: AppSection) -> some View {
         ArtifactsView()
     case .history:
         HistoryView()
+    case .salesLab:
+        SalesLabView()
     case .approvals:
         ApprovalsView()
     case .memory:
