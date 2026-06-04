@@ -39,6 +39,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-auth-onboarding" {
             AuthOnboardingSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-direct-clients" {
+            DirectClientSmoke.runAndExit()
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -934,6 +937,167 @@ enum RunUsageSmoke {
             throw SmokeError("\(label) から usage を抽出できませんでした。")
         }
         return usage
+    }
+}
+
+enum DirectClientSmoke {
+    static func runAndExit() -> Never {
+        do {
+            try run()
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Direct client smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+
+    private static func run() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("veqral-direct-client-smoke-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let codexHome = root.appendingPathComponent("codex", isDirectory: true)
+        let claudeConfig = root.appendingPathComponent("claude", isDirectory: true)
+        let worktree = root.appendingPathComponent("worktree", isDirectory: true)
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        try seedCodexHistory(codexHome: codexHome, workingDirectory: worktree.path)
+        try seedClaudeHistory(claudeConfig: claudeConfig, workingDirectory: worktree.path)
+
+        let history = AgentHistoryStore(environment: [
+            "CODEX_HOME": codexHome.path,
+            "CLAUDE_CONFIG_DIR": claudeConfig.path
+        ], includeDefaultRoots: false)
+        let list = try history.list(HistorySessionListRequest(tool: nil, project: nil, query: nil, date: nil, page: 0, limit: 10))
+        try require(list.sessions.contains { $0.tool == .codex && $0.summary.contains("Codex direct smoke prompt") }, "Codex history session was not listed.")
+        try require(list.sessions.contains { $0.tool == .claude && $0.summary.contains("Claude direct smoke prompt") }, "Claude history session was not listed.")
+        try require(list.warnings.isEmpty, "Isolated direct history unexpectedly produced warnings: \(list.warnings.joined(separator: ", "))")
+
+        let codexSession = try requireSession(.codex, from: list)
+        let claudeSession = try requireSession(.claude, from: list)
+        try require(codexSession.resumeID == "11111111-2222-3333-4444-555555555555", "Codex resume ID did not come from the session filename.")
+        try require(claudeSession.resumeID == "claude-direct-smoke", "Claude resume ID did not come from the session filename.")
+        try require(try history.detail(HistorySessionDetailRequest(id: codexSession.id, tool: .codex)).turns.contains { $0.text.contains("Codex direct smoke prompt") }, "Codex history detail did not expose the seeded turn.")
+        try require(try history.detail(HistorySessionDetailRequest(id: claudeSession.id, tool: .claude)).turns.contains { $0.text.contains("Claude direct smoke prompt") }, "Claude history detail did not expose the seeded turn.")
+
+        let codexArgs = CLIAdapterRegistry.arguments(for: HostRun(
+            id: "direct-codex-smoke",
+            prompt: "continue direct Codex session",
+            workingDirectory: worktree.path,
+            sessionID: nil,
+            status: .queued,
+            startedAt: Date(),
+            completedAt: nil,
+            exitCode: nil,
+            pid: nil,
+            approvalReason: nil,
+            engine: .codex,
+            resumeSessionID: codexSession.resumeID,
+            projectID: nil,
+            chatID: nil,
+            provider: nil,
+            model: nil,
+            approvalSeverity: nil
+        ))
+        try require(codexArgs.prefix(5) == ["exec", "--cd", worktree.path, "--sandbox", "workspace-write"], "Codex direct run arguments changed unexpectedly.")
+        try require(codexArgs.contains("resume") && codexArgs.contains(codexSession.resumeID ?? ""), "Codex direct resume arguments are missing.")
+        try require(codexArgs.last?.contains("Do not write to Hermes memory") == true, "Codex direct prompt lost its Hermes isolation instruction.")
+
+        let claudeArgs = CLIAdapterRegistry.arguments(for: HostRun(
+            id: "direct-claude-smoke",
+            prompt: "continue direct Claude session",
+            workingDirectory: worktree.path,
+            sessionID: nil,
+            status: .queued,
+            startedAt: Date(),
+            completedAt: nil,
+            exitCode: nil,
+            pid: nil,
+            approvalReason: nil,
+            engine: .claude,
+            resumeSessionID: claudeSession.resumeID,
+            projectID: nil,
+            chatID: nil,
+            provider: nil,
+            model: nil,
+            approvalSeverity: nil
+        ))
+        try require(claudeArgs.prefix(4) == ["--print", "--output-format", "stream-json", "--permission-mode"], "Claude direct run arguments changed unexpectedly.")
+        try require(claudeArgs.contains("auto") && claudeArgs.contains("--resume") && claudeArgs.contains(claudeSession.resumeID ?? ""), "Claude direct resume arguments are missing.")
+        try require(claudeArgs.last?.contains("Do not write to Hermes memory") == true, "Claude direct prompt lost its Hermes isolation instruction.")
+
+        let risk = RiskClassifier.classify("delete .env and push main with token")
+        try require(risk.requiresApproval && risk.severity == .high, "High-risk direct prompt did not trigger approval.")
+
+        try seedGitDiff(worktree: worktree)
+        let diff = GitDiffInspector.entries(workingDirectory: worktree.path)
+        try require(diff.contains { $0.path == "direct.txt" && $0.additions > 0 && ($0.patch?.contains("+updated direct client smoke") == true) }, "Git diff inspector did not report the direct run change.")
+
+        print("PASS: Direct client smoke verified Codex/Claude history, resume arguments, approval risk, and diff inspection.")
+    }
+
+    private static func seedCodexHistory(codexHome: URL, workingDirectory: String) throws {
+        let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let file = sessions.appendingPathComponent("rollout-2026-06-04T00-00-00-11111111-2222-3333-4444-555555555555.jsonl")
+        let record: [String: Any] = [
+            "type": "event_msg",
+            "timestamp": "2026-06-04T00:00:00Z",
+            "payload": [
+                "type": "message",
+                "role": "user",
+                "content": [["type": "text", "text": "Codex direct smoke prompt"]],
+                "cwd": workingDirectory,
+                "model": "gpt-5-codex"
+            ]
+        ]
+        try writeJSONL([record], to: file)
+    }
+
+    private static func seedClaudeHistory(claudeConfig: URL, workingDirectory: String) throws {
+        let project = claudeConfig.appendingPathComponent("projects/-tmp-veqral-direct-smoke", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let file = project.appendingPathComponent("claude-direct-smoke.jsonl")
+        let record: [String: Any] = [
+            "type": "user",
+            "uuid": "claude-direct-smoke-turn-1",
+            "timestamp": "2026-06-04T00:01:00Z",
+            "cwd": workingDirectory,
+            "model": "claude-sonnet-4.5",
+            "message": [
+                "content": [["type": "text", "text": "Claude direct smoke prompt"]]
+            ]
+        ]
+        try writeJSONL([record], to: file)
+    }
+
+    private static func seedGitDiff(worktree: URL) throws {
+        try "base direct client smoke\n".write(to: worktree.appendingPathComponent("direct.txt"), atomically: true, encoding: .utf8)
+        _ = ProcessRunner.run("/usr/bin/git", ["init"], workingDirectory: worktree.path, timeout: 20)
+        _ = ProcessRunner.run("/usr/bin/git", ["config", "user.email", "smoke@example.invalid"], workingDirectory: worktree.path, timeout: 20)
+        _ = ProcessRunner.run("/usr/bin/git", ["config", "user.name", "Veqral Smoke"], workingDirectory: worktree.path, timeout: 20)
+        _ = ProcessRunner.run("/usr/bin/git", ["add", "direct.txt"], workingDirectory: worktree.path, timeout: 20)
+        _ = ProcessRunner.run("/usr/bin/git", ["commit", "-m", "seed"], workingDirectory: worktree.path, timeout: 20)
+        try "updated direct client smoke\n".write(to: worktree.appendingPathComponent("direct.txt"), atomically: true, encoding: .utf8)
+    }
+
+    private static func writeJSONL(_ records: [[String: Any]], to url: URL) throws {
+        let lines = try records.map { record -> String in
+            let data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+            return String(decoding: data, as: UTF8.self)
+        }.joined(separator: "\n") + "\n"
+        try lines.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private static func requireSession(_ tool: HistoryTool, from list: HistorySessionListResponse) throws -> HistorySessionSummary {
+        guard let session = list.sessions.first(where: { $0.tool == tool }) else {
+            throw SmokeError("\(tool.title) session was not listed.")
+        }
+        return session
+    }
+
+    private static func require(_ condition: Bool, _ message: String) throws {
+        if !condition {
+            throw SmokeError(message)
+        }
     }
 }
 
@@ -2903,7 +3067,7 @@ enum CLIAdapterRegistry {
         status(for: .hermes).version
     }
 
-    private static func arguments(for run: HostRun) -> [String] {
+    static func arguments(for run: HostRun) -> [String] {
         switch run.engineOrDefault {
         case .hermes:
             hermesArguments(for: run)
@@ -5642,11 +5806,18 @@ struct HermesUsageStore {
 
 struct AgentHistoryStore {
     private let fileManager = FileManager.default
+    private let environment: [String: String]
+    private let includeDefaultRoots: Bool
     private let listMaxFiles = 240
     private let listScanLines = 160
     private let listScanBytes = 196_608
     private let detailScanLines = 5_000
     private let detailScanBytes = 8_000_000
+
+    init(environment: [String: String] = ProcessInfo.processInfo.environment, includeDefaultRoots: Bool = true) {
+        self.environment = environment
+        self.includeDefaultRoots = includeDefaultRoots
+    }
 
     func list(_ request: HistorySessionListRequest) throws -> HistorySessionListResponse {
         let page = max(0, request.page ?? 0)
@@ -5791,10 +5962,10 @@ struct AgentHistoryStore {
     private func codexSessionRoots() -> [URL] {
         let defaultHome = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
         var homes: [URL] = []
-        if let envHome = ProcessInfo.processInfo.environment["CODEX_HOME"]?.nilIfBlank {
+        if let envHome = environment["CODEX_HOME"]?.nilIfBlank {
             homes.append(URL(fileURLWithPath: envHome.expandingTilde, isDirectory: true))
         }
-        if !homes.contains(where: { $0.standardizedFileURL.path == defaultHome.standardizedFileURL.path }) {
+        if includeDefaultRoots && !homes.contains(where: { $0.standardizedFileURL.path == defaultHome.standardizedFileURL.path }) {
             homes.append(defaultHome)
         }
         return uniqueURLs(homes.flatMap {
@@ -5808,13 +5979,15 @@ struct AgentHistoryStore {
     private func claudeProjectRoots() -> [URL] {
         let defaultRoot = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects", isDirectory: true)
         var roots: [URL] = []
-        if let configDir = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]?.nilIfBlank {
+        if let configDir = environment["CLAUDE_CONFIG_DIR"]?.nilIfBlank {
             roots.append(URL(fileURLWithPath: configDir.expandingTilde, isDirectory: true).appendingPathComponent("projects", isDirectory: true))
         }
-        if let homeDir = ProcessInfo.processInfo.environment["CLAUDE_HOME"]?.nilIfBlank {
+        if let homeDir = environment["CLAUDE_HOME"]?.nilIfBlank {
             roots.append(URL(fileURLWithPath: homeDir.expandingTilde, isDirectory: true).appendingPathComponent("projects", isDirectory: true))
         }
-        roots.append(defaultRoot)
+        if includeDefaultRoots {
+            roots.append(defaultRoot)
+        }
         return uniqueURLs(roots)
     }
 

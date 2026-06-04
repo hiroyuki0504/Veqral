@@ -2251,6 +2251,11 @@ final class CommandCenterStore: ObservableObject {
         selectedRuntime = runtime
     }
 
+    func ensureDirectClientRuntime() {
+        guard selectedRuntime != .codexDirect && selectedRuntime != .claudeDirect else { return }
+        selectedRuntime = .codexDirect
+    }
+
     func selectHermesModel(_ choice: HermesModelChoice) {
         selectedHermesProvider = choice.provider
         selectedHermesModel = choice.model
@@ -2743,10 +2748,9 @@ final class CommandCenterStore: ObservableObject {
     func startNewDirectSession(_ tool: RemoteHistoryTool) {
         let runtime: CommandRuntime = tool == .codex ? .codexDirect : .claudeDirect
         selectedRuntime = runtime
-        submitCommand(
-            "Start a new \(tool.title) session from Veqral. Briefly confirm the current workspace and wait for my next instruction.",
-            runtime: runtime
-        )
+        selectedRunID = nil
+        commandDraft = ""
+        requestedSection = .home
     }
 
     func attachDiffInstruction(_ diff: CommandDiffEntry, hunk: String? = nil) {

@@ -1063,7 +1063,7 @@ struct RuntimeSegmentedControl: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            ForEach(CommandRuntime.allCases) { runtime in
+            ForEach([CommandRuntime.codexDirect, .claudeDirect]) { runtime in
                 Button {
                     store.selectedRuntime = runtime
                 } label: {
@@ -1085,6 +1085,9 @@ struct RuntimeSegmentedControl: View {
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(VQTheme.hairline, lineWidth: 1)
+        }
+        .onAppear {
+            store.ensureDirectClientRuntime()
         }
     }
 }
