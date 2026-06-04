@@ -6,7 +6,7 @@ Veqral の主実装者。このプロジェクトはあなた（Codex）が `cod
 
 ## Veqral とは
 
-iPhone/iPad から、自分の Mac 上で動く AI コーディングエージェント（Codex / Claude Code / Hermes）を遠隔操作する「AI エージェント司令アプリ」。SwiftUI ネイティブ（iOS + iPad + Mac Catalyst）+ Swift 製の Mac Host。競合は CC Pocket（Codex/Claude 遠隔操作の OSS）。差別化は Hermes による記憶オーケストレーション。
+iPhone/iPad から、自分の Mac 上で動く Codex CLI / Claude Code を直接操作するネイティブ Apple クライアント。SwiftUI ネイティブ（iOS + iPad + 最小 Mac Catalyst shell）+ Swift 製の Mac Host。Mac ではターミナルと Mac Host を主に使い、Catalyst UI は状態確認・pairing・承認などの補助に留める。Hermes のオーケストレーション/記憶は Hermes Desktop に委譲する。
 
 ## 構造（確定）
 
@@ -15,14 +15,14 @@ Device(Mac)
 └── エージェント選択
     ├── Codex 直接   : codex exec / codex exec resume。~/.codex の履歴。siloed
     ├── Claude 直接  : claude --print / claude --resume。~/.claude の履歴。siloed
-    └── Hermes 司令塔 : Project → Chat(複数)。--source veqral-<projectID> + Hermes native memory + --provider/--model
+    └── Hermes Desktop : orchestration / delegation / project memory は外部委譲。Veqral 内では主面にしない
 ```
 
 ## 確定原則（守る）
 
-- 記憶/履歴のバックボーンは Hermes 本体（native memory/session）。自作の共有メモリや MCP は作らない。
-- 2 モード：直接(Codex/Claude)=各自 siloed ／ Hermes=project 単位で記憶共有・chat 跨ぎで継承。
-- 多モデルは Hermes 路線。記憶は Hermes 側にあるからモデルを差し替えても継承される（モデル=差し替え可能なエンジン、記憶=Hermes が持つ土台）。
+- Veqral の第一級面は iPhone/iPad の Codex 直接 / Claude 直接。各 CLI の履歴・session は各自 siloed のまま扱う。
+- Mac Catalyst はターミナル運用前提の最小 shell。Host 状態、pairing、承認、run 確認などの補助以上に広げない。
+- Hermes の記憶/オーケストレーションは Hermes Desktop に委譲する。Veqral 側で自作の共有メモリ、MCP、swarm、command center を再発明しない。
 - Codex/Claude の履歴ファイル（`~/.codex`, `~/.claude`）は読み取り専用。編集/削除しない。
 - 既存インフラ（Mac Host PTY streaming / Run API: create・stream・cancel・resume / 承認 / redact / Keychain / 履歴ビューア / 更新耐性 adapter）を再利用。作り直さない。
 - 組織化（PM/ロール/delegation）は段階的に後で（今は worker 段階）。データ構造に無理な前提を作らない。
@@ -76,18 +76,20 @@ Device(Mac)
 - #37 (`codex/a7-cross-vendor-memory`): #A7。Claude→GPT の cross-vendor #0 を `anthropic/claude-haiku-4-5 -> openai-codex/gpt-5.5` で試行。Claude 側は subscription/login auth のみを許可し、API key fallback では通していない。Hermes-readable Claude/Anthropic login が未復旧のため preflight で停止し、`HERMES_CROSS_VENDOR_PR_A7.md` と `HERMES_MEMORY_INHERITANCE_PR0.md` に未到達理由を記録。
 - Final A integration (`codex/final-a-union-20260602`): #A0〜#A7 を 1 回の union integration で clean `main` に統合。pre-merge / integration / post-main で MacHost build、iOS Simulator build、Mac Catalyst build、Host smokes、#0 verify-memory-inheritance、Gate2 XCUITest、grep/l10n を確認。Gate2 は iPhone Simulator / iPad Simulator とも PASS。Watch build は watchOS 26.5 platform 未インストールのため partial のまま。
 - `codex/local-business-redesign-engine`: Web改善営業の「営業ラボ」を More 配下の案件生成ツールとして追加。手動登録/CSV import、`~/.veqral-host/local-business-leads/` JSON repository、公式URL監査、スマホ改善案、提案書HTML/PDF/画像、コピー用メール/DM/電話文案、manual contacted、won lead の Portfolio 昇格、Hermes Desktop handoff note を実装。Google Places discovery は `501` で無効、Google reviews/photos/store info の wholesale persistence なし、自動送信なし。`SALES_LAB_PR.md` に safety と smoke 結果を記録。
+- `codex/minimal-mac-terminal-shell`: Mac Catalyst の常時 3 ペイン司令塔 UI を主面から外し、Host 状態、copy できるターミナル起動/ログ確認コマンド、Devices/Approvals/Runs/Memory の最小 sheet だけに縮退。iPhone/iPad の主導線は維持。Mac 側で不要になった UI は今後も残さず削る。
 
 ## 未完了・次の手番
 
 1. #A7 follow-up: Claude/Anthropic を Hermes-readable な subscription/login として復旧した後、`HERMES_CROSS_VENDOR_PR_A7.md` のコマンドで再実走する。API key fallback で偽 pass を作らない。
 2. Sales Lab follow-up: official Google Places API を使う discovery は、利用規約・quota・API key 管理を確認してから別 PR。現状は手動登録/CSV のみ。実ブラウザ screenshot と提案書テンプレート品質も別 PR で強化。
-3. Gate1: #0 Hermes 記憶継承は `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4` の real 2 model で PASS 済み。`HERMES_MEMORY_INHERITANCE_PR0.md` に実トランスクリプトあり。自作 memory は足していない。
+3. Mac UI follow-up: Mac Catalyst はターミナル shell の補助に留める。Mac 上の新しい操作面が必要になった場合は、まず MacHost CLI / menu bar / iPhone・iPad 側で足りるか確認し、Catalyst の大型 UI を増やさない。
+4. Gate1: #0 Hermes 記憶継承は `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4` の real 2 model で PASS 済み。`HERMES_MEMORY_INHERITANCE_PR0.md` に実トランスクリプトあり。自作 memory は足していない。
    - より強いクロスベンダー証明は、Hermes から Claude/Anthropic login が使える状態になった後で再実行する。
-4. Gate2（継続）: #A1 XCUITest は iPhone Simulator / iPad Simulator で PASS 済み。実機では `DEVICE_ACCEPTANCE.md` に沿って iPhone/iPad 5項目を確認。
+5. Gate2（継続）: #A1 XCUITest は iPhone Simulator / iPad Simulator で PASS 済み。実機では `DEVICE_ACCEPTANCE.md` に沿って iPhone/iPad 5項目を確認。
    - 対象: voice input / host telemetry / saved command / Discord 実 webhook / Hermes memory visibility。
    - ユーザーが落ちた項目を報告したら、その項目だけ Draft PR で修正。
-5. #A6 Watch（環境待ち）: Xcode に watchOS 26.5 platform を入れた後、`VeqralWatch` を build し、iOS target への embed、実 Watch/Tailscale/WebSocket/cellular reachability、APNs capability を順に検証する。現 free team では push は不可。
-6. 実機検証（継続）
+6. #A6 Watch（環境待ち）: Xcode に watchOS 26.5 platform を入れた後、`VeqralWatch` を build し、iOS target への embed、実 Watch/Tailscale/WebSocket/cellular reachability、APNs capability を順に検証する。現 free team では push は不可。
+7. 実機検証（継続）
    - QR ペアリング（ユーザー報告ではカメラ認識→connected 済み。#18 端末配布後に念のため再確認）
    - Hermes memory visibility。同 Project で Chat①(モデル A)に記憶→Chat②(モデル B)が継承され、Memory 画面で同じ事実が見えること（Gate1 smoke は PASS 済み）
    - 使いやすさ機能（承認ボタンは Approvals/Run detail/phone run row で見えること、Devices に自分自身が出ないこと）
@@ -101,10 +103,10 @@ Device(Mac)
    - #26 Host telemetry: Devices→ホスト状態で CPU/メモリ/ディスク/熱状態/稼働時間/バッテリー/ネットワークが表示され、画面表示中に約 5 秒間隔で更新されること。raw 温度/fan は `—` でよい。
    - #27 Voice input: iPhone/iPad で mic→権限許可→日本語発話→Stop→raw/cleaned 表示→編集→送信。Host に cleanup LLM credentials が無い場合は rule cleanup fallback 表示でよい。高リスク語は送信後に既存承認 Gate に乗ること。
    - UI 受け入れ確認: 日本語のみ、赤い 0 バッジなし、未ペアリング strip が細い、UUID/コンテナパスが主表示に出ない、Unavailable/Offline が緑でない
-7. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
-8. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
-9. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
-10. 組織化：worker → skills で精度 → PM を置く → 上に積む（段階的）
+8. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
+9. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
+10. UI 磨き：スクショ駆動で iPhone/iPad 主面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
+11. 組織化：PM / delegation は Hermes Desktop 側で積む。Veqral 側では direct client の範囲を超えない。
 
 ## 作業の型（毎回）
 
@@ -113,7 +115,7 @@ Device(Mac)
 - スコープを Veqral に限定。指定外の P1/P2 は作らず列挙のみ。
 - 検証：MacHost `swift build` / iOS Simulator build / Mac Catalyst build / `git diff --check` / redact grep / production grep（mock/stub/fake 等なし）/ 既存 smoke。
 - 報告：やったこと / 触ったファイル+理由 / 検証結果 / 残課題 / 実機確認手順（iPhone・iPad 別）。
-- 既定の「やらないこと」: MCP・自作共有メモリ / Mac mini 2台目 / Cron / Gateway / App Store / 内蔵 remote desktop / 設定画面の全面改修。
+- 既定の「やらないこと」: MCP・自作共有メモリ / Mac mini 2台目 / Cron / Gateway / App Store / 内蔵 remote desktop / 設定画面の全面改修 / Mac Catalyst の大型司令塔 UI 再拡張。
 
 ## このファイルの保守
 
