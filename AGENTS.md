@@ -75,17 +75,19 @@ Device(Mac)
 - #36 (`codex/a6-watch-approval`): #A6。Apple Watch 承認 scaffold。`VeqralWatch` target/scheme、Watch HMAC client、Keychain token、approve/reject UI、一言コマンド、complication 用 status view を追加。watchOS 26.5 platform 未インストールのため Watch build/実機/cellular/APNs は partial として `WATCH_APPROVAL_PR_A6.md` に明記。
 - #37 (`codex/a7-cross-vendor-memory`): #A7。Claude→GPT の cross-vendor #0 を `anthropic/claude-haiku-4-5 -> openai-codex/gpt-5.5` で試行。Claude 側は subscription/login auth のみを許可し、API key fallback では通していない。Hermes-readable Claude/Anthropic login が未復旧のため preflight で停止し、`HERMES_CROSS_VENDOR_PR_A7.md` と `HERMES_MEMORY_INHERITANCE_PR0.md` に未到達理由を記録。
 - Final A integration (`codex/final-a-union-20260602`): #A0〜#A7 を 1 回の union integration で clean `main` に統合。pre-merge / integration / post-main で MacHost build、iOS Simulator build、Mac Catalyst build、Host smokes、#0 verify-memory-inheritance、Gate2 XCUITest、grep/l10n を確認。Gate2 は iPhone Simulator / iPad Simulator とも PASS。Watch build は watchOS 26.5 platform 未インストールのため partial のまま。
+- `codex/local-business-redesign-engine`: Web改善営業の「営業ラボ」を More 配下の案件生成ツールとして追加。手動登録/CSV import、`~/.veqral-host/local-business-leads/` JSON repository、公式URL監査、スマホ改善案、提案書HTML/PDF/画像、コピー用メール/DM/電話文案、manual contacted、won lead の Portfolio 昇格、Hermes Desktop handoff note を実装。Google Places discovery は `501` で無効、Google reviews/photos/store info の wholesale persistence なし、自動送信なし。`SALES_LAB_PR.md` に safety と smoke 結果を記録。
 
 ## 未完了・次の手番
 
 1. #A7 follow-up: Claude/Anthropic を Hermes-readable な subscription/login として復旧した後、`HERMES_CROSS_VENDOR_PR_A7.md` のコマンドで再実走する。API key fallback で偽 pass を作らない。
-2. Gate1: #0 Hermes 記憶継承は `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4` の real 2 model で PASS 済み。`HERMES_MEMORY_INHERITANCE_PR0.md` に実トランスクリプトあり。自作 memory は足していない。
+2. Sales Lab follow-up: official Google Places API を使う discovery は、利用規約・quota・API key 管理を確認してから別 PR。現状は手動登録/CSV のみ。実ブラウザ screenshot と提案書テンプレート品質も別 PR で強化。
+3. Gate1: #0 Hermes 記憶継承は `openai-codex/gpt-5.5 -> openai-codex/gpt-5.4` の real 2 model で PASS 済み。`HERMES_MEMORY_INHERITANCE_PR0.md` に実トランスクリプトあり。自作 memory は足していない。
    - より強いクロスベンダー証明は、Hermes から Claude/Anthropic login が使える状態になった後で再実行する。
-3. Gate2（継続）: #A1 XCUITest は iPhone Simulator / iPad Simulator で PASS 済み。実機では `DEVICE_ACCEPTANCE.md` に沿って iPhone/iPad 5項目を確認。
+4. Gate2（継続）: #A1 XCUITest は iPhone Simulator / iPad Simulator で PASS 済み。実機では `DEVICE_ACCEPTANCE.md` に沿って iPhone/iPad 5項目を確認。
    - 対象: voice input / host telemetry / saved command / Discord 実 webhook / Hermes memory visibility。
    - ユーザーが落ちた項目を報告したら、その項目だけ Draft PR で修正。
-4. #A6 Watch（環境待ち）: Xcode に watchOS 26.5 platform を入れた後、`VeqralWatch` を build し、iOS target への embed、実 Watch/Tailscale/WebSocket/cellular reachability、APNs capability を順に検証する。現 free team では push は不可。
-5. 実機検証（継続）
+5. #A6 Watch（環境待ち）: Xcode に watchOS 26.5 platform を入れた後、`VeqralWatch` を build し、iOS target への embed、実 Watch/Tailscale/WebSocket/cellular reachability、APNs capability を順に検証する。現 free team では push は不可。
+6. 実機検証（継続）
    - QR ペアリング（ユーザー報告ではカメラ認識→connected 済み。#18 端末配布後に念のため再確認）
    - Hermes memory visibility。同 Project で Chat①(モデル A)に記憶→Chat②(モデル B)が継承され、Memory 画面で同じ事実が見えること（Gate1 smoke は PASS 済み）
    - 使いやすさ機能（承認ボタンは Approvals/Run detail/phone run row で見えること、Devices に自分自身が出ないこと）
@@ -99,10 +101,10 @@ Device(Mac)
    - #26 Host telemetry: Devices→ホスト状態で CPU/メモリ/ディスク/熱状態/稼働時間/バッテリー/ネットワークが表示され、画面表示中に約 5 秒間隔で更新されること。raw 温度/fan は `—` でよい。
    - #27 Voice input: iPhone/iPad で mic→権限許可→日本語発話→Stop→raw/cleaned 表示→編集→送信。Host に cleanup LLM credentials が無い場合は rule cleanup fallback 表示でよい。高リスク語は送信後に既存承認 Gate に乗ること。
    - UI 受け入れ確認: 日本語のみ、赤い 0 バッジなし、未ペアリング strip が細い、UUID/コンテナパスが主表示に出ない、Unavailable/Offline が緑でない
-6. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
-7. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
-8. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
-9. 組織化：worker → skills で精度 → PM を置く → 上に積む（段階的）
+7. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
+8. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
+9. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
+10. 組織化：worker → skills で精度 → PM を置く → 上に積む（段階的）
 
 ## 作業の型（毎回）
 
