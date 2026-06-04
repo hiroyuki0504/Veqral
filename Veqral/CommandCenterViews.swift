@@ -395,6 +395,479 @@ struct CommandCenterPhoneDashboard: View {
     }
 }
 
+struct CommandCenterMobileChatView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let openDrawer: () -> Void
+    let openSection: (AppSection) -> Void
+
+    private var visibleRuns: [CommandRun] {
+        Array(store.visibleRuns().filter { run in
+            let runtime = run.runtimeOrDefault
+            return runtime == .codexDirect || runtime == .claudeDirect
+        }.prefix(12))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            mobileTopBar
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    HostConnectionStrip()
+                    DirectAgentAppsPanel(openSection: openSection)
+
+                    if visibleRuns.isEmpty {
+                        DirectEmptyRunsPanel(openSection: openSection)
+                    } else {
+                        PhoneSectionHeader(title: L10n.tr("Direct Runs"), count: visibleRuns.count, showAction: false)
+                        ForEach(visibleRuns) { run in
+                            PhoneRunRow(run: run)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    store.selectRun(run.id)
+                                }
+                                .commandPanel()
+                        }
+                    }
+
+                    if let run = store.selectedRun, run.runtimeOrDefault == .codexDirect || run.runtimeOrDefault == .claudeDirect {
+                        MobileRunDetail(run: run, openSection: openSection)
+                    }
+
+                    MobileQuickAccess(openSection: openSection)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 18)
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            PhoneComposer(showsRuntimePicker: false, prominentVoice: false)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+                .background(.ultraThinMaterial)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(VQTheme.hairline)
+                        .frame(height: 1)
+                }
+        }
+        .background(VQTheme.canvas.ignoresSafeArea())
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
+        .onAppear {
+            store.ensureDirectClientRuntime()
+            if store.remoteHistorySessions.isEmpty {
+                store.refreshRemoteHistory()
+            }
+        }
+    }
+
+    private var mobileTopBar: some View {
+        HStack(spacing: 10) {
+            Button(action: openDrawer) {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(.plain)
+            .background(VQTheme.control.opacity(0.72))
+            .clipShape(Circle())
+            .accessibilityLabel(L10n.tr("Open navigation"))
+            .accessibilityIdentifier("gate2.mobile.menu")
+
+            DirectRuntimeSwitcher()
+                .accessibilityLabel(L10n.tr("Select agent"))
+
+            Spacer()
+
+            Button {
+                store.commandDraft = ""
+                store.selectedRunID = nil
+                store.ensureDirectClientRuntime()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(.plain)
+            .background(VQTheme.control.opacity(0.72))
+            .clipShape(Circle())
+            .accessibilityLabel(L10n.tr("New command"))
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .background(VQTheme.canvas.opacity(0.94))
+    }
+}
+
+private enum DirectAgentApp: CaseIterable, Identifiable {
+    case codex
+    case claude
+
+    var id: String { runtime.rawValue }
+
+    var runtime: CommandRuntime {
+        switch self {
+        case .codex:
+            .codexDirect
+        case .claude:
+            .claudeDirect
+        }
+    }
+
+    var tool: RemoteHistoryTool {
+        switch self {
+        case .codex:
+            .codex
+        case .claude:
+            .claude
+        }
+    }
+
+    var title: String { runtime.shortTitle }
+    var symbol: String { runtime.symbol }
+
+    var tint: Color {
+        switch self {
+        case .codex:
+            VQTheme.green
+        case .claude:
+            VQTheme.violet
+        }
+    }
+}
+
+private struct DirectRuntimeSwitcher: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach([CommandRuntime.codexDirect, .claudeDirect]) { runtime in
+                Button {
+                    store.selectRuntime(runtime)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: runtime.symbol)
+                        Text(runtime.shortTitle)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(store.selectedRuntime == runtime ? .black : VQTheme.ink)
+                    .frame(minWidth: 82, minHeight: 34)
+                    .background(store.selectedRuntime == runtime ? VQTheme.accent : VQTheme.control.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(VQTheme.control.opacity(0.38))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onAppear {
+            store.ensureDirectClientRuntime()
+        }
+    }
+}
+
+private struct DirectAgentAppsPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(L10n.tr("Codex / Claude"))
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    Text(L10n.tr("Native Mac sessions"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+                Spacer()
+                Button {
+                    store.refreshRemoteHistory()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .background(VQTheme.control.opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .accessibilityLabel(L10n.tr("Refresh"))
+            }
+
+            ForEach(DirectAgentApp.allCases) { agent in
+                DirectAgentAppCard(agent: agent, openSection: openSection)
+            }
+
+            if !store.remoteHistoryMessage.isEmpty {
+                Text(store.remoteHistoryMessage)
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+private struct DirectAgentAppCard: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let agent: DirectAgentApp
+    let openSection: (AppSection) -> Void
+
+    private var sessions: [RemoteHistorySession] {
+        Array(store.remoteHistorySessions.filter { $0.tool == agent.tool }.prefix(3))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: agent.symbol)
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 38, height: 38)
+                    .foregroundStyle(agent.tint)
+                    .background(agent.tint.opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(agent.title)
+                        .font(.headline)
+                        .foregroundStyle(VQTheme.ink)
+                    Text(agent.runtime.contextModeDescription)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+
+                Spacer()
+
+                Button {
+                    store.startNewDirectSession(agent.tool)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .bold))
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(VQTheme.ink)
+                .background(VQTheme.control.opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .accessibilityLabel(String(format: L10n.tr("New %@ command"), agent.title))
+            }
+
+            if sessions.isEmpty {
+                PhoneEmptyState(symbol: "clock", text: store.remoteHost.isPaired ? L10n.tr("No native sessions yet.") : L10n.tr("Pair with Mac Host to read native history."))
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(sessions) { session in
+                        Button {
+                            store.loadRemoteHistoryDetail(session)
+                            openSection(.history)
+                        } label: {
+                            DirectSessionMiniRow(session: session, displayTitle: store.historyTitle(for: session))
+                        }
+                        .buttonStyle(.plain)
+
+                        if session.id != sessions.last?.id {
+                            EmptyDivider()
+                        }
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(VQTheme.elevated.opacity(0.82))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
+        }
+    }
+}
+
+private struct DirectSessionMiniRow: View {
+    let session: RemoteHistorySession
+    let displayTitle: String
+
+    var body: some View {
+        HStack(spacing: 9) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(displayTitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(session.project)
+                    Text("\(session.messageCount) \(L10n.tr("turns"))")
+                    if let startedAt = session.startedAt {
+                        Text(Self.dateFormatter.string(from: startedAt))
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(VQTheme.secondaryText)
+                .lineLimit(1)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(VQTheme.secondaryText)
+        }
+        .frame(minHeight: 42)
+        .contentShape(Rectangle())
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
+private struct DirectEmptyRunsPanel: View {
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            PhoneSectionHeader(title: L10n.tr("Direct Runs"), count: nil, showAction: false)
+            PhoneEmptyState(symbol: "arrow.up.message", text: L10n.tr("Use the bottom composer to start a Codex or Claude run."))
+            Button {
+                openSection(.history)
+            } label: {
+                Label(L10n.tr("Open History"), systemImage: "clock.arrow.circlepath")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+        }
+        .padding(12)
+        .background(VQTheme.control.opacity(0.34))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct MobileRunDetail: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let run: CommandRun
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(run.title)
+                        .font(.headline)
+                        .foregroundStyle(VQTheme.ink)
+                        .lineLimit(2)
+                    HStack(spacing: 7) {
+                        StatusPill(title: run.status.title, tint: run.status.tint)
+                        Text(run.runtimeOrDefault.shortTitle)
+                        Text(run.elapsedLabel)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                }
+                Spacer()
+                Button {
+                    openSection(.runs)
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .background(VQTheme.control.opacity(0.72))
+                .clipShape(Circle())
+                .accessibilityLabel(L10n.tr("Open run details"))
+            }
+
+            if let usage = run.usage, usage.hasDisplayValues {
+                RunUsageSummary(usage: usage)
+            }
+
+            if let approval = store.pendingApproval(for: run.id) {
+                RunApprovalCallout(approval: approval, compact: true)
+            }
+
+            let recentLogs = Array(store.logEntries(for: run.id).suffix(5))
+            if recentLogs.isEmpty {
+                PhoneEmptyState(symbol: "text.alignleft", text: L10n.tr("Run logs appear here."))
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(recentLogs) { entry in
+                        Text(entry.message)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(entry.stream == "error" ? VQTheme.red : VQTheme.secondaryText)
+                            .lineLimit(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(10)
+                .background(VQTheme.control.opacity(0.34))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+        .padding(14)
+        .commandPanel()
+    }
+}
+
+private struct MobileQuickAccess: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(L10n.tr("Quick access"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.secondaryText)
+                Spacer()
+                if store.remoteHost.isPaired {
+                    StatusPill(title: L10n.tr("Connected"), tint: VQTheme.green)
+                }
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    MobileQuickButton(section: .history, title: L10n.tr("History"), openSection: openSection)
+                    MobileQuickButton(section: .approvals, title: L10n.tr("Approvals"), openSection: openSection)
+                    MobileQuickButton(section: .devices, title: L10n.tr("Devices"), openSection: openSection)
+                    MobileQuickButton(section: .salesLab, title: "営業ラボ", openSection: openSection)
+                    MobileQuickButton(section: .diff, title: L10n.tr("Diff"), openSection: openSection)
+                    MobileQuickButton(section: .artifacts, title: L10n.tr("Artifacts"), openSection: openSection)
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(.bottom, 4)
+    }
+}
+
+private struct MobileQuickButton: View {
+    let section: AppSection
+    let title: String
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        Button {
+            openSection(section)
+        } label: {
+            Label(title, systemImage: section.symbol)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .background(VQTheme.control.opacity(0.62))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private enum WorkSurface: String, CaseIterable, Identifiable {
     case terminal = "Terminal"
     case diff = "Diff"
@@ -629,27 +1102,6 @@ private struct RunHeader: View {
             .font(.caption)
             .foregroundStyle(VQTheme.secondaryText)
 
-            if run.runtimeOrDefault != .hermesAgent {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .center, spacing: 10) {
-                        handoffIntro
-                        Spacer()
-                        handoffButton
-                    }
-                    VStack(alignment: .leading, spacing: 8) {
-                        handoffIntro
-                        handoffButton
-                    }
-                }
-                .padding(10)
-                .background(VQTheme.control.opacity(0.38))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(VQTheme.hairline, lineWidth: 1)
-                }
-            }
-
             if let usage = run.usage, usage.hasDisplayValues {
                 RunUsageSummary(usage: usage)
             }
@@ -663,27 +1115,6 @@ private struct RunHeader: View {
                 RunApprovalCallout(approval: approval)
             }
         }
-    }
-
-    private var handoffIntro: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Label("Project 記憶へ引き継ぐ", systemImage: "arrow.triangle.branch")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(VQTheme.ink)
-            Text("直接モードの履歴は分離されています。Hermes に整理すると別 Chat/別モデルで続けられます。")
-                .font(.caption)
-                .foregroundStyle(VQTheme.secondaryText)
-                .lineLimit(2)
-        }
-    }
-
-    private var handoffButton: some View {
-        Button {
-            store.handoffRunContextToHermes(run)
-        } label: {
-            Label("Hermesへ送る", systemImage: "paperplane")
-        }
-        .buttonStyle(CommandButtonStyle())
     }
 }
 
@@ -1610,17 +2041,6 @@ private struct PhoneRunRow: View {
                     .foregroundStyle(VQTheme.secondaryText)
             }
 
-            if run.runtimeOrDefault != .hermesAgent {
-                Button {
-                    store.handoffRunContextToHermes(run)
-                } label: {
-                    Label("Hermesへ引き継ぐ", systemImage: "arrow.triangle.branch")
-                }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.roundedRectangle(radius: 8))
-                .controlSize(.small)
-            }
-
             if let approval = store.pendingApproval(for: run.id) {
                 RunApprovalCallout(approval: approval, compact: true)
             }
@@ -1636,16 +2056,21 @@ private struct PhoneRunRow: View {
 
 private struct PhoneComposer: View {
     @EnvironmentObject private var store: CommandCenterStore
+    var showsRuntimePicker = true
+    var prominentVoice = false
     @State private var isVoiceInputPresented = false
 
     var body: some View {
         VStack(spacing: 8) {
-            RuntimeSegmentedControl()
+            if showsRuntimePicker {
+                RuntimeSegmentedControl()
+            }
 
             HStack(spacing: 8) {
-                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft)
-                    .font(.caption)
+                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft, axis: .vertical)
+                    .font(prominentVoice ? .subheadline : .caption)
                     .textFieldStyle(.plain)
+                    .lineLimit(1...4)
                     .onSubmit {
                         store.submitDraft()
                     }
@@ -1668,21 +2093,21 @@ private struct PhoneComposer: View {
                     isVoiceInputPresented = true
                 } label: {
                     Image(systemName: "mic")
-                        .font(.caption.weight(.bold))
-                        .frame(width: 28, height: 28)
-                        .foregroundStyle(VQTheme.ink)
-                        .background(VQTheme.control)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .font(.system(size: prominentVoice ? 17 : 12, weight: .bold))
+                        .frame(width: prominentVoice ? 38 : 28, height: prominentVoice ? 38 : 28)
+                        .foregroundStyle(prominentVoice ? .black : VQTheme.ink)
+                        .background(prominentVoice ? VQTheme.accent : VQTheme.control)
+                        .clipShape(RoundedRectangle(cornerRadius: prominentVoice ? 12 : 7, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("gate2.voice.open")
                 Button(action: store.submitDraft) {
                     Image(systemName: "arrow.up")
-                        .font(.caption.weight(.bold))
-                        .frame(width: 28, height: 28)
+                        .font(.system(size: prominentVoice ? 17 : 12, weight: .bold))
+                        .frame(width: prominentVoice ? 38 : 28, height: prominentVoice ? 38 : 28)
                         .foregroundStyle(.white)
-                        .background(VQTheme.secondaryText)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .background(store.commandDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? VQTheme.secondaryText : VQTheme.accent)
+                        .clipShape(RoundedRectangle(cornerRadius: prominentVoice ? 12 : 7, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("gate2.command.submit")
@@ -1692,18 +2117,22 @@ private struct PhoneComposer: View {
             .background(VQTheme.control.opacity(0.7))
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            HStack {
-                CommandChip(title: L10n.tr("Implementation"), symbol: "chevron.left.forwardslash.chevron.right", command: "Implement the current approved requirements.")
-                CommandChip(title: L10n.tr("Testing"), symbol: "flask", command: "Run the relevant tests and fix failures if they are in scope.")
-                CommandChip(title: "", symbol: "ellipsis", command: "Show available next actions for this project.")
-                Spacer()
+            if showsRuntimePicker {
+                HStack {
+                    CommandChip(title: L10n.tr("Implementation"), symbol: "chevron.left.forwardslash.chevron.right", command: "Implement the current approved requirements.")
+                    CommandChip(title: L10n.tr("Testing"), symbol: "flask", command: "Run the relevant tests and fix failures if they are in scope.")
+                    CommandChip(title: "", symbol: "ellipsis", command: "Show available next actions for this project.")
+                    Spacer()
+                }
             }
 
             SavedCommandDraftBar(compact: true)
             CommandAttachmentControls()
-            CommandRequirementMemo()
+            if showsRuntimePicker {
+                CommandRequirementMemo()
+            }
         }
-        .padding(8)
+        .padding(prominentVoice ? 10 : 8)
         .commandPanel()
         .sheet(isPresented: $isVoiceInputPresented) {
             VoiceCommandSheet()
