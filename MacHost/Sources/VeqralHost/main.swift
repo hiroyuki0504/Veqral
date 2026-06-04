@@ -39,6 +39,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-auth-onboarding" {
             AuthOnboardingSmoke.runAndExit()
         }
+        if SalesLabSmoke.runIfRequested(arguments: Array(CommandLine.arguments.dropFirst())) {
+            Foundation.exit(0)
+        }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
         _ = Darwin.chdir("/")
         let app = NSApplication.shared
@@ -2301,6 +2304,7 @@ final class HostServer: @unchecked Sendable {
     private let telemetryCollector = HostTelemetryCollector()
     private let portfolioStore: PortfolioRegistryStore
     private let portfolioMonitor: PortfolioMonitor
+    private let salesStore: SalesLabStore
     private let connectionLock = NSLock()
     private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
 
@@ -2311,6 +2315,7 @@ final class HostServer: @unchecked Sendable {
         self.runner = AgentRunner(state: state)
         self.portfolioStore = PortfolioRegistryStore(config: config)
         self.portfolioMonitor = PortfolioMonitor(store: portfolioStore, config: config)
+        self.salesStore = SalesLabStore(config: config)
     }
 
     func start() throws {
@@ -2567,6 +2572,83 @@ final class HostServer: @unchecked Sendable {
             if request.path == "/v1/budgets", request.method == "POST" {
                 let body = try JSONDecoder.dates.decode(ProjectBudgetUpdateRequest.self, from: request.body)
                 sendJSON(try await state.updateBudget(body), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/sales/leads", request.method == "GET" {
+                sendJSON(try salesStore.listResponse(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/sales/leads", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(SalesLeadRequest.self, from: request.body)
+                let lead = try salesStore.upsert(body.lead)
+                await state.recordAudit("sales lead saved id=\(lead.id)")
+                sendJSON(lead, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/sales/leads/import-csv", request.method == "POST" {
+                let body = try JSONDecoder.dates.decode(SalesCSVImportRequest.self, from: request.body)
+                let response = try salesStore.importCSV(body.csv)
+                await state.recordAudit("sales csv imported count=\(response.imported)")
+                sendJSON(response, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/sales/leads/discover", request.method == "POST" {
+                await state.recordAudit("sales discover blocked")
+                throw HostError.disabled("Google Places discovery is disabled in this MVP. Register leads manually or import CSV.")
+            }
+
+            if request.path.hasPrefix("/v1/sales/leads/") {
+                let parts = request.path.split(separator: "/").map(String.init)
+                guard parts.count >= 4 else { throw HostError.notFound("Invalid sales lead path") }
+                let leadID = parts[3]
+                if request.method == "PATCH", parts.count == 4 {
+                    let body = try JSONDecoder.dates.decode(SalesLeadRequest.self, from: request.body)
+                    let lead = try salesStore.upsert(body.lead)
+                    await state.recordAudit("sales lead updated id=\(lead.id)")
+                    sendJSON(lead, connection: connection)
+                    return
+                }
+                guard parts.count >= 5 else { throw HostError.notFound("Invalid sales lead action") }
+                let action = parts[4]
+                switch (request.method, action) {
+                case ("POST", "audit"):
+                    let audit = try salesStore.auditLead(id: leadID)
+                    await state.recordAudit("sales audit lead=\(leadID) score=\(audit.score)")
+                    sendJSON(audit, connection: connection)
+                case ("POST", "generate-mock"):
+                    let mock = try salesStore.generateRedesignMock(id: leadID)
+                    await state.recordAudit("sales redesign generated lead=\(leadID)")
+                    sendJSON(mock, connection: connection)
+                case ("POST", "generate-proposal"):
+                    let proposal = try salesStore.generateProposal(id: leadID)
+                    await state.recordAudit("sales proposal generated lead=\(leadID)")
+                    sendJSON(proposal, connection: connection)
+                case ("POST", "approve-proposal"):
+                    let proposal = try salesStore.approveProposal(leadID: leadID)
+                    await state.recordAudit("sales proposal approved lead=\(leadID)")
+                    sendJSON(proposal, connection: connection)
+                case ("POST", "mark-contacted"):
+                    let body = (try? JSONDecoder.dates.decode(SalesOutreachLogRequest.self, from: request.body)) ?? SalesOutreachLogRequest(channel: "manual", note: nil)
+                    let lead = try salesStore.markContacted(leadID: leadID, channel: body.channel, note: body.note)
+                    await state.recordAudit("sales lead contacted id=\(leadID)")
+                    sendJSON(lead, connection: connection)
+                case ("GET", "assets"):
+                    sendJSON(try salesStore.assets(leadID: leadID), connection: connection)
+                case ("POST", "promote-to-portfolio"):
+                    let response = try salesStore.promoteToPortfolio(leadID: leadID, portfolioStore: portfolioStore)
+                    await state.recordAudit("sales lead promoted lead=\(leadID) asset=\(response.asset.id)")
+                    sendJSON(response, connection: connection)
+                case ("POST", "create-hermes-handoff"):
+                    let response = try salesStore.createHermesHandoff(leadID: leadID)
+                    await state.recordAudit("sales hermes handoff lead=\(leadID)")
+                    sendJSON(response, connection: connection)
+                default:
+                    throw HostError.notFound("Unknown sales lead action")
+                }
                 return
             }
 
@@ -4327,6 +4409,1117 @@ struct PortfolioControlResponse: Codable {
 struct PortfolioPromoteResponse: Codable {
     var runID: String
     var approvalRequired: Bool
+}
+
+enum SalesLeadStatus: String, Codable, Sendable, CaseIterable {
+    case new
+    case auditReady = "audit_ready"
+    case proposalReady = "proposal_ready"
+    case contacted
+    case won
+    case lost
+    case doNotContact = "do_not_contact"
+}
+
+struct SalesLead: Codable, Sendable, Identifiable, Equatable {
+    var id: String
+    var businessName: String
+    var category: String
+    var area: String
+    var officialWebsiteURL: String?
+    var googleMapsURL: String?
+    var googlePlaceID: String?
+    var phone: String?
+    var email: String?
+    var status: SalesLeadStatus
+    var notes: String
+    var latestAudit: WebsiteAudit?
+    var latestRedesignMock: RedesignMock?
+    var latestProposal: Proposal?
+    var portfolioAssetID: String?
+    var hermesHandoffPath: String?
+    var outreachLogs: [OutreachLog]
+    var createdAt: Date
+    var updatedAt: Date
+
+    static func empty() -> SalesLead {
+        let now = Date()
+        return SalesLead(
+            id: UUID().uuidString.lowercased(),
+            businessName: "",
+            category: "",
+            area: "",
+            officialWebsiteURL: nil,
+            googleMapsURL: nil,
+            googlePlaceID: nil,
+            phone: nil,
+            email: nil,
+            status: .new,
+            notes: "",
+            latestAudit: nil,
+            latestRedesignMock: nil,
+            latestProposal: nil,
+            portfolioAssetID: nil,
+            hermesHandoffPath: nil,
+            outreachLogs: [],
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+}
+
+struct WebsiteAudit: Codable, Sendable, Identifiable, Equatable {
+    var id: String
+    var leadID: String
+    var url: String
+    var mobileViewport: String
+    var score: Int
+    var summary: String
+    var findings: [WebsiteAuditFinding]
+    var businessImpacts: [String]
+    var screenshotPath: String
+    var lighthouseSummaryPath: String?
+    var createdAt: Date
+}
+
+struct WebsiteAuditFinding: Codable, Sendable, Identifiable, Equatable {
+    var id: String
+    var severity: String
+    var title: String
+    var detail: String
+    var recommendation: String
+}
+
+struct RedesignMock: Codable, Sendable, Identifiable, Equatable {
+    var id: String
+    var leadID: String
+    var headline: String
+    var subheadline: String
+    var cta: String
+    var htmlPath: String
+    var screenshotPath: String
+    var notes: String
+    var createdAt: Date
+    var approvedAt: Date?
+}
+
+struct Proposal: Codable, Sendable, Identifiable, Equatable {
+    var id: String
+    var leadID: String
+    var title: String
+    var htmlPath: String
+    var pdfPath: String?
+    var imagePath: String?
+    var summary: String
+    var pricing: [String]
+    var emailDraft: String
+    var dmDraft: String
+    var phoneScript: String
+    var approvalStatus: String
+    var createdAt: Date
+    var approvedAt: Date?
+}
+
+struct OutreachLog: Codable, Sendable, Identifiable, Equatable {
+    var id: String
+    var channel: String
+    var note: String
+    var createdAt: Date
+}
+
+struct SalesLeadRequest: Codable {
+    var lead: SalesLead
+}
+
+struct SalesLeadListResponse: Codable {
+    var leads: [SalesLead]
+}
+
+struct SalesCSVImportRequest: Codable {
+    var csv: String
+}
+
+struct SalesCSVImportResponse: Codable {
+    var imported: Int
+    var skipped: Int
+    var leads: [SalesLead]
+}
+
+struct SalesOutreachLogRequest: Codable {
+    var channel: String
+    var note: String?
+}
+
+struct SalesLeadAsset: Codable, Sendable, Identifiable, Equatable {
+    var id: String
+    var kind: String
+    var path: String
+    var createdAt: Date?
+}
+
+struct SalesLeadAssetsResponse: Codable {
+    var leadID: String
+    var assets: [SalesLeadAsset]
+}
+
+struct SalesPortfolioPromotionResponse: Codable {
+    var lead: SalesLead
+    var asset: PortfolioAsset
+}
+
+struct SalesHermesHandoffResponse: Codable {
+    var lead: SalesLead
+    var notePath: String
+    var note: String
+}
+
+final class SalesLabStore {
+    private let rootURL: URL
+    private let fileManager = FileManager.default
+    private let lock = NSLock()
+
+    private final class SyncResponseBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: (Data?, Int?, String?) = (nil, nil, nil)
+
+        func set(data: Data?, statusCode: Int?, error: String?) {
+            lock.lock()
+            value = (data, statusCode, error)
+            lock.unlock()
+        }
+
+        func snapshot() -> (data: Data?, statusCode: Int?, error: String?) {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
+    init(config: HostConfig) {
+        self.rootURL = HostConfig.folder.appendingPathComponent("local-business-leads", isDirectory: true)
+    }
+
+    init(rootURL: URL) {
+        self.rootURL = rootURL
+    }
+
+    private var leadsURL: URL { rootURL.appendingPathComponent("leads.json") }
+    private var screenshotsURL: URL { rootURL.appendingPathComponent("screenshots", isDirectory: true) }
+    private var auditsURL: URL { rootURL.appendingPathComponent("audits", isDirectory: true) }
+    private var mocksURL: URL { rootURL.appendingPathComponent("mocks", isDirectory: true) }
+    private var proposalsURL: URL { rootURL.appendingPathComponent("proposals", isDirectory: true) }
+
+    func listResponse() throws -> SalesLeadListResponse {
+        SalesLeadListResponse(leads: try list())
+    }
+
+    func list() throws -> [SalesLead] {
+        lock.lock()
+        defer { lock.unlock() }
+        return try loadLeadsLocked()
+    }
+
+    func upsert(_ input: SalesLead) throws -> SalesLead {
+        lock.lock()
+        defer { lock.unlock() }
+        var leads = try loadLeadsLocked()
+        var lead = sanitized(input)
+        let now = Date()
+        lead.id = lead.id.nilIfBlank ?? UUID().uuidString.lowercased()
+        lead.createdAt = leads.first(where: { $0.id == lead.id })?.createdAt ?? (lead.createdAt.timeIntervalSince1970 == 0 ? now : lead.createdAt)
+        lead.updatedAt = now
+        if let index = leads.firstIndex(where: { $0.id == lead.id }) {
+            leads[index] = lead
+        } else {
+            leads.insert(lead, at: 0)
+        }
+        try saveLeadsLocked(leads)
+        return lead
+    }
+
+    func importCSV(_ csv: String) throws -> SalesCSVImportResponse {
+        let rows = parseCSV(csv)
+        guard let header = rows.first?.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }), !header.isEmpty else {
+            return SalesCSVImportResponse(imported: 0, skipped: 0, leads: try list())
+        }
+        var imported = 0
+        var skipped = 0
+        var saved: [SalesLead] = []
+        for row in rows.dropFirst() {
+            let values = Dictionary(uniqueKeysWithValues: header.enumerated().map { index, key in
+                (key.lowercased(), index < row.count ? row[index].trimmingCharacters(in: .whitespacesAndNewlines) : "")
+            })
+            var lead = SalesLead.empty()
+            lead.businessName = values["businessname"] ?? values["business_name"] ?? values["name"] ?? values["店舗名"] ?? ""
+            lead.category = values["category"] ?? values["業種"] ?? ""
+            lead.area = values["area"] ?? values["地域"] ?? ""
+            lead.officialWebsiteURL = (values["officialwebsiteurl"] ?? values["official_website_url"] ?? values["website"] ?? values["公式サイト"])?.nilIfBlank
+            lead.googleMapsURL = (values["googlemapsurl"] ?? values["google_maps_url"] ?? values["maps"] ?? values["googleマップ"])?.nilIfBlank
+            lead.googlePlaceID = (values["googleplaceid"] ?? values["google_place_id"] ?? values["placeid"] ?? values["place_id"])?.nilIfBlank
+            lead.phone = (values["phone"] ?? values["tel"] ?? values["電話"])?.nilIfBlank
+            lead.email = (values["email"] ?? values["mail"] ?? values["メール"])?.nilIfBlank
+            lead.notes = values["notes"] ?? values["memo"] ?? values["メモ"] ?? ""
+            if let rawStatus = (values["status"] ?? values["状態"])?.nilIfBlank, let status = SalesLeadStatus(rawValue: rawStatus) {
+                lead.status = status
+            }
+            guard lead.businessName.nilIfBlank != nil else {
+                skipped += 1
+                continue
+            }
+            saved.append(try upsert(lead))
+            imported += 1
+        }
+        return SalesCSVImportResponse(imported: imported, skipped: skipped, leads: saved)
+    }
+
+    func auditLead(id: String) throws -> WebsiteAudit {
+        var leads = try list()
+        guard let index = leads.firstIndex(where: { $0.id == id }) else { throw HostError.notFound("Sales lead not found") }
+        let lead = leads[index]
+        guard let urlText = lead.officialWebsiteURL?.nilIfBlank else {
+            throw HostError.badRequest("Official website URL is required for audit.")
+        }
+        let audit = try makeAudit(for: lead, urlText: urlText)
+        try writeJSON(audit, to: auditsURL.appendingPathComponent("\(audit.id).json"))
+        leads[index].latestAudit = audit
+        leads[index].status = leads[index].status == .new ? .auditReady : leads[index].status
+        leads[index].updatedAt = Date()
+        lock.lock()
+        defer { lock.unlock() }
+        try saveLeadsLocked(leads)
+        return audit
+    }
+
+    func generateRedesignMock(id: String) throws -> RedesignMock {
+        var leads = try list()
+        guard let index = leads.firstIndex(where: { $0.id == id }) else { throw HostError.notFound("Sales lead not found") }
+        let lead = leads[index]
+        let mockID = "redesign-\(safeID(lead.businessName))-\(timestamp())"
+        let headline = "\(lead.area.nilIfBlank ?? "地域")で選ばれる\(lead.category.nilIfBlank ?? "サービス")へ"
+        let subheadline = "\(lead.businessName)の強みがスマホで3秒以内に伝わる、予約・問い合わせ重視の導線です。"
+        let cta = lead.phone?.nilIfBlank == nil ? "無料相談をする" : "電話で相談する"
+        let htmlURL = mocksURL.appendingPathComponent("\(mockID).html")
+        let imageURL = screenshotsURL.appendingPathComponent("\(mockID).svg")
+        try ensureFolders()
+        try redesignHTML(lead: lead, headline: headline, subheadline: subheadline, cta: cta)
+            .data(using: .utf8)?
+            .write(to: htmlURL, options: .atomic)
+        try writeSVGPreview(
+            title: headline,
+            subtitle: subheadline,
+            badge: lead.category.nilIfBlank ?? "Web改善",
+            cta: cta,
+            score: lead.latestAudit?.score,
+            to: imageURL
+        )
+        let mock = RedesignMock(
+            id: mockID,
+            leadID: lead.id,
+            headline: Redactor.redact(headline),
+            subheadline: Redactor.redact(subheadline),
+            cta: Redactor.redact(cta),
+            htmlPath: htmlURL.path,
+            screenshotPath: imageURL.path,
+            notes: "既存サイトの複製ではなく、業種・地域・問い合わせ導線から作ったオリジナル案です。",
+            createdAt: Date(),
+            approvedAt: nil
+        )
+        try writeJSON(mock, to: mocksURL.appendingPathComponent("\(mockID).json"))
+        leads[index].latestRedesignMock = mock
+        leads[index].updatedAt = Date()
+        lock.lock()
+        defer { lock.unlock() }
+        try saveLeadsLocked(leads)
+        return mock
+    }
+
+    func generateProposal(id: String) throws -> Proposal {
+        var leads = try list()
+        guard let index = leads.firstIndex(where: { $0.id == id }) else { throw HostError.notFound("Sales lead not found") }
+        let lead = leads[index]
+        let proposalID = "proposal-\(safeID(lead.businessName))-\(timestamp())"
+        let htmlURL = proposalsURL.appendingPathComponent("\(proposalID).html")
+        let pdfURL = proposalsURL.appendingPathComponent("\(proposalID).pdf")
+        let imageURL = proposalsURL.appendingPathComponent("\(proposalID).svg")
+        let pricing = [
+            "改善案作成: 3万円",
+            "LP / トップ改善: 15〜30万円",
+            "月次改善: 5〜15万円"
+        ]
+        let summary = proposalSummary(for: lead)
+        let emailDraft = outreachEmail(for: lead)
+        let dmDraft = outreachDM(for: lead)
+        let phoneScript = phoneScript(for: lead)
+        let html = proposalHTML(lead: lead, summary: summary, pricing: pricing, email: emailDraft, dm: dmDraft, phone: phoneScript)
+        try ensureFolders()
+        try Data(Redactor.redact(html).utf8).write(to: htmlURL, options: .atomic)
+        try writeProposalPDF(title: "\(lead.businessName) Web改善ご提案", lines: [summary] + pricing, to: pdfURL)
+        try writeSVGPreview(
+            title: "\(lead.businessName) Web改善ご提案",
+            subtitle: summary,
+            badge: "提案書",
+            cta: "人が確認して送信",
+            score: lead.latestAudit?.score,
+            to: imageURL
+        )
+        let proposal = Proposal(
+            id: proposalID,
+            leadID: lead.id,
+            title: "\(lead.businessName) Web改善ご提案",
+            htmlPath: htmlURL.path,
+            pdfPath: fileManager.fileExists(atPath: pdfURL.path) ? pdfURL.path : nil,
+            imagePath: imageURL.path,
+            summary: Redactor.redact(summary),
+            pricing: pricing,
+            emailDraft: Redactor.redact(emailDraft),
+            dmDraft: Redactor.redact(dmDraft),
+            phoneScript: Redactor.redact(phoneScript),
+            approvalStatus: "draft",
+            createdAt: Date(),
+            approvedAt: nil
+        )
+        try writeJSON(proposal, to: proposalsURL.appendingPathComponent("\(proposalID).json"))
+        leads[index].latestProposal = proposal
+        leads[index].status = .proposalReady
+        leads[index].updatedAt = Date()
+        lock.lock()
+        defer { lock.unlock() }
+        try saveLeadsLocked(leads)
+        return proposal
+    }
+
+    func approveProposal(leadID: String) throws -> Proposal {
+        var leads = try list()
+        guard let index = leads.firstIndex(where: { $0.id == leadID }) else { throw HostError.notFound("Sales lead not found") }
+        guard var proposal = leads[index].latestProposal else { throw HostError.badRequest("Proposal has not been generated.") }
+        proposal.approvalStatus = "approved"
+        proposal.approvedAt = Date()
+        leads[index].latestProposal = proposal
+        leads[index].updatedAt = Date()
+        try writeJSON(proposal, to: proposalsURL.appendingPathComponent("\(proposal.id).json"))
+        lock.lock()
+        defer { lock.unlock() }
+        try saveLeadsLocked(leads)
+        return proposal
+    }
+
+    func markContacted(leadID: String, channel: String, note: String?) throws -> SalesLead {
+        var leads = try list()
+        guard let index = leads.firstIndex(where: { $0.id == leadID }) else { throw HostError.notFound("Sales lead not found") }
+        let log = OutreachLog(
+            id: UUID().uuidString.lowercased(),
+            channel: Redactor.redact(channel.nilIfBlank ?? "manual"),
+            note: Redactor.redact(note?.nilIfBlank ?? "人が内容を確認して連絡済みにしました。"),
+            createdAt: Date()
+        )
+        leads[index].outreachLogs.insert(log, at: 0)
+        leads[index].status = .contacted
+        leads[index].updatedAt = Date()
+        lock.lock()
+        defer { lock.unlock() }
+        try saveLeadsLocked(leads)
+        return leads[index]
+    }
+
+    func assets(leadID: String) throws -> SalesLeadAssetsResponse {
+        let lead = try lead(id: leadID)
+        var assets: [SalesLeadAsset] = []
+        if let audit = lead.latestAudit {
+            assets.append(SalesLeadAsset(id: audit.id, kind: "audit", path: auditsURL.appendingPathComponent("\(audit.id).json").path, createdAt: audit.createdAt))
+            assets.append(SalesLeadAsset(id: "\(audit.id)-screen", kind: "screenshot", path: audit.screenshotPath, createdAt: audit.createdAt))
+        }
+        if let mock = lead.latestRedesignMock {
+            assets.append(SalesLeadAsset(id: mock.id, kind: "redesign", path: mock.htmlPath, createdAt: mock.createdAt))
+            assets.append(SalesLeadAsset(id: "\(mock.id)-screen", kind: "redesign-image", path: mock.screenshotPath, createdAt: mock.createdAt))
+        }
+        if let proposal = lead.latestProposal {
+            assets.append(SalesLeadAsset(id: proposal.id, kind: "proposal", path: proposal.htmlPath, createdAt: proposal.createdAt))
+            if let pdfPath = proposal.pdfPath {
+                assets.append(SalesLeadAsset(id: "\(proposal.id)-pdf", kind: "proposal-pdf", path: pdfPath, createdAt: proposal.createdAt))
+            }
+            if let imagePath = proposal.imagePath {
+                assets.append(SalesLeadAsset(id: "\(proposal.id)-image", kind: "proposal-image", path: imagePath, createdAt: proposal.createdAt))
+            }
+        }
+        if let handoff = lead.hermesHandoffPath {
+            assets.append(SalesLeadAsset(id: "\(lead.id)-handoff", kind: "hermes-handoff", path: handoff, createdAt: lead.updatedAt))
+        }
+        return SalesLeadAssetsResponse(leadID: leadID, assets: assets)
+    }
+
+    func promoteToPortfolio(leadID: String, portfolioStore: PortfolioRegistryStore) throws -> SalesPortfolioPromotionResponse {
+        var leads = try list()
+        guard let index = leads.firstIndex(where: { $0.id == leadID }) else { throw HostError.notFound("Sales lead not found") }
+        let lead = leads[index]
+        guard lead.status == .won else {
+            throw HostError.badRequest("Only won leads can be promoted to Portfolio.")
+        }
+        let now = Date()
+        let deliverables = [
+            lead.latestProposal.map { PortfolioDeliverable(name: "Web改善提案書", ref: $0.htmlPath) },
+            lead.latestRedesignMock.map { PortfolioDeliverable(name: "スマホLP改善案", ref: $0.htmlPath) }
+        ].compactMap { $0 }
+        let asset = PortfolioAsset(
+            id: "sales-\(safeID(lead.businessName))",
+            kind: .engagement,
+            name: lead.businessName,
+            summary: "\(lead.area.nilIfBlank ?? "地域未設定") / \(lead.category.nilIfBlank ?? "業種未設定") のWeb改善営業案件",
+            status: .unknown,
+            sourceRefs: PortfolioSourceRefs(github: nil, driveUrl: nil, localPaths: [PortfolioLocalPath(machineId: localHostName(), path: rootURL.path)]),
+            tags: ["sales-lab", "web-improvement", lead.area, lead.category].compactMap { $0.nilIfBlank },
+            runtimeHost: localHostName(),
+            healthSpec: nil,
+            logSource: nil,
+            controls: PortfolioControls(start: nil, stop: nil, restart: nil, deploy: nil),
+            linkedProjectId: nil,
+            backupState: .localOnly,
+            client: lead.businessName,
+            phase: "won",
+            deliverables: deliverables,
+            timeline: "初回改善案: 3万円 / LP改善: 15〜30万円 / 月次改善: 5〜15万円",
+            relatedAssetIds: [],
+            createdAt: now,
+            updatedAt: now
+        )
+        let saved = try portfolioStore.upsert(asset, message: "Sales Lab promote \(lead.businessName)")
+        leads[index].portfolioAssetID = saved.id
+        leads[index].updatedAt = Date()
+        lock.lock()
+        defer { lock.unlock() }
+        try saveLeadsLocked(leads)
+        return SalesPortfolioPromotionResponse(lead: leads[index], asset: saved)
+    }
+
+    func createHermesHandoff(leadID: String) throws -> SalesHermesHandoffResponse {
+        var leads = try list()
+        guard let index = leads.firstIndex(where: { $0.id == leadID }) else { throw HostError.notFound("Sales lead not found") }
+        let lead = leads[index]
+        let note = hermesHandoffNote(for: lead)
+        let noteURL = proposalsURL.appendingPathComponent("hermes-handoff-\(safeID(lead.businessName))-\(timestamp()).md")
+        try ensureFolders()
+        try Data(Redactor.redact(note).utf8).write(to: noteURL, options: .atomic)
+        leads[index].hermesHandoffPath = noteURL.path
+        leads[index].updatedAt = Date()
+        lock.lock()
+        defer { lock.unlock() }
+        try saveLeadsLocked(leads)
+        return SalesHermesHandoffResponse(lead: leads[index], notePath: noteURL.path, note: Redactor.redact(note))
+    }
+
+    private func lead(id: String) throws -> SalesLead {
+        guard let lead = try list().first(where: { $0.id == id }) else {
+            throw HostError.notFound("Sales lead not found")
+        }
+        return lead
+    }
+
+    private func loadLeadsLocked() throws -> [SalesLead] {
+        try ensureFolders()
+        guard fileManager.fileExists(atPath: leadsURL.path) else { return [] }
+        let data = try Data(contentsOf: leadsURL)
+        return try JSONDecoder.dates.decode([SalesLead].self, from: data)
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func saveLeadsLocked(_ leads: [SalesLead]) throws {
+        try ensureFolders()
+        try JSONEncoder.pretty.encode(leads.sorted { $0.updatedAt > $1.updatedAt }).write(to: leadsURL, options: .atomic)
+    }
+
+    private func ensureFolders() throws {
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: screenshotsURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: auditsURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: mocksURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: proposalsURL, withIntermediateDirectories: true)
+    }
+
+    private func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {
+        try ensureFolders()
+        try JSONEncoder.pretty.encode(value).write(to: url, options: .atomic)
+    }
+
+    private func sanitized(_ lead: SalesLead) -> SalesLead {
+        var clean = lead
+        clean.businessName = Redactor.redact(clean.businessName)
+        clean.category = Redactor.redact(clean.category)
+        clean.area = Redactor.redact(clean.area)
+        clean.officialWebsiteURL = clean.officialWebsiteURL.map(Redactor.redact)
+        clean.googleMapsURL = clean.googleMapsURL.map(Redactor.redact)
+        clean.googlePlaceID = clean.googlePlaceID.map(Redactor.redact)
+        clean.phone = clean.phone.map(Redactor.redact)
+        clean.email = clean.email.map(Redactor.redact)
+        clean.notes = Redactor.redact(clean.notes)
+        return clean
+    }
+
+    private func makeAudit(for lead: SalesLead, urlText: String) throws -> WebsiteAudit {
+        let auditID = "audit-\(safeID(lead.businessName))-\(timestamp())"
+        let url = resolvedURL(from: urlText)
+        let robots = robotsAllows(url: url)
+        let fetch = robots.allowed ? fetchOfficialPage(url: url) : (html: "", status: nil, error: "robots.txt disallows this path")
+        let html = fetch.html
+        var findings: [WebsiteAuditFinding] = []
+        if !robots.allowed {
+            findings.append(finding("high", "robots.txtで取得不可", "公式サイトのrobots.txtがこのパスの自動取得を許可していません。", "手動確認に切り替え、営業資料には取得不可の前提を明記します。"))
+        }
+        if html.nilIfBlank == nil {
+            findings.append(finding("medium", "ページ取得に失敗", fetch.error ?? "公式URLからHTMLを取得できませんでした。", "URLの正しさを確認し、手動入力の情報だけで提案を作ります。"))
+        }
+        let lowercase = html.lowercased()
+        if !lowercase.contains("name=\"viewport\"") && !lowercase.contains("name='viewport'") {
+            findings.append(finding("high", "スマホ表示設定が弱い", "mobile viewport 390x844 での最適化が明示されていません。", "スマホファーストの表示幅、文字サイズ、CTA固定導線を入れます。"))
+        }
+        if !lowercase.contains("<title") {
+            findings.append(finding("medium", "検索結果の見出しが弱い", "titleタグを確認できませんでした。", "地域名・業種・店名を含む検索向けタイトルに整理します。"))
+        }
+        if !lowercase.contains("<h1") {
+            findings.append(finding("medium", "最初の訴求が不明瞭", "ファーストビューの主見出しを判定できませんでした。", "3秒で強みと予約導線が分かるH1を作ります。"))
+        }
+        if !lowercase.contains("tel:") && lead.phone?.nilIfBlank != nil {
+            findings.append(finding("medium", "電話導線が弱い", "電話番号はあるがスマホのタップ発信導線を確認できませんでした。", "画面下部に電話・予約CTAを固定します。"))
+        }
+        if html.utf8.count > 300_000 {
+            findings.append(finding("low", "ページが重い可能性", "HTMLだけで300KBを超えています。", "画像・外部スクリプト・ファーストビューを整理します。"))
+        }
+        let score = max(35, 100 - findings.reduce(0) { partial, finding in
+            partial + (finding.severity == "high" ? 22 : finding.severity == "medium" ? 14 : 7)
+        })
+        let impacts = businessImpacts(findings: findings, lead: lead)
+        let screenshotURL = screenshotsURL.appendingPathComponent("\(auditID)-390x844.svg")
+        try ensureFolders()
+        try writeSVGPreview(
+            title: lead.businessName,
+            subtitle: impacts.first ?? "スマホ導線を点検しました。",
+            badge: "390x844",
+            cta: "改善余地 \(max(0, 100 - score))点",
+            score: score,
+            to: screenshotURL
+        )
+        let lighthousePath = runLighthouseIfAvailable(url: url, auditID: auditID)
+        return WebsiteAudit(
+            id: auditID,
+            leadID: lead.id,
+            url: Redactor.redact(urlText),
+            mobileViewport: "390x844",
+            score: score,
+            summary: "スマホ閲覧時の第一印象・問い合わせ導線・検索表示を中心に確認しました。",
+            findings: findings,
+            businessImpacts: impacts,
+            screenshotPath: screenshotURL.path,
+            lighthouseSummaryPath: lighthousePath,
+            createdAt: Date()
+        )
+    }
+
+    private func businessImpacts(findings: [WebsiteAuditFinding], lead: SalesLead) -> [String] {
+        if findings.isEmpty {
+            return ["大きな欠落は少ないため、予約・問い合わせ率を上げる細部改善が中心です。"]
+        }
+        return findings.prefix(4).map { finding in
+            switch finding.severity {
+            case "high":
+                return "\(lead.businessName)を探した人が、スマホ上で強みや次の行動を判断しにくい可能性があります。"
+            case "medium":
+                return "比較検討中の見込み客が、競合サイトへ流れる余地があります。"
+            default:
+                return "読み込みや細部の摩擦を減らすと、問い合わせ前の離脱を抑えられます。"
+            }
+        }
+    }
+
+    private func redesignHTML(lead: SalesLead, headline: String, subheadline: String, cta: String) -> String {
+        let area = htmlEscape(lead.area.nilIfBlank ?? "地域")
+        let category = htmlEscape(lead.category.nilIfBlank ?? "サービス")
+        let name = htmlEscape(lead.businessName)
+        let phone = htmlEscape(lead.phone?.nilIfBlank ?? "")
+        return """
+        <!doctype html>
+        <html lang="ja">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>\(name) Web改善案</title>
+          <style>
+            :root { color-scheme: light; --ink:#17211f; --accent:#0f766e; --warm:#f5efe6; --line:#d8ded9; }
+            body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif; color:var(--ink); background:#fbfaf7; }
+            header { padding:18px 18px 8px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--line); }
+            main { max-width:430px; margin:0 auto; background:white; min-height:100vh; }
+            .hero { padding:34px 20px 24px; background:linear-gradient(180deg,var(--warm),#fff); }
+            .badge { display:inline-flex; padding:6px 10px; border-radius:999px; background:#e5f3f1; color:var(--accent); font-size:12px; font-weight:700; }
+            h1 { font-size:31px; line-height:1.16; margin:16px 0 12px; letter-spacing:0; }
+            p { font-size:15px; line-height:1.75; }
+            .cta { display:block; text-align:center; margin:18px 0 0; padding:15px 16px; border-radius:8px; background:var(--accent); color:white; text-decoration:none; font-weight:800; }
+            section { padding:22px 20px; border-top:1px solid var(--line); }
+            h2 { font-size:18px; margin:0 0 12px; }
+            .grid { display:grid; gap:10px; }
+            .item { padding:13px; border:1px solid var(--line); border-radius:8px; background:#fcfcfb; }
+            .sticky { position:sticky; bottom:0; padding:10px 14px; background:rgba(255,255,255,.94); border-top:1px solid var(--line); backdrop-filter:blur(12px); }
+          </style>
+        </head>
+        <body>
+          <main>
+            <header><strong>\(name)</strong><span>\(area)</span></header>
+            <div class="hero">
+              <span class="badge">\(area)の\(category)</span>
+              <h1>\(htmlEscape(headline))</h1>
+              <p>\(htmlEscape(subheadline))</p>
+              <a class="cta" href="\(phone.isEmpty ? "#contact" : "tel:\(phone)")">\(htmlEscape(cta))</a>
+            </div>
+            <section><h2>選ばれる理由</h2><div class="grid"><div class="item">初めての人にも伝わる強みを先頭へ。</div><div class="item">料金・流れ・よくある不安を短く整理。</div><div class="item">電話・予約・相談の導線をスマホ下部に固定。</div></div></section>
+            <section id="contact"><h2>相談しやすい導線</h2><p>営業時間・場所・問い合わせ方法を1画面で確認できる構成です。</p></section>
+            <div class="sticky"><a class="cta" href="\(phone.isEmpty ? "#contact" : "tel:\(phone)")">\(htmlEscape(cta))</a></div>
+          </main>
+        </body>
+        </html>
+        """
+    }
+
+    private func proposalSummary(for lead: SalesLead) -> String {
+        let issue = lead.latestAudit?.findings.first?.title ?? "スマホ導線の整理"
+        return "\(lead.businessName)は\(lead.area.nilIfBlank ?? "商圏")の\(lead.category.nilIfBlank ?? "事業")として、\(issue)を直すことで問い合わせ前の離脱を減らせます。まず3万円の改善案で方向性を確認し、必要なら15〜30万円のLP/トップ改善へ進めます。"
+    }
+
+    private func outreachEmail(for lead: SalesLead) -> String {
+        """
+        件名: \(lead.businessName)様のスマホサイト改善について
+
+        \(lead.businessName) ご担当者様
+
+        突然のご連絡失礼いたします。\(lead.area.nilIfBlank ?? "地域")で\(lead.category.nilIfBlank ?? "サービス")を探す方がスマホで見たとき、強みと問い合わせ導線がもう少し早く伝わる余地があると感じました。
+
+        まずは3万円で、現状の課題・改善後のスマホ案・優先順位を1枚にまとめられます。自動送信ではなく、人が確認したうえで必要な範囲だけお送りします。
+
+        ご興味があれば、短く改善案だけ共有します。
+        """
+    }
+
+    private func outreachDM(for lead: SalesLead) -> String {
+        "\(lead.businessName)様のスマホサイトを拝見し、\(lead.category.nilIfBlank ?? "事業")の強みがもう少し早く伝わる改善案を作れそうです。3万円で1枚の改善案から始められます。必要でしたら概要だけお送りします。"
+    }
+
+    private func phoneScript(for lead: SalesLead) -> String {
+        "お忙しいところ失礼します。\(lead.businessName)様のWebサイトを拝見し、スマホからの問い合わせ導線について短い改善案をご提案できると思いご連絡しました。売り込みではなく、まずは3万円の診断・改善案だけです。ご担当の方に概要をお送りしてもよろしいでしょうか。"
+    }
+
+    private func proposalHTML(lead: SalesLead, summary: String, pricing: [String], email: String, dm: String, phone: String) -> String {
+        """
+        <!doctype html>
+        <html lang="ja">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>\(htmlEscape(lead.businessName)) Web改善ご提案</title>
+          <style>
+            body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif; background:#f6f7f5; color:#18211f; }
+            main { width:min(860px, calc(100vw - 32px)); margin:28px auto; background:white; border:1px solid #dce1dd; border-radius:8px; padding:28px; }
+            h1 { font-size:28px; margin:0 0 12px; letter-spacing:0; }
+            h2 { font-size:17px; margin:22px 0 8px; }
+            p, li, pre { font-size:14px; line-height:1.7; }
+            pre { white-space:pre-wrap; background:#f7faf8; border:1px solid #dce1dd; border-radius:8px; padding:12px; }
+            .pill { display:inline-flex; padding:5px 9px; border-radius:999px; background:#e3f3ef; color:#0f766e; font-weight:700; font-size:12px; }
+          </style>
+        </head>
+        <body>
+          <main>
+            <span class="pill">人が確認してから連絡</span>
+            <h1>\(htmlEscape(lead.businessName)) Web改善ご提案</h1>
+            <p>\(htmlEscape(summary))</p>
+            <h2>料金</h2>
+            <ul>\(pricing.map { "<li>\(htmlEscape($0))</li>" }.joined())</ul>
+            <h2>メール文案</h2><pre>\(htmlEscape(email))</pre>
+            <h2>DM文案</h2><pre>\(htmlEscape(dm))</pre>
+            <h2>電話スクリプト</h2><pre>\(htmlEscape(phone))</pre>
+          </main>
+        </body>
+        </html>
+        """
+    }
+
+    private func hermesHandoffNote(for lead: SalesLead) -> String {
+        """
+        # Hermes Desktop 引き継ぎ: \(lead.businessName)
+
+        Veqral Sales Lab で作った手動登録リードです。Veqral 側に独自メモリは作っていません。
+
+        - 店舗/会社: \(lead.businessName)
+        - 地域: \(lead.area.nilIfBlank ?? "未設定")
+        - 業種: \(lead.category.nilIfBlank ?? "未設定")
+        - 公式URL: \(lead.officialWebsiteURL?.nilIfBlank ?? "未設定")
+        - 状態: \(lead.status.rawValue)
+        - 監査スコア: \(lead.latestAudit.map { "\($0.score)" } ?? "未実行")
+        - 改善案: \(lead.latestRedesignMock?.htmlPath ?? "未生成")
+        - 提案書: \(lead.latestProposal?.htmlPath ?? "未生成")
+
+        Hermes Desktop 側でこの内容を Project に貼り付け、必要なら記憶・delegation・command center に委譲してください。
+        """
+    }
+
+    private func finding(_ severity: String, _ title: String, _ detail: String, _ recommendation: String) -> WebsiteAuditFinding {
+        WebsiteAuditFinding(id: UUID().uuidString.lowercased(), severity: severity, title: title, detail: detail, recommendation: recommendation)
+    }
+
+    private func resolvedURL(from text: String) -> URL {
+        if let url = URL(string: text), url.scheme != nil {
+            return url
+        }
+        return URL(fileURLWithPath: text.expandingTilde)
+    }
+
+    private func fetchOfficialPage(url: URL) -> (html: String, status: Int?, error: String?) {
+        if url.isFileURL {
+            do {
+                let data = try Data(contentsOf: url)
+                return (String(data: data.prefix(1_000_000), encoding: .utf8) ?? "", nil, nil)
+            } catch {
+                return ("", nil, error.localizedDescription)
+            }
+        }
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            return ("", nil, "Unsupported URL scheme")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("VeqralSalesLab/1.0 (+manual official-site audit)", forHTTPHeaderField: "User-Agent")
+        let result = syncRequest(request, timeout: 10)
+        guard let data = result.data else {
+            return ("", result.statusCode, result.error)
+        }
+        return (String(data: data.prefix(1_000_000), encoding: .utf8) ?? "", result.statusCode, result.error)
+    }
+
+    private func robotsAllows(url: URL) -> (allowed: Bool, reason: String?) {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return (true, nil) }
+        guard let host = url.host else { return (true, nil) }
+        var components = URLComponents()
+        components.scheme = url.scheme
+        components.host = host
+        components.port = url.port
+        components.path = "/robots.txt"
+        guard let robotsURL = components.url else { return (true, nil) }
+        var request = URLRequest(url: robotsURL)
+        request.setValue("VeqralSalesLab/1.0", forHTTPHeaderField: "User-Agent")
+        let result = syncRequest(request, timeout: 4)
+        guard let data = result.data,
+              let text = String(data: data, encoding: .utf8),
+              result.statusCode.map({ (200..<300).contains($0) }) == true else {
+            return (true, nil)
+        }
+        let path = url.path.isEmpty ? "/" : url.path
+        var applies = false
+        for raw in text.split(whereSeparator: \.isNewline) {
+            let line = raw.split(separator: "#", maxSplits: 1).first.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let lower = line.lowercased()
+            if lower.hasPrefix("user-agent:") {
+                let agent = lower.dropFirst("user-agent:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+                applies = agent == "*" || agent.contains("veqralsaleslab")
+            } else if applies, lower.hasPrefix("disallow:") {
+                let rule = String(line.dropFirst("disallow:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rule.isEmpty, path.hasPrefix(rule) {
+                    return (false, "robots.txt disallow \(rule)")
+                }
+            }
+        }
+        return (true, nil)
+    }
+
+    private func syncRequest(_ request: URLRequest, timeout: TimeInterval) -> (data: Data?, statusCode: Int?, error: String?) {
+        let semaphore = DispatchSemaphore(value: 0)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        let session = URLSession(configuration: configuration)
+        let box = SyncResponseBox()
+        let task = session.dataTask(with: request) { data, response, error in
+            box.set(data: data, statusCode: (response as? HTTPURLResponse)?.statusCode, error: error?.localizedDescription)
+            semaphore.signal()
+        }
+        task.resume()
+        if semaphore.wait(timeout: .now() + timeout + 1) == .timedOut {
+            task.cancel()
+            box.set(data: nil, statusCode: nil, error: "Request timed out")
+        }
+        session.invalidateAndCancel()
+        return box.snapshot()
+    }
+
+    private func runLighthouseIfAvailable(url: URL, auditID: String) -> String? {
+        guard !url.isFileURL, let lighthouse = commandPath("lighthouse") else { return nil }
+        let outputURL = auditsURL.appendingPathComponent("\(auditID)-lighthouse.json")
+        let result = ProcessRunner.run(
+            lighthouse,
+            [
+                url.absoluteString,
+                "--quiet",
+                "--chrome-flags=--headless --no-sandbox",
+                "--output=json",
+                "--only-categories=performance,accessibility,best-practices,seo",
+                "--output-path=\(outputURL.path)"
+            ],
+            timeout: 45
+        )
+        return result.exitCode == 0 && fileManager.fileExists(atPath: outputURL.path) ? outputURL.path : nil
+    }
+
+    private func writeSVGPreview(title: String, subtitle: String, badge: String, cta: String, score: Int?, to url: URL) throws {
+        try ensureFolders()
+        let scoreText = score.map { "Score \($0)" } ?? "Preview"
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844">
+          <rect width="390" height="844" fill="#f7f6f1"/>
+          <rect x="18" y="24" width="354" height="796" rx="28" fill="#ffffff" stroke="#d8ded9"/>
+          <text x="38" y="68" font-family="-apple-system,BlinkMacSystemFont,Hiragino Sans,sans-serif" font-size="13" font-weight="700" fill="#0f766e">\(xmlEscape(badge))</text>
+          <text x="38" y="112" font-family="-apple-system,BlinkMacSystemFont,Hiragino Sans,sans-serif" font-size="28" font-weight="800" fill="#17211f">\(xmlEscape(short(title, 15)))</text>
+          <foreignObject x="38" y="136" width="314" height="180"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:-apple-system,BlinkMacSystemFont,Hiragino Sans,sans-serif;font-size:15px;line-height:1.65;color:#42504c;">\(htmlEscape(short(subtitle, 92)))</div></foreignObject>
+          <rect x="38" y="344" width="314" height="58" rx="10" fill="#0f766e"/>
+          <text x="195" y="380" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Hiragino Sans,sans-serif" font-size="15" font-weight="800" fill="#ffffff">\(xmlEscape(short(cta, 20)))</text>
+          <rect x="38" y="438" width="314" height="98" rx="12" fill="#f4faf8" stroke="#d8ded9"/>
+          <text x="58" y="475" font-family="-apple-system,BlinkMacSystemFont,Hiragino Sans,sans-serif" font-size="16" font-weight="800" fill="#17211f">\(xmlEscape(scoreText))</text>
+          <text x="58" y="506" font-family="-apple-system,BlinkMacSystemFont,Hiragino Sans,sans-serif" font-size="13" fill="#5c6864">mobile viewport 390x844</text>
+          <rect x="38" y="568" width="314" height="88" rx="12" fill="#fcfbf8" stroke="#d8ded9"/>
+          <rect x="38" y="672" width="314" height="88" rx="12" fill="#fcfbf8" stroke="#d8ded9"/>
+        </svg>
+        """
+        try Data(svg.utf8).write(to: url, options: .atomic)
+    }
+
+    private func writeProposalPDF(title: String, lines: [String], to url: URL) throws {
+        let page = CGRect(x: 0, y: 0, width: 595, height: 842)
+        let data = NSMutableData()
+        var mediaBox = page
+        guard let consumer = CGDataConsumer(data: data as CFMutableData),
+              let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else { return }
+        context.beginPDFPage(nil)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        let text = ([title, ""] + lines).joined(separator: "\n")
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 15),
+            .foregroundColor: NSColor.black
+        ]
+        NSAttributedString(string: text, attributes: attributes).draw(in: CGRect(x: 44, y: 94, width: 507, height: 680))
+        NSGraphicsContext.restoreGraphicsState()
+        context.endPDFPage()
+        context.closePDF()
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func parseCSV(_ csv: String) -> [[String]] {
+        var rows: [[String]] = []
+        var row: [String] = []
+        var field = ""
+        var inQuotes = false
+        var iterator = csv.makeIterator()
+        while let character = iterator.next() {
+            if character == "\"" {
+                if inQuotes, let next = iterator.next() {
+                    if next == "\"" {
+                        field.append("\"")
+                    } else {
+                        inQuotes = false
+                        if next == "," {
+                            row.append(field)
+                            field = ""
+                        } else if next == "\n" {
+                            row.append(field)
+                            rows.append(row)
+                            row = []
+                            field = ""
+                        } else if next != "\r" {
+                            field.append(next)
+                        }
+                    }
+                } else {
+                    inQuotes.toggle()
+                }
+            } else if character == ",", !inQuotes {
+                row.append(field)
+                field = ""
+            } else if character == "\n", !inQuotes {
+                row.append(field)
+                rows.append(row)
+                row = []
+                field = ""
+            } else if character != "\r" {
+                field.append(character)
+            }
+        }
+        if !field.isEmpty || !row.isEmpty {
+            row.append(field)
+            rows.append(row)
+        }
+        return rows.filter { !$0.allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
+    }
+
+    private func commandPath(_ name: String) -> String? {
+        let output = ProcessRunner.run("/bin/zsh", ["-lc", "command -v \(shellQuoted(name))"], timeout: 5)
+        return output.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+    }
+
+    private func safeID(_ value: String) -> String {
+        let mapped = value.lowercased().unicodeScalars.map { scalar -> Character in
+            CharacterSet.alphanumerics.contains(scalar) ? Character(scalar) : "-"
+        }
+        return String(mapped).trimmingCharacters(in: CharacterSet(charactersIn: "-")).nilIfBlank ?? UUID().uuidString.lowercased()
+    }
+
+    private func timestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: Date())
+    }
+
+    private func short(_ value: String, _ limit: Int) -> String {
+        value.count <= limit ? value : String(value.prefix(limit - 1)) + "…"
+    }
+
+    private func htmlEscape(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    private func xmlEscape(_ value: String) -> String {
+        htmlEscape(value).replacingOccurrences(of: "'", with: "&apos;")
+    }
+}
+
+enum SalesLabSmoke {
+    static func runIfRequested(arguments: [String]) -> Bool {
+        guard let command = arguments.first, command.hasPrefix("smoke-sales-") else { return false }
+        do {
+            switch command {
+            case "smoke-sales-lead-repository":
+                try leadRepository()
+            case "smoke-sales-import-csv":
+                try importCSV()
+            case "smoke-sales-audit":
+                try audit()
+            case "smoke-sales-mock":
+                try redesign()
+            case "smoke-sales-proposal":
+                try proposal()
+            case "smoke-sales-no-autosend":
+                try noAutosend()
+            case "smoke-sales-redact":
+                try redact()
+            default:
+                print("FAIL: Unknown Sales Lab smoke \(command)")
+                Foundation.exit(64)
+            }
+            print("PASS: \(command)")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: \(command) \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+
+    private static func store() throws -> (SalesLabStore, URL) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("veqral-sales-smoke-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return (SalesLabStore(rootURL: root), root)
+    }
+
+    private static func sampleHTML(root: URL) throws -> String {
+        let url = root.appendingPathComponent("sample.html")
+        try Data("""
+        <!doctype html><html><head><title>Sample Clinic</title></head><body><h1>Sample Clinic</h1><p>地域のクリニックです。</p></body></html>
+        """.utf8).write(to: url)
+        return url.path
+    }
+
+    private static func sampleLead(website: String? = nil) -> SalesLead {
+        var lead = SalesLead.empty()
+        lead.businessName = "青山サンプル整体"
+        lead.category = "整体"
+        lead.area = "青山"
+        lead.officialWebsiteURL = website
+        lead.googlePlaceID = "place-local-only"
+        lead.phone = "03-0000-0000"
+        return lead
+    }
+
+    private static func leadRepository() throws {
+        let (store, root) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var lead = sampleLead()
+        lead = try store.upsert(lead)
+        lead.status = .lost
+        _ = try store.upsert(lead)
+        guard try store.list().first?.status == .lost else { throw SmokeError("lead update/list failed") }
+    }
+
+    private static func importCSV() throws {
+        let (store, root) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let response = try store.importCSV("businessName,category,area,officialWebsiteURL\n青山花店,花屋,青山,https://example.com\n")
+        guard response.imported == 1, try store.list().count == 1 else { throw SmokeError("CSV import failed") }
+    }
+
+    private static func audit() throws {
+        let (store, root) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let website = try sampleHTML(root: root)
+        let lead = try store.upsert(sampleLead(website: website))
+        let audit = try store.auditLead(id: lead.id)
+        guard audit.mobileViewport == "390x844", FileManager.default.fileExists(atPath: audit.screenshotPath) else {
+            throw SmokeError("audit artifact missing")
+        }
+    }
+
+    private static func redesign() throws {
+        let (store, root) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lead = try store.upsert(sampleLead(website: try sampleHTML(root: root)))
+        let mock = try store.generateRedesignMock(id: lead.id)
+        guard FileManager.default.fileExists(atPath: mock.htmlPath),
+              FileManager.default.fileExists(atPath: mock.screenshotPath) else {
+            throw SmokeError("redesign artifacts missing")
+        }
+    }
+
+    private static func proposal() throws {
+        let (store, root) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lead = try store.upsert(sampleLead(website: try sampleHTML(root: root)))
+        _ = try store.auditLead(id: lead.id)
+        _ = try store.generateRedesignMock(id: lead.id)
+        let proposal = try store.generateProposal(id: lead.id)
+        guard FileManager.default.fileExists(atPath: proposal.htmlPath),
+              proposal.emailDraft.contains("自動送信ではなく"),
+              proposal.pricing.count == 3 else {
+            throw SmokeError("proposal draft invalid")
+        }
+    }
+
+    private static func noAutosend() throws {
+        let (store, root) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lead = try store.upsert(sampleLead())
+        let contacted = try store.markContacted(leadID: lead.id, channel: "manual", note: "copy confirmed")
+        guard contacted.status == .contacted, contacted.outreachLogs.first?.channel == "manual" else {
+            throw SmokeError("manual contact marker failed")
+        }
+    }
+
+    private static func redact() throws {
+        let (store, root) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var lead = sampleLead(website: try sampleHTML(root: root))
+        let secret = ["sk", "or", "v1", "1234567890abcdef"].joined(separator: "-")
+        lead.notes = "secret token \(secret)"
+        lead = try store.upsert(lead)
+        let proposal = try store.generateProposal(id: lead.id)
+        let text = try String(contentsOfFile: proposal.htmlPath, encoding: .utf8)
+        guard !text.contains(secret) else {
+            throw SmokeError("secret-shaped value leaked to proposal")
+        }
+    }
 }
 
 final class PortfolioRegistryStore {
@@ -6894,10 +8087,11 @@ enum HostError: Error, CustomStringConvertible {
     case unauthorized(String)
     case notFound(String)
     case approvalRequired(String)
+    case disabled(String)
 
     var description: String {
         switch self {
-        case .badRequest(let message), .unauthorized(let message), .notFound(let message), .approvalRequired(let message):
+        case .badRequest(let message), .unauthorized(let message), .notFound(let message), .approvalRequired(let message), .disabled(let message):
             return message
         }
     }
@@ -6908,6 +8102,7 @@ enum HostError: Error, CustomStringConvertible {
         case .unauthorized: "401 Unauthorized"
         case .notFound: "404 Not Found"
         case .approvalRequired: "409 Conflict"
+        case .disabled: "501 Disabled"
         }
     }
 }

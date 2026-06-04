@@ -2,6 +2,615 @@ import SwiftUI
 import UIKit
 import AVFoundation
 
+struct SalesLabView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    @State private var statusFilter: SalesLeadStatus?
+    @State private var isShowingLeadEditor = false
+    @State private var isShowingCSVImport = false
+    @State private var draftLead = SalesLead.empty()
+    @State private var csvText = ""
+
+    private var filteredLeads: [SalesLead] {
+        store.salesLeads.filter { lead in
+            statusFilter == nil || lead.status == statusFilter
+        }
+    }
+
+    var body: some View {
+        ScreenScaffold(title: "営業ラボ", systemImage: "chart.line.uptrend.xyaxis") {
+            header
+            filters
+            leadGrid
+            detail
+        }
+        .onAppear {
+            if store.salesLeads.isEmpty {
+                store.refreshSalesLeads()
+            }
+        }
+        .sheet(isPresented: $isShowingLeadEditor) {
+            SalesLeadEditor(lead: $draftLead) {
+                store.saveSalesLead(draftLead)
+                isShowingLeadEditor = false
+                draftLead = SalesLead.empty()
+            }
+            .presentationDetents([.large])
+        }
+        .sheet(isPresented: $isShowingCSVImport) {
+            SalesCSVImportSheet(csvText: $csvText) {
+                store.importSalesCSV(csvText)
+                isShowingCSVImport = false
+                csvText = ""
+            }
+            .presentationDetents([.medium, .large])
+        }
+    }
+
+    private var header: some View {
+        VQPanel("案件生成ツール", systemImage: "building.2", actionImage: "arrow.clockwise") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    StatusPill(title: "\(store.salesLeads.count)件", tint: VQTheme.accent)
+                    StatusPill(title: "\(store.salesLeads.filter { $0.status == .proposalReady }.count)提案", tint: VQTheme.amber)
+                    StatusPill(title: "\(store.salesLeads.filter { $0.status == .won }.count)受注", tint: VQTheme.green)
+                    Spacer()
+                }
+
+                HStack(spacing: 8) {
+                    Button(action: store.refreshSalesLeads) {
+                        Label("更新", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                    Button {
+                        draftLead = SalesLead.empty()
+                        isShowingLeadEditor = true
+                    } label: {
+                        Label("手動登録", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                    Button {
+                        csvText = ""
+                        isShowingCSVImport = true
+                    } label: {
+                        Label("CSV", systemImage: "tablecells")
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                    Spacer()
+                }
+
+                Text("公式URLを人が登録した案件だけを扱います。連絡文は生成とコピーまでで、自動送信はしません。")
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if !store.salesLabMessage.isEmpty {
+                    Text(store.salesLabMessage)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var filters: some View {
+        VQPanel("絞り込み", systemImage: "line.3.horizontal.decrease.circle") {
+            Picker("状態", selection: $statusFilter) {
+                Text("すべて").tag(nil as SalesLeadStatus?)
+                ForEach(SalesLeadStatus.allCases) { status in
+                    Text(status.title).tag(status as SalesLeadStatus?)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private var leadGrid: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], alignment: .leading, spacing: 12) {
+            if filteredLeads.isEmpty {
+                VQPanel("案件", systemImage: "tray") {
+                    Text(store.remoteHost.isPaired ? "条件に合う案件はありません。" : "Mac Host とペアリングしてください。")
+                        .font(.subheadline)
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+            }
+            ForEach(filteredLeads) { lead in
+                Button {
+                    store.selectSalesLead(lead)
+                } label: {
+                    SalesLeadCard(lead: lead, isSelected: store.selectedSalesLead?.id == lead.id)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        if let lead = store.selectedSalesLead {
+            VQPanel(lead.businessName.isEmpty ? "案件詳細" : lead.businessName, systemImage: "doc.text.magnifyingglass") {
+                VStack(alignment: .leading, spacing: 14) {
+                    SalesLeadSummaryPanel(lead: lead) {
+                        draftLead = lead
+                        isShowingLeadEditor = true
+                    }
+
+                    Picker("状態", selection: Binding(
+                        get: { lead.status },
+                        set: { store.updateSelectedSalesLeadStatus($0) }
+                    )) {
+                        ForEach(SalesLeadStatus.allCases) { status in
+                            Text(status.title).tag(status)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    SalesAuditPanel(lead: lead)
+                    SalesRedesignPanel(lead: lead)
+                    SalesProposalPanel(lead: lead)
+                    SalesAssetsPanel(assets: store.salesLeadAssets)
+                    SalesHandoffPanel(note: store.salesHermesHandoffNote, lead: lead)
+                }
+            }
+        }
+    }
+}
+
+private struct SalesLeadCard: View {
+    let lead: SalesLead
+    let isSelected: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "building.2")
+                    .frame(width: 30, height: 30)
+                    .foregroundStyle(isSelected ? VQTheme.accent : VQTheme.secondaryText)
+                    .background(VQTheme.control.opacity(0.48))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                Spacer()
+                StatusPill(title: lead.status.title, tint: lead.status.tint)
+            }
+            Text(lead.businessName.isEmpty ? "名称未設定" : lead.businessName)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+                .lineLimit(2)
+            Text([lead.area, lead.category].compactMap { $0.vqNilIfBlank }.joined(separator: " / ").vqNilIfBlank ?? "地域・業種未設定")
+                .font(.caption)
+                .foregroundStyle(VQTheme.secondaryText)
+                .lineLimit(2)
+            FlowLayout(items: badges)
+        }
+        .padding(12)
+        .background(isSelected ? VQTheme.accent.opacity(0.09) : VQTheme.elevated)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(isSelected ? VQTheme.accent.opacity(0.45) : VQTheme.hairline, lineWidth: 1)
+        }
+    }
+
+    private var badges: [String] {
+        [
+            lead.latestAudit.map { "監査 \($0.score)" },
+            lead.latestRedesignMock == nil ? nil : "改善案",
+            lead.latestProposal == nil ? nil : "提案書"
+        ].compactMap { $0 }
+    }
+}
+
+private struct SalesLeadSummaryPanel: View {
+    @Environment(\.openURL) private var openURL
+    let lead: SalesLead
+    let onEdit: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                StatusPill(title: lead.status.title, tint: lead.status.tint)
+                if let place = lead.googlePlaceID?.vqNilIfBlank {
+                    StatusPill(title: "Place ID保持", tint: VQTheme.steel)
+                        .accessibilityLabel(place)
+                }
+                Spacer()
+                Button(action: onEdit) {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+            }
+
+            VStack(spacing: 7) {
+                KeyValueLine(key: "地域", value: lead.area.vqNilIfBlank ?? "未設定")
+                KeyValueLine(key: "業種", value: lead.category.vqNilIfBlank ?? "未設定")
+                KeyValueLine(key: "電話", value: lead.phone?.vqNilIfBlank ?? "未設定")
+                KeyValueLine(key: "メール", value: lead.email?.vqNilIfBlank ?? "未設定")
+            }
+
+            HStack(spacing: 8) {
+                linkButton("公式サイト", systemImage: "safari", urlText: lead.officialWebsiteURL)
+                linkButton("地図", systemImage: "map", urlText: lead.googleMapsURL)
+                Spacer()
+            }
+
+            if let notes = lead.notes.vqNilIfBlank {
+                Text(notes)
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func linkButton(_ title: String, systemImage: String, urlText: String?) -> some View {
+        if let urlText = urlText?.vqNilIfBlank, let url = URL(string: urlText) {
+            Button {
+                openURL(url)
+            } label: {
+                Label(title, systemImage: systemImage)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+        }
+    }
+}
+
+private struct SalesAuditPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let lead: SalesLead
+
+    var body: some View {
+        VQPanel("Web監査", systemImage: "iphone.gen3.radiowaves.left.and.right") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    if let audit = lead.latestAudit {
+                        StatusPill(title: "スコア \(audit.score)", tint: scoreTint(audit.score))
+                        StatusPill(title: audit.mobileViewport, tint: VQTheme.steel)
+                    } else {
+                        StatusPill(title: "未実行", tint: VQTheme.unavailable)
+                    }
+                    Spacer()
+                    Button(action: store.auditSelectedSalesLead) {
+                        Label(lead.latestAudit == nil ? "監査" : "再監査", systemImage: "magnifyingglass")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                    .disabled(lead.officialWebsiteURL?.vqNilIfBlank == nil || store.isLoadingSalesLab)
+                }
+
+                if let audit = lead.latestAudit {
+                    Text(audit.summary)
+                        .font(.subheadline)
+                        .foregroundStyle(VQTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    ForEach(audit.findings.prefix(4)) { finding in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(finding.title)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(VQTheme.ink)
+                            Text(finding.recommendation)
+                                .font(.caption)
+                                .foregroundStyle(VQTheme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    if !audit.businessImpacts.isEmpty {
+                        FlowLayout(items: audit.businessImpacts.prefix(3).map { $0 })
+                    }
+                    CompactKeyValueLine(key: "保存先", value: audit.screenshotPath, monospaced: true)
+                } else {
+                    Text("公式URLを登録すると、スマホ幅の監査と改善観点を作成します。")
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+            }
+        }
+    }
+
+    private func scoreTint(_ score: Int) -> Color {
+        if score >= 80 { return VQTheme.green }
+        if score >= 60 { return VQTheme.amber }
+        return VQTheme.red
+    }
+}
+
+private struct SalesRedesignPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let lead: SalesLead
+
+    var body: some View {
+        VQPanel("スマホ改善案", systemImage: "paintbrush.pointed") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    StatusPill(title: lead.latestRedesignMock == nil ? "未生成" : "生成済み", tint: lead.latestRedesignMock == nil ? VQTheme.unavailable : VQTheme.accent)
+                    if lead.latestRedesignMock?.approvedAt != nil {
+                        StatusPill(title: "採用", tint: VQTheme.green)
+                    }
+                    Spacer()
+                    Button(action: store.generateSelectedSalesRedesign) {
+                        Label(lead.latestRedesignMock == nil ? "生成" : "再生成", systemImage: "wand.and.stars")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                    .disabled(store.isLoadingSalesLab)
+                }
+
+                if let mock = lead.latestRedesignMock {
+                    Text(mock.headline)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    Text(mock.subheadline)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    KeyValueLine(key: "CTA", value: mock.cta)
+                    CompactKeyValueLine(key: "HTML", value: mock.htmlPath, monospaced: true)
+                    CompactKeyValueLine(key: "画像", value: mock.screenshotPath, monospaced: true)
+                    HStack {
+                        Button {
+                            var updated = lead
+                            updated.latestRedesignMock?.approvedAt = Date()
+                            store.saveSalesLead(updated)
+                        } label: {
+                            Label("採用", systemImage: "checkmark")
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                        Spacer()
+                    }
+                } else {
+                    Text("既存サイトのコピーではなく、地域・業種・問い合わせ導線からオリジナルのスマホLP案を作ります。")
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+            }
+        }
+    }
+}
+
+private struct SalesProposalPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let lead: SalesLead
+
+    var body: some View {
+        VQPanel("提案と連絡文", systemImage: "doc.richtext") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    StatusPill(title: lead.latestProposal == nil ? "未生成" : "下書きあり", tint: lead.latestProposal == nil ? VQTheme.unavailable : VQTheme.amber)
+                    if lead.latestProposal?.approvedAt != nil {
+                        StatusPill(title: "承認済み", tint: VQTheme.green)
+                    }
+                    Spacer()
+                    Button(action: store.generateSelectedSalesProposal) {
+                        Label(lead.latestProposal == nil ? "生成" : "再生成", systemImage: "doc.badge.plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                    .disabled(store.isLoadingSalesLab)
+                }
+
+                if let proposal = lead.latestProposal {
+                    Text(proposal.summary)
+                        .font(.subheadline)
+                        .foregroundStyle(VQTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    FlowLayout(items: proposal.pricing)
+                    VStack(alignment: .leading, spacing: 8) {
+                        copyRow("メール文案", text: proposal.emailDraft)
+                        copyRow("DM文案", text: proposal.dmDraft)
+                        copyRow("電話スクリプト", text: proposal.phoneScript)
+                    }
+                    HStack(spacing: 8) {
+                        Button(action: store.approveSelectedSalesProposal) {
+                            Label("承認", systemImage: "checkmark.seal")
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                        Button {
+                            store.markSelectedSalesLeadContacted(channel: "manual", note: "提案文をコピーして人が連絡")
+                        } label: {
+                            Label("連絡済み", systemImage: "paperplane")
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                        Spacer()
+                    }
+                    CompactKeyValueLine(key: "提案書", value: proposal.htmlPath, monospaced: true)
+                    if let pdfPath = proposal.pdfPath {
+                        CompactKeyValueLine(key: "PDF", value: pdfPath, monospaced: true)
+                    }
+                } else {
+                    Text("3万円の改善案、15〜30万円のLP改善、5〜15万円の月次改善を軸に、人が確認して使う文案を作ります。")
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+            }
+        }
+    }
+
+    private func copyRow(_ title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.secondaryText)
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = text
+                    store.salesLabMessage = "\(title)をコピーしました。"
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+            }
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(VQTheme.ink)
+                .lineLimit(4)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .background(VQTheme.control.opacity(0.44))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct SalesAssetsPanel: View {
+    let assets: [RemoteSalesLeadAsset]
+
+    var body: some View {
+        VQPanel("生成物", systemImage: "shippingbox") {
+            VStack(alignment: .leading, spacing: 8) {
+                if assets.isEmpty {
+                    Text("監査・改善案・提案書を作ると保存先が表示されます。")
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                } else {
+                    ForEach(assets) { asset in
+                        CompactKeyValueLine(key: asset.kind, value: asset.path, monospaced: true)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct SalesHandoffPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let note: String
+    let lead: SalesLead
+
+    var body: some View {
+        VQPanel("次の委譲", systemImage: "arrow.triangle.branch") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Button(action: store.createSelectedSalesHermesHandoff) {
+                        Label("Hermes Desktopメモ", systemImage: "sparkles")
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                    Button(action: store.promoteSelectedSalesLeadToPortfolio) {
+                        Label("Portfolioへ昇格", systemImage: "rectangle.3.group")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                    .disabled(lead.status != .won)
+                    Spacer()
+                }
+                if let path = lead.hermesHandoffPath?.vqNilIfBlank {
+                    CompactKeyValueLine(key: "メモ", value: path, monospaced: true)
+                }
+                if !note.isEmpty {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .lineLimit(8)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
+private struct SalesLeadEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var lead: SalesLead
+    let onSave: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("基本") {
+                    TextField("店舗・会社名", text: $lead.businessName)
+                    TextField("業種", text: $lead.category)
+                    TextField("地域", text: $lead.area)
+                    Picker("状態", selection: $lead.status) {
+                        ForEach(SalesLeadStatus.allCases) { status in
+                            Text(status.title).tag(status)
+                        }
+                    }
+                }
+                Section("連絡先") {
+                    optionalField("公式URL", value: $lead.officialWebsiteURL)
+                    optionalField("Google Maps URL", value: $lead.googleMapsURL)
+                    optionalField("Place ID", value: $lead.googlePlaceID)
+                    optionalField("電話", value: $lead.phone)
+                    optionalField("メール", value: $lead.email)
+                }
+                Section("メモ") {
+                    TextField("メモ", text: $lead.notes, axis: .vertical)
+                        .lineLimit(4...8)
+                }
+            }
+            .navigationTitle("案件登録")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("キャンセル") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        onSave()
+                        dismiss()
+                    }
+                    .disabled(lead.businessName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+
+    private func optionalField(_ title: String, value: Binding<String?>) -> some View {
+        TextField(title, text: Binding(
+            get: { value.wrappedValue ?? "" },
+            set: { value.wrappedValue = $0.vqNilIfBlank }
+        ))
+    }
+}
+
+private struct SalesCSVImportSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var csvText: String
+    let onImport: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("businessName, category, area, officialWebsiteURL, googleMapsURL, googlePlaceID, phone, email, notes, status を読み取ります。")
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                TextEditor(text: $csvText)
+                    .font(.system(.body, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .background(VQTheme.control.opacity(0.42))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .padding()
+            .navigationTitle("CSV取り込み")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("キャンセル") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("取り込む") {
+                        onImport()
+                        dismiss()
+                    }
+                    .disabled(csvText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+}
+
 struct PortfolioView: View {
     @EnvironmentObject private var store: CommandCenterStore
     @State private var kindFilter: PortfolioAssetKind?
