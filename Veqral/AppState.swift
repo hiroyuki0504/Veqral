@@ -1619,7 +1619,7 @@ final class CommandCenterStore: ObservableObject {
         )
         runs.insert(run, at: 0)
         selectedRunID = run.id
-        appendLog(runID: run.id, stream: "info", message: "\(runtime.title) request accepted: \(command)")
+        appendLog(runID: run.id, stream: "info", message: String(format: L10n.tr("%@ request accepted: %@"), runtime.title, command))
         if !attachments.isEmpty {
             appendLog(runID: run.id, stream: "attachment", message: "\(attachments.count) image attachment(s) queued.")
         }
@@ -2550,11 +2550,11 @@ final class CommandCenterStore: ObservableObject {
         page: Int = 0
     ) {
         guard remoteHost.isEnabled, remoteHost.isPaired else {
-            remoteHistoryMessage = "Mac Host pairing is required to load Claude/Codex history."
+            remoteHistoryMessage = L10n.tr("Mac Host pairing is required to load Claude/Codex history.")
             return
         }
         isLoadingRemoteHistory = true
-        remoteHistoryMessage = "Loading agent history..."
+        remoteHistoryMessage = L10n.tr("Loading agent history...")
         let configuration = remoteHost
         Task { @MainActor in
             do {
@@ -2585,7 +2585,7 @@ final class CommandCenterStore: ObservableObject {
                     sessionToLoad = selectedHistorySession
                 }
                 let warningText = (response.warnings ?? []).joined(separator: "\n")
-                let loadMessage = response.sessions.isEmpty ? "No Claude/Codex history found on Mac Host." : "\(response.total) sessions loaded."
+                let loadMessage = response.sessions.isEmpty ? L10n.tr("No Claude/Codex history found on Mac Host.") : String(format: L10n.tr("%d sessions loaded."), response.total)
                 remoteHistoryMessage = warningText.isEmpty ? loadMessage : "\(loadMessage)\n\(warningText)"
                 isLoadingRemoteHistory = false
                 if let sessionToLoad {
@@ -2600,19 +2600,19 @@ final class CommandCenterStore: ObservableObject {
 
     func loadRemoteHistoryDetail(_ session: RemoteHistorySession) {
         guard remoteHost.isEnabled, remoteHost.isPaired else {
-            remoteHistoryMessage = "Mac Host pairing is required to load history detail."
+            remoteHistoryMessage = L10n.tr("Mac Host pairing is required to load history detail.")
             return
         }
         selectedHistorySession = session
         isLoadingRemoteHistory = true
-        remoteHistoryMessage = "Loading \(session.tool.title) session..."
+        remoteHistoryMessage = String(format: L10n.tr("Loading %@ session..."), session.tool.title)
         let configuration = remoteHost
         Task { @MainActor in
             do {
                 let response = try await RemoteHostClient(configuration: configuration).historyDetail(id: session.id, tool: session.tool)
                 selectedHistorySession = response.session
                 remoteHistoryTurns = response.turns
-                remoteHistoryMessage = response.truncated ? "Session loaded. Some old events were truncated." : "Session loaded."
+                remoteHistoryMessage = response.truncated ? L10n.tr("Session loaded. Some old events were truncated.") : L10n.tr("Session loaded.")
             } catch {
                 remoteHistoryMessage = Self.remoteFailureMessage(error, context: "History detail")
             }
@@ -2622,6 +2622,11 @@ final class CommandCenterStore: ObservableObject {
 
     func selectRuntime(_ runtime: CommandRuntime) {
         selectedRuntime = runtime
+    }
+
+    func ensureDirectClientRuntime() {
+        guard selectedRuntime != .codexDirect && selectedRuntime != .claudeDirect else { return }
+        selectedRuntime = .codexDirect
     }
 
     func selectHermesModel(_ choice: HermesModelChoice) {
@@ -3116,10 +3121,9 @@ final class CommandCenterStore: ObservableObject {
     func startNewDirectSession(_ tool: RemoteHistoryTool) {
         let runtime: CommandRuntime = tool == .codex ? .codexDirect : .claudeDirect
         selectedRuntime = runtime
-        submitCommand(
-            "Start a new \(tool.title) session from Veqral. Briefly confirm the current workspace and wait for my next instruction.",
-            runtime: runtime
-        )
+        selectedRunID = nil
+        commandDraft = ""
+        requestedSection = .home
     }
 
     func attachDiffInstruction(_ diff: CommandDiffEntry, hunk: String? = nil) {
@@ -3305,7 +3309,7 @@ final class CommandCenterStore: ObservableObject {
                     LocalCommandResult(
                         exitCode: 64,
                         stdoutLines: [],
-                        stderrLines: ["Direct Codex/Claude runs are launched through the paired Mac Host so session history stays in the native CLI store."],
+                        stderrLines: [L10n.tr("Direct Codex/Claude runs are launched through the paired Mac Host so session history stays in the native CLI store.")],
                         diffEntries: []
                     )
                 case .localShell:
@@ -3315,7 +3319,7 @@ final class CommandCenterStore: ObservableObject {
             applyExecutionResult(result, runID: run.id)
         }
         #else
-        appendLog(runID: run.id, stream: "warn", message: "iPhone/iPad can create runs. Execution requires the Mac app or a Mac Host connection.")
+        appendLog(runID: run.id, stream: "warn", message: L10n.tr("Execution queued on this device. Pair Mac Host to start Codex/Claude on your Mac and keep native history."))
         if let index = runs.firstIndex(where: { $0.id == run.id }) {
             runs[index].status = .waiting
             runs[index].progress = 0.25
@@ -3326,7 +3330,7 @@ final class CommandCenterStore: ObservableObject {
 
     private func executeRemote(_ run: CommandRun, attachments: [CommandAttachment]) {
         guard remoteHost.isPaired else {
-            appendLog(runID: run.id, stream: "warn", message: "Remote Host is enabled but not paired.")
+            appendLog(runID: run.id, stream: "warn", message: L10n.tr("Remote Host is enabled but not paired."))
             if let index = runs.firstIndex(where: { $0.id == run.id }) {
                 runs[index].status = .waiting
             }
@@ -4332,9 +4336,9 @@ enum LocalCommandExecutor {
 
     static func defaultRuntime() -> CommandRuntime {
         #if targetEnvironment(macCatalyst)
-        hermesExecutablePath() == nil ? .localShell : .hermesAgent
+        .localShell
         #else
-        .hermesAgent
+        .codexDirect
         #endif
     }
 
