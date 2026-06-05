@@ -20,7 +20,14 @@ This file is the resume point for the clean main baseline. The former stacked Dr
 
 ## Current Item
 
-Clean main baseline. #A0〜#A7 were union-integrated after explicit user GO via `codex/final-a-union-20260602`.
+- [x] #45 finalization: `codex/minimal-mac-terminal-shell` is the active final branch for the direct Codex/Claude client reposition. The missing #42 voice crash hardening was audited and manually folded into this branch.
+- [x] Voice hardening in #45: mic tap only opens the sheet, the sheet no longer auto-starts recording, mic/Speech permission callbacks return on the main actor, iOS 17+ uses `AVAudioApplication.requestRecordPermission`, first grant only warms up permissions, and real capture uses `AVAudioRecorder` Linear PCM `.caf` followed by `SFSpeechURLRecognitionRequest` transcription. The old live `AVAudioEngine.installTap` path is removed.
+- [x] #45 verification: MacHost `swift build`, iOS Simulator build, Mac Catalyst build, watchOS generic build, voice grant/deny/error/recording-indicator XCUITest on iPhone Simulator and iPad Simulator, and Host smokes all pass. Production grep has expected Sales Lab "mock redesign" domain-word hits only; secret grep has the expected smoke placeholder hit only.
+- [x] #45 simulator/Catalyst distribution: rebuilt the iOS Simulator app at `/tmp/veqral-ios-distribution`, installed and launched it on iPhone 17 Pro Simulator and iPad Pro 13-inch Simulator, and launched the Mac Catalyst app. All three processes are running from the latest #45 build.
+- [ ] #45 real-device distribution and acceptance: iPhone, iPad, and Watch were visible to Xcode as offline/unavailable and not present on USB, so real-device install could not be refreshed in this run. When devices are connected/unlocked/trusted, rebuild/install/launch on real iPhone/iPad. Real microphone audio still needs the one human tap-through because XCUITest cannot inject hardware microphone audio. Required manual path: mic opens sheet without crash -> Start Recording handles Speech permission without crash -> Start Recording handles microphone permission without crash -> Start Recording shows red dot/timer/level -> Stop transcribes or enters editable Ready fallback -> deny path does not crash.
+- [ ] #45 main landing: wait for explicit user GO after real-device voice/direct-client acceptance. Do not merge or push main before that.
+
+Clean main baseline before #45: #A0〜#A7 were union-integrated after explicit user GO via `codex/final-a-union-20260602`.
 
 ## Audit / Differentiation Backlog
 
@@ -54,3 +61,4 @@ Clean main baseline. #A0〜#A7 were union-integrated after explicit user GO via 
 - #9 Host telemetry is documented in `HOST_TELEMETRY_PR9.md`. Mac Host now serves authenticated telemetry, health includes an initial snapshot, and Devices polls CPU/memory/disk/thermal/uptime/power/network/process data every 5 seconds while visible. Raw temperature/fan remain best-effort and show `—` when unavailable.
 - #10 Voice input is documented in `VOICE_INPUT_PR10.md`. Composer mic opens a confirmation sheet with iOS Speech dictation, local filler/self-correction cleanup, Host LLM cleanup via existing agent CLIs, editable cleaned command, and final send through `submitDraft()`.
 - #12 Integration execution is documented in `MAIN_INTEGRATION_PLAN_PR12.md`. Future work should branch from clean `main`, not the former 20-step stack.
+- #45 branch convergence: `codex/minimal-mac-terminal-shell` supersedes the older reposition follow-up. `codex/chatgpt-mobile-ux-voice-fix` is treated as the source of the voice hardening now folded into #45; `codex/direct-clients-reposition`/#43 is replaced by #45; swarm branches #38〜#41 remain parked/closed rather than part of the direct-client baseline.
