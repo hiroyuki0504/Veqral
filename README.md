@@ -1,15 +1,16 @@
 # Veqral
 
-Veqral is a SwiftUI command center for running and supervising local agent work from iPhone, iPad, and Mac Catalyst.
+Veqral is a native iPhone/iPad client for running and supervising Codex CLI and Claude Code work on your Mac.
 
-The current build is P0: the command center can run local shell commands and Hermes Agent prompts from the Mac Catalyst app, and iPhone/iPad can pair with a Swift Mac Host over Tailscale to create Hermes runs, stream PTY logs over WebSocket, approve/reject guarded work, cancel/resume sessions, and keep device tokens in Keychain.
+The current build uses iPhone/iPad as the primary command surface. Mac Catalyst is intentionally minimal: it is a terminal-oriented Host shell for status, pairing, quick terminal commands, and utility sheets. The Swift Mac Host runs on the Mac, iPhone/iPad pair over Tailscale, create runs, stream PTY logs over WebSocket, approve/reject guarded work, cancel/resume sessions, and keep device tokens in Keychain.
 
-The default UI is the dark Agent Command Center concept.
+The default iPhone/iPad UI is the dark Agent Command Center concept. The Mac UI stays small because Mac operation is expected to happen from Terminal and the Mac Host.
 
 ## What Works
 
-- Enter a Command to create a new Run.
-- Switch the runtime between `Hermes Agent` and `Local Shell`.
+- Use iPhone/iPad to enter a Command and create a new Run.
+- Use iPhone/iPad to switch between direct agent runtimes.
+- Use the Mac Catalyst shell only for Host status, pairing, terminal command snippets, and utility sheets.
 - Hermes prompts run through `hermes chat -Q --source veqral --checkpoints --worktree` on Mac.
 - The Swift Mac Host lives in `MacHost/` and runs as a menu bar app.
 - Mac Host exposes `GET /v1/health`, `GET /v1/pairing`, `POST /v1/pair`, `GET/POST /v1/runs`, `GET /v1/runs/:id/events`, run snapshots/logs/diff/artifacts, and approve/reject/cancel/resume actions.
@@ -23,7 +24,7 @@ The default UI is the dark Agent Command Center concept.
 - Host runs, logs, audit entries, and Hermes `session_id` values persist under `~/.veqral-host`.
 - Mac Host exposes HMAC-protected Hermes memory APIs for `~/.hermes/memories/USER.md`, `~/.hermes/memories/MEMORY.md`, and Markdown files under `~/.hermes/skills`.
 - The Memory screen can list remote Hermes memory files, load content, preview a unified diff before saving, and write the selected file back through Mac Host.
-- Read-only commands run locally in the Mac Catalyst app through `/bin/zsh -lc`.
+- Read-only local command support is retained for existing utility views, but Mac operation is expected through Terminal and Mac Host.
 - Mutating or risky commands such as file changes, package installs, `rm`, `sudo`, production deploys, secrets, and screen-control commands stop in the approval queue.
 - Risky Hermes prompts such as deletion, production, secrets, billing, browser, and screen-control requests also stop in the approval queue before launching Hermes.
 - Approve or reject pending actions from the inspector, phone dashboard, or Approvals screen.

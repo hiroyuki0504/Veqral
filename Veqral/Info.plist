@@ -39,7 +39,7 @@
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Veqral connects to your paired Mac Host over Tailscale to start and supervise Hermes runs.</string>
+	<string>Veqral connects to your paired Mac Host over Tailscale to start and supervise Codex and Claude runs.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Veqral lets you attach camera captures to agent run instructions.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

@@ -395,6 +395,479 @@ struct CommandCenterPhoneDashboard: View {
     }
 }
 
+struct CommandCenterMobileChatView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let openDrawer: () -> Void
+    let openSection: (AppSection) -> Void
+
+    private var visibleRuns: [CommandRun] {
+        Array(store.visibleRuns().filter { run in
+            let runtime = run.runtimeOrDefault
+            return runtime == .codexDirect || runtime == .claudeDirect
+        }.prefix(12))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            mobileTopBar
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    HostConnectionStrip()
+                    DirectAgentAppsPanel(openSection: openSection)
+
+                    if visibleRuns.isEmpty {
+                        DirectEmptyRunsPanel(openSection: openSection)
+                    } else {
+                        PhoneSectionHeader(title: L10n.tr("Direct Runs"), count: visibleRuns.count, showAction: false)
+                        ForEach(visibleRuns) { run in
+                            PhoneRunRow(run: run)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    store.selectRun(run.id)
+                                }
+                                .commandPanel()
+                        }
+                    }
+
+                    if let run = store.selectedRun, run.runtimeOrDefault == .codexDirect || run.runtimeOrDefault == .claudeDirect {
+                        MobileRunDetail(run: run, openSection: openSection)
+                    }
+
+                    MobileQuickAccess(openSection: openSection)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 18)
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            PhoneComposer(showsRuntimePicker: false, prominentVoice: false)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+                .background(.ultraThinMaterial)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(VQTheme.hairline)
+                        .frame(height: 1)
+                }
+        }
+        .background(VQTheme.canvas.ignoresSafeArea())
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
+        .onAppear {
+            store.ensureDirectClientRuntime()
+            if store.remoteHistorySessions.isEmpty {
+                store.refreshRemoteHistory()
+            }
+        }
+    }
+
+    private var mobileTopBar: some View {
+        HStack(spacing: 10) {
+            Button(action: openDrawer) {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(.plain)
+            .background(VQTheme.control.opacity(0.72))
+            .clipShape(Circle())
+            .accessibilityLabel(L10n.tr("Open navigation"))
+            .accessibilityIdentifier("gate2.mobile.menu")
+
+            DirectRuntimeSwitcher()
+                .accessibilityLabel(L10n.tr("Select agent"))
+
+            Spacer()
+
+            Button {
+                store.commandDraft = ""
+                store.selectedRunID = nil
+                store.ensureDirectClientRuntime()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(.plain)
+            .background(VQTheme.control.opacity(0.72))
+            .clipShape(Circle())
+            .accessibilityLabel(L10n.tr("New command"))
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .background(VQTheme.canvas.opacity(0.94))
+    }
+}
+
+private enum DirectAgentApp: CaseIterable, Identifiable {
+    case codex
+    case claude
+
+    var id: String { runtime.rawValue }
+
+    var runtime: CommandRuntime {
+        switch self {
+        case .codex:
+            .codexDirect
+        case .claude:
+            .claudeDirect
+        }
+    }
+
+    var tool: RemoteHistoryTool {
+        switch self {
+        case .codex:
+            .codex
+        case .claude:
+            .claude
+        }
+    }
+
+    var title: String { runtime.shortTitle }
+    var symbol: String { runtime.symbol }
+
+    var tint: Color {
+        switch self {
+        case .codex:
+            VQTheme.green
+        case .claude:
+            VQTheme.violet
+        }
+    }
+}
+
+private struct DirectRuntimeSwitcher: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach([CommandRuntime.codexDirect, .claudeDirect]) { runtime in
+                Button {
+                    store.selectRuntime(runtime)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: runtime.symbol)
+                        Text(runtime.shortTitle)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(store.selectedRuntime == runtime ? .black : VQTheme.ink)
+                    .frame(minWidth: 82, minHeight: 34)
+                    .background(store.selectedRuntime == runtime ? VQTheme.accent : VQTheme.control.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(VQTheme.control.opacity(0.38))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onAppear {
+            store.ensureDirectClientRuntime()
+        }
+    }
+}
+
+private struct DirectAgentAppsPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(L10n.tr("Codex / Claude"))
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    Text(L10n.tr("Native Mac sessions"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+                Spacer()
+                Button {
+                    store.refreshRemoteHistory()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .background(VQTheme.control.opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .accessibilityLabel(L10n.tr("Refresh"))
+            }
+
+            ForEach(DirectAgentApp.allCases) { agent in
+                DirectAgentAppCard(agent: agent, openSection: openSection)
+            }
+
+            if !store.remoteHistoryMessage.isEmpty {
+                Text(store.remoteHistoryMessage)
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+private struct DirectAgentAppCard: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let agent: DirectAgentApp
+    let openSection: (AppSection) -> Void
+
+    private var sessions: [RemoteHistorySession] {
+        Array(store.remoteHistorySessions.filter { $0.tool == agent.tool }.prefix(3))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: agent.symbol)
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 38, height: 38)
+                    .foregroundStyle(agent.tint)
+                    .background(agent.tint.opacity(0.14))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(agent.title)
+                        .font(.headline)
+                        .foregroundStyle(VQTheme.ink)
+                    Text(agent.runtime.contextModeDescription)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+
+                Spacer()
+
+                Button {
+                    store.startNewDirectSession(agent.tool)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .bold))
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(VQTheme.ink)
+                .background(VQTheme.control.opacity(0.72))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .accessibilityLabel(String(format: L10n.tr("New %@ command"), agent.title))
+            }
+
+            if sessions.isEmpty {
+                PhoneEmptyState(symbol: "clock", text: store.remoteHost.isPaired ? L10n.tr("No native sessions yet.") : L10n.tr("Pair with Mac Host to read native history."))
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(sessions) { session in
+                        Button {
+                            store.loadRemoteHistoryDetail(session)
+                            openSection(.history)
+                        } label: {
+                            DirectSessionMiniRow(session: session, displayTitle: store.historyTitle(for: session))
+                        }
+                        .buttonStyle(.plain)
+
+                        if session.id != sessions.last?.id {
+                            EmptyDivider()
+                        }
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(VQTheme.elevated.opacity(0.82))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VQTheme.hairline, lineWidth: 1)
+        }
+    }
+}
+
+private struct DirectSessionMiniRow: View {
+    let session: RemoteHistorySession
+    let displayTitle: String
+
+    var body: some View {
+        HStack(spacing: 9) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(displayTitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(session.project)
+                    Text("\(session.messageCount) \(L10n.tr("turns"))")
+                    if let startedAt = session.startedAt {
+                        Text(Self.dateFormatter.string(from: startedAt))
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(VQTheme.secondaryText)
+                .lineLimit(1)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(VQTheme.secondaryText)
+        }
+        .frame(minHeight: 42)
+        .contentShape(Rectangle())
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
+private struct DirectEmptyRunsPanel: View {
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            PhoneSectionHeader(title: L10n.tr("Direct Runs"), count: nil, showAction: false)
+            PhoneEmptyState(symbol: "arrow.up.message", text: L10n.tr("Use the bottom composer to start a Codex or Claude run."))
+            Button {
+                openSection(.history)
+            } label: {
+                Label(L10n.tr("Open History"), systemImage: "clock.arrow.circlepath")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 8))
+        }
+        .padding(12)
+        .background(VQTheme.control.opacity(0.34))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct MobileRunDetail: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let run: CommandRun
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(run.title)
+                        .font(.headline)
+                        .foregroundStyle(VQTheme.ink)
+                        .lineLimit(2)
+                    HStack(spacing: 7) {
+                        StatusPill(title: run.status.title, tint: run.status.tint)
+                        Text(run.runtimeOrDefault.shortTitle)
+                        Text(run.elapsedLabel)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                }
+                Spacer()
+                Button {
+                    openSection(.runs)
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .background(VQTheme.control.opacity(0.72))
+                .clipShape(Circle())
+                .accessibilityLabel(L10n.tr("Open run details"))
+            }
+
+            if let usage = run.usage, usage.hasDisplayValues {
+                RunUsageSummary(usage: usage)
+            }
+
+            if let approval = store.pendingApproval(for: run.id) {
+                RunApprovalCallout(approval: approval, compact: true)
+            }
+
+            let recentLogs = Array(store.logEntries(for: run.id).suffix(5))
+            if recentLogs.isEmpty {
+                PhoneEmptyState(symbol: "text.alignleft", text: L10n.tr("Run logs appear here."))
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(recentLogs) { entry in
+                        Text(entry.message)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(entry.stream == "error" ? VQTheme.red : VQTheme.secondaryText)
+                            .lineLimit(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(10)
+                .background(VQTheme.control.opacity(0.34))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+        .padding(14)
+        .commandPanel()
+    }
+}
+
+private struct MobileQuickAccess: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(L10n.tr("Quick access"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.secondaryText)
+                Spacer()
+                if store.remoteHost.isPaired {
+                    StatusPill(title: L10n.tr("Connected"), tint: VQTheme.green)
+                }
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    MobileQuickButton(section: .history, title: L10n.tr("History"), openSection: openSection)
+                    MobileQuickButton(section: .approvals, title: L10n.tr("Approvals"), openSection: openSection)
+                    MobileQuickButton(section: .devices, title: L10n.tr("Devices"), openSection: openSection)
+                    MobileQuickButton(section: .salesLab, title: "営業ラボ", openSection: openSection)
+                    MobileQuickButton(section: .diff, title: L10n.tr("Diff"), openSection: openSection)
+                    MobileQuickButton(section: .artifacts, title: L10n.tr("Artifacts"), openSection: openSection)
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(.bottom, 4)
+    }
+}
+
+private struct MobileQuickButton: View {
+    let section: AppSection
+    let title: String
+    let openSection: (AppSection) -> Void
+
+    var body: some View {
+        Button {
+            openSection(section)
+        } label: {
+            Label(title, systemImage: section.symbol)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .background(VQTheme.control.opacity(0.62))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private enum WorkSurface: String, CaseIterable, Identifiable {
     case terminal = "Terminal"
     case diff = "Diff"
@@ -629,27 +1102,6 @@ private struct RunHeader: View {
             .font(.caption)
             .foregroundStyle(VQTheme.secondaryText)
 
-            if run.runtimeOrDefault != .hermesAgent {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .center, spacing: 10) {
-                        handoffIntro
-                        Spacer()
-                        handoffButton
-                    }
-                    VStack(alignment: .leading, spacing: 8) {
-                        handoffIntro
-                        handoffButton
-                    }
-                }
-                .padding(10)
-                .background(VQTheme.control.opacity(0.38))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(VQTheme.hairline, lineWidth: 1)
-                }
-            }
-
             if let usage = run.usage, usage.hasDisplayValues {
                 RunUsageSummary(usage: usage)
             }
@@ -663,27 +1115,6 @@ private struct RunHeader: View {
                 RunApprovalCallout(approval: approval)
             }
         }
-    }
-
-    private var handoffIntro: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Label("Project 記憶へ引き継ぐ", systemImage: "arrow.triangle.branch")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(VQTheme.ink)
-            Text("直接モードの履歴は分離されています。Hermes に整理すると別 Chat/別モデルで続けられます。")
-                .font(.caption)
-                .foregroundStyle(VQTheme.secondaryText)
-                .lineLimit(2)
-        }
-    }
-
-    private var handoffButton: some View {
-        Button {
-            store.handoffRunContextToHermes(run)
-        } label: {
-            Label("Hermesへ送る", systemImage: "paperplane")
-        }
-        .buttonStyle(CommandButtonStyle())
     }
 }
 
@@ -1610,17 +2041,6 @@ private struct PhoneRunRow: View {
                     .foregroundStyle(VQTheme.secondaryText)
             }
 
-            if run.runtimeOrDefault != .hermesAgent {
-                Button {
-                    store.handoffRunContextToHermes(run)
-                } label: {
-                    Label("Hermesへ引き継ぐ", systemImage: "arrow.triangle.branch")
-                }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.roundedRectangle(radius: 8))
-                .controlSize(.small)
-            }
-
             if let approval = store.pendingApproval(for: run.id) {
                 RunApprovalCallout(approval: approval, compact: true)
             }
@@ -1636,16 +2056,21 @@ private struct PhoneRunRow: View {
 
 private struct PhoneComposer: View {
     @EnvironmentObject private var store: CommandCenterStore
+    var showsRuntimePicker = true
+    var prominentVoice = false
     @State private var isVoiceInputPresented = false
 
     var body: some View {
         VStack(spacing: 8) {
-            RuntimeSegmentedControl()
+            if showsRuntimePicker {
+                RuntimeSegmentedControl()
+            }
 
             HStack(spacing: 8) {
-                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft)
-                    .font(.caption)
+                TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft, axis: .vertical)
+                    .font(prominentVoice ? .subheadline : .caption)
                     .textFieldStyle(.plain)
+                    .lineLimit(1...4)
                     .onSubmit {
                         store.submitDraft()
                     }
@@ -1668,21 +2093,21 @@ private struct PhoneComposer: View {
                     isVoiceInputPresented = true
                 } label: {
                     Image(systemName: "mic")
-                        .font(.caption.weight(.bold))
-                        .frame(width: 28, height: 28)
-                        .foregroundStyle(VQTheme.ink)
-                        .background(VQTheme.control)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .font(.system(size: prominentVoice ? 17 : 12, weight: .bold))
+                        .frame(width: prominentVoice ? 38 : 28, height: prominentVoice ? 38 : 28)
+                        .foregroundStyle(prominentVoice ? .black : VQTheme.ink)
+                        .background(prominentVoice ? VQTheme.accent : VQTheme.control)
+                        .clipShape(RoundedRectangle(cornerRadius: prominentVoice ? 12 : 7, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("gate2.voice.open")
                 Button(action: store.submitDraft) {
                     Image(systemName: "arrow.up")
-                        .font(.caption.weight(.bold))
-                        .frame(width: 28, height: 28)
+                        .font(.system(size: prominentVoice ? 17 : 12, weight: .bold))
+                        .frame(width: prominentVoice ? 38 : 28, height: prominentVoice ? 38 : 28)
                         .foregroundStyle(.white)
-                        .background(VQTheme.secondaryText)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .background(store.commandDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? VQTheme.secondaryText : VQTheme.accent)
+                        .clipShape(RoundedRectangle(cornerRadius: prominentVoice ? 12 : 7, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("gate2.command.submit")
@@ -1692,18 +2117,22 @@ private struct PhoneComposer: View {
             .background(VQTheme.control.opacity(0.7))
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            HStack {
-                CommandChip(title: L10n.tr("Implementation"), symbol: "chevron.left.forwardslash.chevron.right", command: "Implement the current approved requirements.")
-                CommandChip(title: L10n.tr("Testing"), symbol: "flask", command: "Run the relevant tests and fix failures if they are in scope.")
-                CommandChip(title: "", symbol: "ellipsis", command: "Show available next actions for this project.")
-                Spacer()
+            if showsRuntimePicker {
+                HStack {
+                    CommandChip(title: L10n.tr("Implementation"), symbol: "chevron.left.forwardslash.chevron.right", command: "Implement the current approved requirements.")
+                    CommandChip(title: L10n.tr("Testing"), symbol: "flask", command: "Run the relevant tests and fix failures if they are in scope.")
+                    CommandChip(title: "", symbol: "ellipsis", command: "Show available next actions for this project.")
+                    Spacer()
+                }
             }
 
             SavedCommandDraftBar(compact: true)
             CommandAttachmentControls()
-            CommandRequirementMemo()
+            if showsRuntimePicker {
+                CommandRequirementMemo()
+            }
         }
-        .padding(8)
+        .padding(prominentVoice ? 10 : 8)
         .commandPanel()
         .sheet(isPresented: $isVoiceInputPresented) {
             VoiceCommandSheet()
@@ -1767,6 +2196,13 @@ private struct VoiceCommandSheet: View {
                     Spacer()
                 }
 
+                if session.phase == .listening {
+                    VoiceRecordingActivityView(
+                        elapsedSeconds: session.elapsedSeconds,
+                        audioLevel: session.audioLevel
+                    )
+                }
+
                 VStack(alignment: .leading, spacing: 8) {
                     Label(L10n.tr("Raw Dictation"), systemImage: "waveform")
                         .font(.caption.weight(.semibold))
@@ -1824,9 +2260,6 @@ private struct VoiceCommandSheet: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .contentShape(Rectangle())
-                        .simultaneousGesture(TapGesture().onEnded {
-                            stopAndClean()
-                        })
                         .accessibilityIdentifier("gate2.voice.stop")
                     } else {
                         Button {
@@ -1866,11 +2299,6 @@ private struct VoiceCommandSheet: View {
                     }
                 }
             }
-            .onAppear {
-                if session.phase == .idle {
-                    session.startListening()
-                }
-            }
             .onDisappear {
                 session.cancel()
             }
@@ -1879,9 +2307,11 @@ private struct VoiceCommandSheet: View {
 
     private func stopAndClean() {
         guard session.phase == .listening else { return }
-        session.stopListening()
         Task {
-            await cleanupWithAgent()
+            let capturedText = await session.stopListening()
+            if capturedText {
+                await cleanupWithAgent()
+            }
         }
     }
 
@@ -1925,6 +2355,63 @@ private struct VoiceCommandSheet: View {
         store.commandDraft = ""
         store.submitCommand(cleaned)
         dismiss()
+    }
+}
+
+private struct VoiceRecordingActivityView: View {
+    let elapsedSeconds: TimeInterval
+    let audioLevel: Double
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(VQTheme.red)
+                .frame(width: 9, height: 9)
+                .accessibilityHidden(true)
+
+            Text(L10n.tr("Recording"))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+
+            Text(Self.durationText(elapsedSeconds))
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(VQTheme.secondaryText)
+                .frame(minWidth: 44, alignment: .leading)
+
+            Spacer(minLength: 8)
+
+            HStack(alignment: .center, spacing: 3) {
+                ForEach(0..<12, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(barIsActive(index) ? VQTheme.accent : VQTheme.hairline)
+                        .frame(width: 4, height: CGFloat(8 + (index % 4) * 4))
+                }
+            }
+            .frame(width: 82, height: 24)
+            .accessibilityLabel(L10n.tr("Recording level"))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(VQTheme.control.opacity(0.46))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(VQTheme.hairline.opacity(0.75), lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(L10n.tr("Recording"))
+        .accessibilityValue(Self.durationText(elapsedSeconds))
+        .accessibilityIdentifier("gate2.voice.recordingIndicator")
+    }
+
+    private func barIsActive(_ index: Int) -> Bool {
+        let activeCount = max(1, Int((audioLevel * 12).rounded(.up)))
+        return index < activeCount
+    }
+
+    private static func durationText(_ seconds: TimeInterval) -> String {
+        let clamped = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%02d:%02d", clamped / 60, clamped % 60)
     }
 }
 
@@ -1988,25 +2475,41 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     @Published var ruleBasedText: String = ""
     @Published var cleanedText: String = ""
     @Published var cleanupNote: String = ""
-    @Published var statusMessage: String = L10n.tr("Tap stop when you finish speaking.")
+    @Published var statusMessage: String = L10n.tr("Tap Start Recording to begin.")
+    @Published var elapsedSeconds: TimeInterval = 0
+    @Published var audioLevel: Double = 0
 
     var canSend: Bool {
         phase == .ready && !cleanedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "ja-JP"))
-    private let audioEngine = AVAudioEngine()
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var speechRecognizer: SFSpeechRecognizer?
+    private var audioRecorder: AVAudioRecorder?
+    private var recordingURL: URL?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var hasActiveAudioSession = false
+    private var interruptionObserver: NSObjectProtocol?
+    private var meterTimer: Timer?
+    private var recordingStartedAt: Date?
     #endif
 
     func startListening() {
+        guard phase != .listening && phase != .cleaning else { return }
         rawText = ""
         ruleBasedText = ""
         cleanedText = ""
         cleanupNote = ""
+        elapsedSeconds = 0
+        audioLevel = 0
         statusMessage = L10n.tr("Requesting microphone and speech recognition permission.")
+
+        let forcedError = ProcessInfo.processInfo.environment["VEQRAL_UI_TEST_VOICE_FORCE_ERROR"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let forcedError, !forcedError.isEmpty {
+            fail(Self.forcedVoiceErrorMessage(forcedError))
+            return
+        }
 
         let injectedTranscript = ProcessInfo.processInfo.environment["VEQRAL_UI_TEST_VOICE_TRANSCRIPT"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2018,29 +2521,44 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         }
 
         #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-        guard speechRecognizer?.isAvailable == true else {
-            fail(L10n.tr("Speech recognition is unavailable."))
-            return
-        }
-        SFSpeechRecognizer.requestAuthorization { [weak self] status in
-            Task { @MainActor in
-                guard let self else { return }
-                switch status {
-                case .authorized:
+        let speechPermissionWasUndetermined = SFSpeechRecognizer.authorizationStatus() == .notDetermined
+        requestSpeechAuthorization { [weak self] status in
+            guard let self else { return }
+            switch status {
+            case .authorized:
+                if speechPermissionWasUndetermined {
+                    self.finishPermissionWarmup()
+                    return
+                }
+                guard let speechRecognizer = self.currentSpeechRecognizer(), speechRecognizer.isAvailable else {
+                    self.fail(L10n.tr("Speech recognition is unavailable."))
+                    return
+                }
+                let microphonePermissionWasUndetermined = self.isMicrophonePermissionUndetermined
+                self.requestMicrophonePermission { [weak self] granted in
+                    guard let self else { return }
+                    guard granted else {
+                        self.fail(L10n.tr("Microphone permission was denied."))
+                        return
+                    }
+                    if speechPermissionWasUndetermined || microphonePermissionWasUndetermined {
+                        self.finishPermissionWarmup()
+                        return
+                    }
                     do {
-                        try self.startAudioRecognition()
+                        try self.startAudioRecording()
                     } catch {
                         self.fail(error.localizedDescription)
                     }
-                case .denied:
-                    self.fail(L10n.tr("Speech recognition permission was denied."))
-                case .restricted:
-                    self.fail(L10n.tr("Speech recognition is restricted on this device."))
-                case .notDetermined:
-                    self.fail(L10n.tr("Speech recognition permission is not decided."))
-                @unknown default:
-                    self.fail(L10n.tr("Speech recognition is unavailable."))
                 }
+            case .denied:
+                self.fail(L10n.tr("Speech recognition permission was denied."))
+            case .restricted:
+                self.fail(L10n.tr("Speech recognition is restricted on this device."))
+            case .notDetermined:
+                self.fail(L10n.tr("Speech recognition permission is not decided."))
+            @unknown default:
+                self.fail(L10n.tr("Speech recognition is unavailable."))
             }
         }
         #else
@@ -2048,20 +2566,46 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
         #endif
     }
 
-    func stopListening() {
+    func stopListening() async -> Bool {
+        guard phase == .listening else { return false }
         #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
-        recognitionRequest?.endAudio()
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        let duration = elapsedSeconds
+        let recordedURL = stopAudioCapture(cancelTask: false)
+        guard duration >= 0.8 else {
+            if let recordedURL {
+                try? FileManager.default.removeItem(at: recordedURL)
+            }
+            finishWithManualEntry(message: L10n.tr("Recording was too short. Speak for at least one second."))
+            return false
+        }
+        if rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let recordedURL {
+            phase = .cleaning
+            statusMessage = String(
+                format: L10n.tr("Recorded %@. Transcribing now."),
+                Self.durationText(duration)
+            )
+            do {
+                rawText = try await transcribeRecordedAudio(url: recordedURL)
+            } catch {
+                finishWithManualEntry(
+                    message: L10n.tr("Could not transcribe the recording. Please try again or type the command below."),
+                    note: error.localizedDescription
+                )
+                try? FileManager.default.removeItem(at: recordedURL)
+                return false
+            }
+            try? FileManager.default.removeItem(at: recordedURL)
+        }
         #endif
         ruleBasedText = VoiceCommandRuleCleaner.clean(rawText)
         cleanedText = ruleBasedText
         if ruleBasedText.isEmpty {
-            fail(L10n.tr("Dictation was too short."))
+            finishWithManualEntry(message: L10n.tr("No speech was detected. Please try again or type the command below."))
+            return false
         } else {
             phase = .ready
             statusMessage = L10n.tr("Review the command before sending.")
+            return true
         }
     }
 
@@ -2079,15 +2623,7 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
 
     func cancel() {
         #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-        if audioEngine.isRunning {
-            audioEngine.stop()
-            audioEngine.inputNode.removeTap(onBus: 0)
-        }
-        recognitionRequest?.endAudio()
-        recognitionTask?.cancel()
-        recognitionTask = nil
-        recognitionRequest = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        stopAudioCapture(cancelTask: true)
         #endif
     }
 
@@ -2098,41 +2634,353 @@ private final class VoiceCommandSession: NSObject, ObservableObject {
     }
 
     #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
-    private func startAudioRecognition() throws {
-        cancel()
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
-        try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+    private func requestSpeechAuthorization(_ completion: @escaping @MainActor (SFSpeechRecognizerAuthorizationStatus) -> Void) {
+        let deliver: @Sendable (SFSpeechRecognizerAuthorizationStatus) -> Void = { status in
+            Task { @MainActor in
+                completion(status)
+            }
+        }
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized, .denied, .restricted:
+            deliver(SFSpeechRecognizer.authorizationStatus())
+        case .notDetermined:
+            SFSpeechRecognizer.requestAuthorization { status in
+                deliver(status)
+            }
+        @unknown default:
+            deliver(.denied)
+        }
+    }
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        recognitionRequest = request
-
-        let inputNode = audioEngine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            request.append(buffer)
+    private func requestMicrophonePermission(_ completion: @escaping @MainActor (Bool) -> Void) {
+        let deliver: @Sendable (Bool) -> Void = { granted in
+            Task { @MainActor in
+                completion(granted)
+            }
         }
 
-        audioEngine.prepare()
-        try audioEngine.start()
-        phase = .listening
-        statusMessage = L10n.tr("Listening. Speak your command in Japanese.")
-
-        recognitionTask = speechRecognizer?.recognitionTask(with: request) { [weak self] result, error in
-            Task { @MainActor in
-                guard let self else { return }
-                if let result {
-                    self.rawText = result.bestTranscription.formattedString
+        if #available(iOS 17.0, *) {
+            switch AVAudioApplication.shared.recordPermission {
+            case .granted:
+                deliver(true)
+            case .denied:
+                deliver(false)
+            case .undetermined:
+                AVAudioApplication.requestRecordPermission { granted in
+                    deliver(granted)
                 }
-                if let error {
-                    self.fail(error.localizedDescription)
+            @unknown default:
+                deliver(false)
+            }
+        } else {
+            switch AVAudioSession.sharedInstance().recordPermission {
+            case .granted:
+                deliver(true)
+            case .denied:
+                deliver(false)
+            case .undetermined:
+                AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                    deliver(granted)
+                }
+            @unknown default:
+                deliver(false)
+            }
+        }
+    }
+
+    private func finishPermissionWarmup() {
+        stopAudioCapture(cancelTask: true)
+        phase = .idle
+        elapsedSeconds = 0
+        audioLevel = 0
+        statusMessage = L10n.tr("Voice permissions are ready. Tap Start Recording again.")
+    }
+
+    private func startAudioRecording() throws {
+        stopAudioCapture(cancelTask: true)
+        let speechRecognizer = currentSpeechRecognizer()
+        guard let speechRecognizer, speechRecognizer.isAvailable else {
+            throw VoiceCommandCaptureError.speechUnavailable
+        }
+
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(.playAndRecord, mode: .spokenAudio, options: [.duckOthers, .defaultToSpeaker, .allowBluetoothHFP])
+        try audioSession.setActive(true)
+        hasActiveAudioSession = true
+        guard audioSession.isInputAvailable else {
+            throw VoiceCommandCaptureError.inputUnavailable
+        }
+        installInterruptionObserver()
+
+        let url = Self.makeRecordingURL()
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: max(16_000.0, audioSession.sampleRate),
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false
+        ]
+        let recorder = try AVAudioRecorder(url: url, settings: settings)
+        recorder.isMeteringEnabled = true
+        guard recorder.prepareToRecord(), recorder.record() else {
+            throw VoiceCommandCaptureError.recordingUnavailable
+        }
+
+        audioRecorder = recorder
+        recordingURL = url
+        recordingStartedAt = Date()
+        elapsedSeconds = 0
+        audioLevel = 0.08
+        startMeteringTimer()
+        phase = .listening
+        statusMessage = L10n.tr("Recording. Speak now, then tap Stop.")
+    }
+
+    @discardableResult
+    private func stopAudioCapture(cancelTask: Bool) -> URL? {
+        let recordedURL = recordingURL
+        meterTimer?.invalidate()
+        meterTimer = nil
+        if let audioRecorder, audioRecorder.isRecording {
+            audioRecorder.stop()
+        }
+        audioRecorder = nil
+        recordingURL = nil
+        recordingStartedAt = nil
+        audioLevel = 0
+        if cancelTask, let recordedURL {
+            try? FileManager.default.removeItem(at: recordedURL)
+        }
+        if cancelTask, recognitionTask != nil {
+            recognitionTask?.cancel()
+            recognitionTask = nil
+        }
+        if hasActiveAudioSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            hasActiveAudioSession = false
+        }
+        if let interruptionObserver {
+            NotificationCenter.default.removeObserver(interruptionObserver)
+            self.interruptionObserver = nil
+        }
+        return cancelTask ? nil : recordedURL
+    }
+
+    private func startMeteringTimer() {
+        meterTimer?.invalidate()
+        meterTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshRecordingMeter()
+            }
+        }
+    }
+
+    private func refreshRecordingMeter() {
+        guard let audioRecorder, phase == .listening else { return }
+        audioRecorder.updateMeters()
+        elapsedSeconds = max(
+            audioRecorder.currentTime,
+            recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        )
+        let power = audioRecorder.averagePower(forChannel: 0)
+        guard power.isFinite else {
+            audioLevel = 0.08
+            return
+        }
+        audioLevel = min(1, max(0.08, (Double(power) + 54) / 54))
+    }
+
+    private func installInterruptionObserver() {
+        if let interruptionObserver {
+            NotificationCenter.default.removeObserver(interruptionObserver)
+        }
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            Task { @MainActor in
+                guard let self, self.phase == .listening else { return }
+                let type = rawType.flatMap(AVAudioSession.InterruptionType.init(rawValue:))
+                if type == .began {
+                    self.fail(L10n.tr("Recording was interrupted."))
                 }
             }
         }
     }
+
+    private func currentSpeechRecognizer() -> SFSpeechRecognizer? {
+        if let speechRecognizer {
+            return speechRecognizer
+        }
+        let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "ja-JP"))
+        speechRecognizer = recognizer
+        return recognizer
+    }
+
+    private func transcribeRecordedAudio(url: URL) async throws -> String {
+        guard let speechRecognizer = currentSpeechRecognizer(), speechRecognizer.isAvailable else {
+            throw VoiceCommandCaptureError.speechUnavailable
+        }
+        do {
+            return try await recognizeRecordedAudio(url: url, using: speechRecognizer, requiresOnDeviceRecognition: false)
+        } catch {
+            if #available(iOS 13.0, *), speechRecognizer.supportsOnDeviceRecognition {
+                statusMessage = L10n.tr("Retrying transcription on device.")
+                return try await recognizeRecordedAudio(url: url, using: speechRecognizer, requiresOnDeviceRecognition: true)
+            }
+            throw error
+        }
+    }
+
+    private func recognizeRecordedAudio(
+        url: URL,
+        using speechRecognizer: SFSpeechRecognizer,
+        requiresOnDeviceRecognition: Bool
+    ) async throws -> String {
+        return try await withCheckedThrowingContinuation { continuation in
+            let request = SFSpeechURLRecognitionRequest(url: url)
+            request.shouldReportPartialResults = true
+            request.taskHint = .dictation
+            if #available(iOS 13.0, *) {
+                request.requiresOnDeviceRecognition = requiresOnDeviceRecognition
+            }
+            let lock = NSLock()
+            var didResume = false
+            var bestText = ""
+
+            func updateBestText(_ text: String) {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                lock.lock()
+                bestText = trimmed
+                lock.unlock()
+                Task { @MainActor in
+                    self.rawText = trimmed
+                    self.statusMessage = L10n.tr("Transcribing recorded audio.")
+                }
+            }
+
+            func currentBestText() -> String {
+                lock.lock()
+                defer { lock.unlock() }
+                return bestText
+            }
+
+            func resumeOnce(_ result: Result<String, Error>) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !didResume else { return }
+                didResume = true
+                Task { @MainActor in
+                    self.recognitionTask = nil
+                    switch result {
+                    case .success(let text):
+                        continuation.resume(returning: text)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+
+            recognitionTask = speechRecognizer.recognitionTask(with: request) { result, error in
+                if let result {
+                    let text = result.bestTranscription.formattedString
+                    updateBestText(text)
+                    if result.isFinal {
+                        resumeOnce(.success(text))
+                        return
+                    }
+                }
+                if let error {
+                    let fallbackText = currentBestText()
+                    if fallbackText.isEmpty {
+                        resumeOnce(.failure(error))
+                    } else {
+                        resumeOnce(.success(fallbackText))
+                    }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in
+                let fallbackText = currentBestText()
+                if fallbackText.isEmpty {
+                    self?.recognitionTask?.cancel()
+                    resumeOnce(.failure(VoiceCommandCaptureError.transcriptionTimedOut))
+                } else {
+                    resumeOnce(.success(fallbackText))
+                }
+            }
+        }
+    }
+
+    private static func makeRecordingURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("veqral-voice-\(UUID().uuidString)")
+            .appendingPathExtension("caf")
+    }
+
+    private static func durationText(_ seconds: TimeInterval) -> String {
+        let clamped = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%02d:%02d", clamped / 60, clamped % 60)
+    }
+
+    private var isMicrophonePermissionUndetermined: Bool {
+        if #available(iOS 17.0, *) {
+            AVAudioApplication.shared.recordPermission == .undetermined
+        } else {
+            AVAudioSession.sharedInstance().recordPermission == .undetermined
+        }
+    }
     #endif
+
+    private static func forcedVoiceErrorMessage(_ value: String) -> String {
+        switch value {
+        case "speechDenied":
+            L10n.tr("Speech recognition permission was denied.")
+        case "microphoneDenied":
+            L10n.tr("Microphone permission was denied.")
+        case "unavailable":
+            L10n.tr("Speech recognition is unavailable.")
+        default:
+            L10n.tr("Voice input is unavailable.")
+        }
+    }
+
+    private func finishWithManualEntry(message: String, note: String = "") {
+        #if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+        stopAudioCapture(cancelTask: true)
+        #endif
+        ruleBasedText = VoiceCommandRuleCleaner.clean(rawText)
+        cleanedText = ruleBasedText
+        cleanupNote = note.isEmpty ? message : "\(message) \(note)"
+        phase = .ready
+        statusMessage = message
+    }
 }
+
+#if canImport(Speech) && canImport(AVFoundation) && !targetEnvironment(macCatalyst)
+private enum VoiceCommandCaptureError: LocalizedError {
+    case speechUnavailable
+    case inputUnavailable
+    case recordingUnavailable
+    case transcriptionTimedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .speechUnavailable:
+            L10n.tr("Speech recognition is unavailable.")
+        case .inputUnavailable:
+            L10n.tr("Microphone input is unavailable.")
+        case .recordingUnavailable:
+            L10n.tr("Microphone input is unavailable.")
+        case .transcriptionTimedOut:
+            L10n.tr("No speech was detected. Please try again or type the command below.")
+        }
+    }
+}
+#endif
 
 private enum VoiceCommandRuleCleaner {
     static func clean(_ rawText: String) -> String {

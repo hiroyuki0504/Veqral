@@ -39,6 +39,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-auth-onboarding" {
             AuthOnboardingSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-direct-clients" {
+            DirectClientsSmoke.runAndExit()
+        }
         if SalesLabSmoke.runIfRequested(arguments: Array(CommandLine.arguments.dropFirst())) {
             Foundation.exit(0)
         }
@@ -828,6 +831,134 @@ enum ProjectMemorySmoke {
             print("FAIL: Project memory smoke failed: \(error.localizedDescription)")
             Foundation.exit(1)
         }
+    }
+}
+
+enum DirectClientsSmoke {
+    static func runAndExit() -> Never {
+        do {
+            try run()
+            print("PASS: Direct clients smoke verified Codex/Claude history, resume arguments, and risk gate.")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Direct clients smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+
+    private static func run() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("veqral-direct-clients-smoke-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let codexHome = root.appendingPathComponent(".codex", isDirectory: true)
+        let claudeConfig = root.appendingPathComponent(".claude", isDirectory: true)
+        let codexPrompt = "Codex direct smoke prompt \(UUID().uuidString)"
+        let claudePrompt = "Claude direct smoke prompt \(UUID().uuidString)"
+        try seedCodexHistory(home: codexHome, prompt: codexPrompt)
+        try seedClaudeHistory(config: claudeConfig, prompt: claudePrompt)
+        setenv("CODEX_HOME", codexHome.path, 1)
+        setenv("CLAUDE_CONFIG_DIR", claudeConfig.path, 1)
+
+        let history = AgentHistoryStore()
+        let codexList = try history.list(HistorySessionListRequest(tool: .codex, project: nil, query: codexPrompt, date: nil, page: 0, limit: 10))
+        guard let codexSession = codexList.sessions.first else {
+            throw SmokeError("Codex history session was not listed from isolated CODEX_HOME.")
+        }
+        guard codexSession.resumeID == "11111111-2222-3333-4444-555555555555" else {
+            throw SmokeError("Codex resume ID was not derived from the session filename: \(codexSession.resumeID ?? "nil")")
+        }
+        let codexDetail = try history.detail(HistorySessionDetailRequest(id: codexSession.id, tool: .codex))
+        guard codexDetail.turns.contains(where: { $0.role == "user" && $0.text.contains(codexPrompt) }) else {
+            throw SmokeError("Codex detail did not expose the user turn.")
+        }
+
+        let claudeList = try history.list(HistorySessionListRequest(tool: .claude, project: nil, query: claudePrompt, date: nil, page: 0, limit: 10))
+        guard let claudeSession = claudeList.sessions.first else {
+            throw SmokeError("Claude history session was not listed from isolated CLAUDE_CONFIG_DIR.")
+        }
+        guard claudeSession.resumeID == "claude-smoke-session" else {
+            throw SmokeError("Claude resume ID was not derived from the JSONL filename.")
+        }
+        let claudeDetail = try history.detail(HistorySessionDetailRequest(id: claudeSession.id, tool: .claude))
+        guard claudeDetail.turns.contains(where: { $0.role == "user" && $0.text.contains(claudePrompt) }) else {
+            throw SmokeError("Claude detail did not expose the user turn.")
+        }
+
+        let codexArgs = CLIAdapterRegistry.smokeArguments(for: HostRun(
+            id: "codex-smoke",
+            prompt: "resume Codex smoke",
+            workingDirectory: root.path,
+            sessionID: nil,
+            status: .queued,
+            startedAt: Date(),
+            completedAt: nil,
+            exitCode: nil,
+            pid: nil,
+            approvalReason: nil,
+            engine: .codex,
+            resumeSessionID: codexSession.resumeID,
+            projectID: nil,
+            chatID: nil,
+            provider: nil,
+            model: nil,
+            approvalSeverity: nil
+        ))
+        guard codexArgs.starts(with: ["exec", "--cd", root.path, "--sandbox", "workspace-write", "resume", codexSession.resumeID ?? ""]) else {
+            throw SmokeError("Codex resume command shape changed unexpectedly: \(codexArgs.joined(separator: " "))")
+        }
+
+        let claudeArgs = CLIAdapterRegistry.smokeArguments(for: HostRun(
+            id: "claude-smoke",
+            prompt: "resume Claude smoke",
+            workingDirectory: root.path,
+            sessionID: nil,
+            status: .queued,
+            startedAt: Date(),
+            completedAt: nil,
+            exitCode: nil,
+            pid: nil,
+            approvalReason: nil,
+            engine: .claude,
+            resumeSessionID: claudeSession.resumeID,
+            projectID: nil,
+            chatID: nil,
+            provider: nil,
+            model: nil,
+            approvalSeverity: nil
+        ))
+        guard claudeArgs.contains("--print"),
+              claudeArgs.contains("--output-format"),
+              claudeArgs.contains("--resume"),
+              claudeArgs.contains(claudeSession.resumeID ?? "") else {
+            throw SmokeError("Claude resume command shape changed unexpectedly: \(claudeArgs.joined(separator: " "))")
+        }
+
+        let risky = RiskClassifier.classify("delete .env and force push main")
+        guard risky.requiresApproval, risky.severity == .high else {
+            throw SmokeError("Direct dangerous prompt did not trigger high risk approval.")
+        }
+    }
+
+    private static func seedCodexHistory(home: URL, prompt: String) throws {
+        let sessions = home.appendingPathComponent("sessions/2026/06/04", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let file = sessions.appendingPathComponent("rollout-2026-06-04T00-00-00-11111111-2222-3333-4444-555555555555.jsonl")
+        try Data("""
+        {"type":"session_meta","timestamp":"2026-06-04T00:00:00Z","payload":{"cwd":"/tmp/veqral-codex-smoke","model":"gpt-5-codex"}}
+        {"type":"response_item","timestamp":"2026-06-04T00:00:01Z","payload":{"type":"message","role":"user","cwd":"/tmp/veqral-codex-smoke","model":"gpt-5-codex","content":[{"type":"input_text","text":"\(prompt)"}]}}
+        {"type":"response_item","timestamp":"2026-06-04T00:00:02Z","payload":{"type":"message","role":"assistant","content":"Codex direct smoke answer"}}
+        """.utf8).write(to: file, options: .atomic)
+    }
+
+    private static func seedClaudeHistory(config: URL, prompt: String) throws {
+        let project = config.appendingPathComponent("projects/-tmp-veqral-claude-smoke", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let file = project.appendingPathComponent("claude-smoke-session.jsonl")
+        try Data("""
+        {"type":"user","uuid":"claude-user-1","timestamp":"2026-06-04T00:00:00Z","cwd":"/tmp/veqral-claude-smoke","model":"claude-haiku-4.5","message":{"role":"user","content":[{"type":"text","text":"\(prompt)"}]}}
+        {"type":"assistant","uuid":"claude-assistant-1","timestamp":"2026-06-04T00:00:01Z","message":{"role":"assistant","content":"Claude direct smoke answer"}}
+        """.utf8).write(to: file, options: .atomic)
     }
 }
 
@@ -2983,6 +3114,10 @@ enum CLIAdapterRegistry {
 
     static func hermesVersion() -> String {
         status(for: .hermes).version
+    }
+
+    static func smokeArguments(for run: HostRun) -> [String] {
+        arguments(for: run)
     }
 
     private static func arguments(for run: HostRun) -> [String] {
