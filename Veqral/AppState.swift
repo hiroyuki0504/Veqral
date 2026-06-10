@@ -4918,6 +4918,32 @@ struct RemoteHostClient: Sendable {
         _ = try await request(path: "/v1/runs/\(remoteRunID)/reject", method: "POST", body: Data())
     }
 
+    func hermesControlStatus() async throws -> HermesControlStatus {
+        let data = try await request(path: "/v1/hermes/control", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(HermesControlStatus.self, from: data)
+    }
+
+    func updateHermesControl(_ update: HermesControlUpdate) async throws -> HermesControlUpdateResult {
+        let body = try JSONEncoder.commandCenter.encode(update)
+        let data = try await request(path: "/v1/hermes/control", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(HermesControlUpdateResult.self, from: data)
+    }
+
+    func hermesApprovals() async throws -> HermesApprovalList {
+        let data = try await request(path: "/v1/hermes/approvals", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(HermesApprovalList.self, from: data)
+    }
+
+    func decideHermesApproval(id: String, decision: String, note: String?) async throws {
+        struct Body: Encodable {
+            var id: String
+            var decision: String
+            var note: String?
+        }
+        let body = try JSONEncoder.commandCenter.encode(Body(id: id, decision: decision, note: note))
+        _ = try await request(path: "/v1/hermes/approvals/decide", method: "POST", body: body)
+    }
+
     func devices() async throws -> RemoteDeviceListResponse {
         let data = try await request(path: "/v1/devices", method: "GET", body: Data())
         return try JSONDecoder.commandCenter.decode(RemoteDeviceListResponse.self, from: data)
@@ -5334,5 +5360,81 @@ private extension String {
     var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+// MARK: - Hermes remote control (model / reasoning / vault approvals)
+
+struct HermesControlPreset: Codable, Identifiable, Equatable {
+    var id: String
+    var label: String
+    var model: String
+    var provider: String?
+    var reasoning: String
+    var isPlaceholder: Bool
+}
+
+struct HermesControlStatus: Codable {
+    var configured: Bool
+    var configPath: String
+    var vaultPath: String?
+    var provider: String?
+    var model: String?
+    var reasoning: String?
+    var presets: [HermesControlPreset]
+    var pendingApprovalCount: Int
+    var note: String?
+}
+
+struct HermesControlUpdate: Codable {
+    var presetID: String?
+    var provider: String?
+    var model: String?
+    var reasoning: String?
+}
+
+struct HermesControlUpdateResult: Codable {
+    var status: HermesControlStatus
+    var applied: [String]
+    var note: String
+}
+
+struct HermesApprovalItem: Codable, Identifiable, Equatable {
+    var id: String
+    var title: String
+    var summary: String
+    var createdAt: Date?
+}
+
+struct HermesApprovalList: Codable {
+    var approvals: [HermesApprovalItem]
+}
+
+extension CommandCenterStore {
+    static let hermesReasoningLevels = ["none", "minimal", "low", "medium", "high", "xhigh"]
+
+    private var hermesClient: RemoteHostClient {
+        get throws {
+            guard remoteHost.isEnabled else {
+                throw RemoteHostError.invalidConfiguration
+            }
+            return RemoteHostClient(configuration: remoteHost)
+        }
+    }
+
+    func hermesControlStatus() async throws -> HermesControlStatus {
+        try await hermesClient.hermesControlStatus()
+    }
+
+    func updateHermesControl(_ update: HermesControlUpdate) async throws -> HermesControlUpdateResult {
+        try await hermesClient.updateHermesControl(update)
+    }
+
+    func hermesApprovals() async throws -> [HermesApprovalItem] {
+        try await hermesClient.hermesApprovals().approvals
+    }
+
+    func decideHermesApproval(_ approval: HermesApprovalItem, decision: String, note: String? = nil) async throws {
+        try await hermesClient.decideHermesApproval(id: approval.id, decision: decision, note: note)
     }
 }

@@ -2300,6 +2300,7 @@ final class HostServer: @unchecked Sendable {
     private let listener: NWListener
     private let runner: AgentRunner
     private let memoryStore = HermesMemoryStore()
+    private let hermesControl = HermesControlStore()
     private let historyStore = AgentHistoryStore()
     private let telemetryCollector = HostTelemetryCollector()
     private let portfolioStore: PortfolioRegistryStore
@@ -2512,6 +2513,36 @@ final class HostServer: @unchecked Sendable {
                 let response = try memoryStore.write(id: body.id, content: body.content)
                 await state.recordAudit("memory wrote id=\(body.id) bytes=\(body.content.utf8.count)")
                 sendJSON(response, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/hermes/control", request.method == "GET" {
+                _ = try await authenticate(request)
+                sendJSON(try hermesControl.status(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/hermes/control", request.method == "POST" {
+                _ = try await authenticate(request)
+                let body = try JSONDecoder.dates.decode(HermesControlUpdateRequest.self, from: request.body)
+                let response = try hermesControl.update(body)
+                await state.recordAudit("hermes control \(response.applied.joined(separator: " "))")
+                sendJSON(response, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/hermes/approvals", request.method == "GET" {
+                _ = try await authenticate(request)
+                sendJSON(try hermesControl.pendingApprovals(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/hermes/approvals/decide", request.method == "POST" {
+                _ = try await authenticate(request)
+                let body = try JSONDecoder.dates.decode(HermesApprovalDecisionRequest.self, from: request.body)
+                let result = try hermesControl.decide(body)
+                await state.recordAudit("hermes approval \(result.decision) id=\(result.id)")
+                sendJSON(result, connection: connection)
                 return
             }
 
@@ -5642,14 +5673,7 @@ final class PortfolioRegistryStore {
             return "ログはまだありません。"
         }
         let prompt = "次のログを日本語で短く要約し、異常があれば先頭に書いてください。\n\n\(String(text.suffix(5000)))"
-        if let ollama = commandPath("ollama") {
-            let result = ProcessRunner.run(ollama, ["run", "llama3.2", prompt], timeout: 25)
-            if result.exitCode == 0, let summary = result.stdout.nilIfBlank {
-                return Redactor.redact(summary)
-            }
-        }
-        if text.localizedCaseInsensitiveContains("error") || text.localizedCaseInsensitiveContains("failed"),
-           let claude = commandPath("claude") {
+        if let claude = commandPath("claude") {
             let result = ProcessRunner.run(claude, ["--print", prompt], timeout: 35)
             if result.exitCode == 0, let summary = result.stdout.nilIfBlank {
                 return Redactor.redact(summary)
