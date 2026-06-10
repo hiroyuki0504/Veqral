@@ -34,6 +34,34 @@ struct WatchCreateRunResponse: Codable {
     var approvalSeverity: String?
 }
 
+struct WatchHermesPreset: Codable, Identifiable, Equatable {
+    var id: String
+    var label: String
+    var model: String
+    var provider: String?
+    var reasoning: String
+    var isPlaceholder: Bool
+}
+
+struct WatchHermesStatus: Codable {
+    var configured: Bool
+    var model: String?
+    var reasoning: String?
+    var presets: [WatchHermesPreset]
+    var pendingApprovalCount: Int
+}
+
+struct WatchHermesApproval: Codable, Identifiable, Equatable {
+    var id: String
+    var title: String
+    var summary: String
+    var createdAt: Date?
+}
+
+struct WatchHermesApprovalList: Codable {
+    var approvals: [WatchHermesApproval]
+}
+
 @MainActor
 final class WatchCommandStore: ObservableObject {
     @Published var endpoint: String {
@@ -49,6 +77,10 @@ final class WatchCommandStore: ObservableObject {
     @Published var commandDraft = ""
     @Published var message = "Host 未接続"
     @Published var isLoading = false
+    @Published var hermesPresets: [WatchHermesPreset] = []
+    @Published var hermesApprovals: [WatchHermesApproval] = []
+    @Published var hermesModel: String?
+    @Published var hermesReasoning: String?
 
     init() {
         endpoint = UserDefaults.standard.string(forKey: "watch.endpoint") ?? ""
@@ -73,7 +105,14 @@ final class WatchCommandStore: ObservableObject {
         Task { @MainActor in
             do {
                 runs = try await client.runs().runs
-                message = pendingApprovals.isEmpty ? "承認待ちはありません。" : "\(pendingApprovals.count) 件の承認待ち"
+                if let status = try? await client.hermesStatus() {
+                    hermesPresets = status.presets
+                    hermesModel = status.model
+                    hermesReasoning = status.reasoning
+                }
+                hermesApprovals = (try? await client.hermesApprovals().approvals) ?? hermesApprovals
+                let pendingTotal = pendingApprovals.count + hermesApprovals.count
+                message = pendingTotal == 0 ? "承認待ちはありません。" : "\(pendingTotal) 件の承認待ち"
             } catch {
                 message = "更新失敗: \(error.localizedDescription)"
             }
@@ -132,6 +171,43 @@ final class WatchCommandStore: ObservableObject {
         }
     }
 
+    func applyHermesPreset(_ preset: WatchHermesPreset) {
+        guard let client = makeClient() else {
+            message = "endpoint / device / token を設定してください。"
+            return
+        }
+        isLoading = true
+        Task { @MainActor in
+            do {
+                try await client.applyHermesPreset(presetID: preset.id)
+                hermesModel = preset.model
+                hermesReasoning = preset.reasoning
+                message = "プリセット「\(preset.label)」を適用しました。新セッションから有効。"
+            } catch {
+                message = "適用失敗: \(error.localizedDescription)"
+            }
+            isLoading = false
+        }
+    }
+
+    func decideHermes(_ approval: WatchHermesApproval, decision: String) {
+        guard let client = makeClient() else {
+            message = "endpoint / device / token を設定してください。"
+            return
+        }
+        isLoading = true
+        Task { @MainActor in
+            do {
+                try await client.decideHermesApproval(id: approval.id, decision: decision)
+                hermesApprovals.removeAll { $0.id == approval.id }
+                message = decision == "approve" ? "承認しました。" : "却下しました。"
+            } catch {
+                message = "操作失敗: \(error.localizedDescription)"
+            }
+            isLoading = false
+        }
+    }
+
     private func makeClient() -> WatchHostClient? {
         guard !endpoint.isEmpty, !deviceID.isEmpty, !token.isEmpty else { return nil }
         return WatchHostClient(endpoint: endpoint, deviceID: deviceID, token: token)
@@ -145,7 +221,7 @@ struct WatchCommandView: View {
         NavigationStack {
             List {
                 Section {
-                    ExecutionStatusComplicationView(activeCount: store.activeRuns.count, approvalCount: store.pendingApprovals.count)
+                    ExecutionStatusComplicationView(activeCount: store.activeRuns.count, approvalCount: store.pendingApprovals.count + store.hermesApprovals.count)
                     Text(store.message)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -163,6 +239,45 @@ struct WatchCommandView: View {
                     }
                     ForEach(store.pendingApprovals) { run in
                         WatchApprovalCard(run: run, approve: { store.approve(run) }, reject: { store.reject(run) })
+                    }
+                }
+
+                Section("Hermes") {
+                    if let model = store.hermesModel {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(model)
+                                .font(.caption2)
+                                .lineLimit(1)
+                            Text("思考: \(store.hermesReasoning ?? "medium")")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    ForEach(store.hermesPresets.prefix(3)) { preset in
+                        Button {
+                            store.applyHermesPreset(preset)
+                        } label: {
+                            HStack {
+                                Text(preset.label)
+                                Spacer()
+                                Text(preset.reasoning)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .disabled(preset.isPlaceholder || store.isLoading)
+                    }
+                    if store.hermesPresets.isEmpty {
+                        Text("プリセット未定義（vault の presets.md）")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(store.hermesApprovals) { approval in
+                        WatchHermesApprovalCard(
+                            approval: approval,
+                            approve: { store.decideHermes(approval, decision: "approve") },
+                            reject: { store.decideHermes(approval, decision: "reject") }
+                        )
                     }
                 }
 
@@ -228,6 +343,51 @@ struct WatchApprovalCard: View {
     }
 }
 
+struct WatchHermesApprovalCard: View {
+    let approval: WatchHermesApproval
+    let approve: () -> Void
+    let reject: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Hermes")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text(approval.requiresPhoneReview ? "高" : "通常")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(approval.requiresPhoneReview ? .red : .secondary)
+            }
+            Text(approval.title)
+                .font(.footnote)
+                .lineLimit(3)
+            if !approval.summary.isEmpty {
+                Text(approval.summary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+            if approval.requiresPhoneReview {
+                Text("削除・本番・秘密情報は iPhone で確認")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Button("拒否", role: .destructive, action: reject)
+                Button("承認", action: approve)
+                    .disabled(approval.requiresPhoneReview)
+            }
+        }
+    }
+}
+
+extension WatchHermesApproval {
+    var requiresPhoneReview: Bool {
+        let text = "\(title)\n\(summary)".lowercased()
+        return ["delete", "削除", "force push", "main merge", "deploy", "本番", "token", ".env", "secret", "computer use", "画面操作", "billing", "課金"].contains { text.contains($0) }
+    }
+}
+
 struct ExecutionStatusComplicationView: View {
     var activeCount: Int
     var approvalCount: Int
@@ -273,6 +433,31 @@ struct WatchHostClient {
         let body = try encoder.encode(Body(prompt: prompt, workingDirectory: "", engine: "hermes"))
         let data = try await request(path: "/v1/runs", method: "POST", body: body)
         return try decoder.decode(WatchCreateRunResponse.self, from: data)
+    }
+
+    func hermesStatus() async throws -> WatchHermesStatus {
+        let data = try await request(path: "/v1/hermes/control", method: "GET", body: Data())
+        return try decoder.decode(WatchHermesStatus.self, from: data)
+    }
+
+    func hermesApprovals() async throws -> WatchHermesApprovalList {
+        let data = try await request(path: "/v1/hermes/approvals", method: "GET", body: Data())
+        return try decoder.decode(WatchHermesApprovalList.self, from: data)
+    }
+
+    func applyHermesPreset(presetID: String) async throws {
+        struct Body: Encodable {
+            var presetID: String
+        }
+        _ = try await request(path: "/v1/hermes/control", method: "POST", body: try encoder.encode(Body(presetID: presetID)))
+    }
+
+    func decideHermesApproval(id: String, decision: String) async throws {
+        struct Body: Encodable {
+            var id: String
+            var decision: String
+        }
+        _ = try await request(path: "/v1/hermes/approvals/decide", method: "POST", body: try encoder.encode(Body(id: id, decision: decision)))
     }
 
     private func request(path: String, method: String, body: Data) async throws -> Data {
