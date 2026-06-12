@@ -2416,6 +2416,36 @@ final class HostServer: @unchecked Sendable {
                 return
             }
 
+            if request.path == "/v1/hermes/control", request.method == "GET" {
+                _ = try await authenticateHermes(request, connection: connection)
+                sendJSON(try hermesControl.status(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/hermes/control", request.method == "POST" {
+                _ = try await authenticateHermes(request, connection: connection)
+                let body = try JSONDecoder.dates.decode(HermesControlUpdateRequest.self, from: request.body)
+                let response = try hermesControl.update(body)
+                await state.recordAudit("hermes control \(response.applied.joined(separator: " "))")
+                sendJSON(response, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/hermes/approvals", request.method == "GET" {
+                _ = try await authenticateHermes(request, connection: connection)
+                sendJSON(try hermesControl.pendingApprovals(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/hermes/approvals/decide", request.method == "POST" {
+                _ = try await authenticateHermes(request, connection: connection)
+                let body = try JSONDecoder.dates.decode(HermesApprovalDecisionRequest.self, from: request.body)
+                let result = try hermesControl.decide(body)
+                await state.recordAudit("hermes approval \(result.decision) id=\(result.id)")
+                sendJSON(result, connection: connection)
+                return
+            }
+
             let authenticatedDeviceID = try await authenticate(request)
 
             if request.path == "/v1/telemetry", request.method == "GET" {
@@ -2513,36 +2543,6 @@ final class HostServer: @unchecked Sendable {
                 let response = try memoryStore.write(id: body.id, content: body.content)
                 await state.recordAudit("memory wrote id=\(body.id) bytes=\(body.content.utf8.count)")
                 sendJSON(response, connection: connection)
-                return
-            }
-
-            if request.path == "/v1/hermes/control", request.method == "GET" {
-                _ = try await authenticate(request)
-                sendJSON(try hermesControl.status(), connection: connection)
-                return
-            }
-
-            if request.path == "/v1/hermes/control", request.method == "POST" {
-                _ = try await authenticate(request)
-                let body = try JSONDecoder.dates.decode(HermesControlUpdateRequest.self, from: request.body)
-                let response = try hermesControl.update(body)
-                await state.recordAudit("hermes control \(response.applied.joined(separator: " "))")
-                sendJSON(response, connection: connection)
-                return
-            }
-
-            if request.path == "/v1/hermes/approvals", request.method == "GET" {
-                _ = try await authenticate(request)
-                sendJSON(try hermesControl.pendingApprovals(), connection: connection)
-                return
-            }
-
-            if request.path == "/v1/hermes/approvals/decide", request.method == "POST" {
-                _ = try await authenticate(request)
-                let body = try JSONDecoder.dates.decode(HermesApprovalDecisionRequest.self, from: request.body)
-                let result = try hermesControl.decide(body)
-                await state.recordAudit("hermes approval \(result.decision) id=\(result.id)")
-                sendJSON(result, connection: connection)
                 return
             }
 
@@ -2863,6 +2863,53 @@ final class HostServer: @unchecked Sendable {
             body: request.body
         )
         return device
+    }
+
+    private func authenticateHermes(_ request: HTTPRequest, connection: NWConnection? = nil) async throws -> String {
+        if let connection, isLoopback(connection.endpoint) {
+            return "local-loopback"
+        }
+        if let localToken = hermesLocalToken(),
+           let supplied = headerValue("x-veqral-local-token", in: request.headers),
+           secureCompare(supplied, localToken) {
+            return "local-hermes"
+        }
+        return try await authenticate(request)
+    }
+
+    private func isLoopback(_ endpoint: NWEndpoint) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else {
+            return false
+        }
+        let value = String(describing: host).lowercased()
+        return value == "localhost" || value == "127.0.0.1" || value == "::1" || value == "[::1]"
+    }
+
+    private func headerValue(_ name: String, in headers: [String: String]) -> String? {
+        if let exact = headers[name] {
+            return exact
+        }
+        let wanted = name.lowercased()
+        return headers.first { key, _ in key.lowercased() == wanted }?.value
+    }
+
+    private func hermesLocalToken() -> String? {
+        if let token = ProcessInfo.processInfo.environment["VEQRAL_HERMES_LOCAL_TOKEN"]?.nilIfBlank {
+            return token
+        }
+        guard let envPath = ProcessInfo.processInfo.environment["VEQRAL_HERMES_LOCAL_ENV"]?.nilIfBlank?.expandingTilde,
+              let content = try? String(contentsOfFile: envPath, encoding: .utf8) else {
+            return nil
+        }
+        for line in content.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
+            let parts = trimmed.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2, parts[0] == "VEQRAL_HERMES_LOCAL_TOKEN" else { continue }
+            let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.nilIfBlank
+        }
+        return nil
     }
 
     private func upgradeToWebSocket(_ request: HTTPRequest, connection: NWConnection) async throws {
@@ -8493,7 +8540,7 @@ private func appleScriptQuoted(_ value: String) -> String {
     "\"\(value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
 }
 
-private extension String {
+extension String {
     var expandingTilde: String {
         NSString(string: self).expandingTildeInPath
     }
