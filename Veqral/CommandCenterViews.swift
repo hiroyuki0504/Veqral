@@ -46,6 +46,8 @@ struct CommandCenterSidebar: View {
         switch section {
         case .runs:
             store.runs.count
+        case .swarm:
+            store.swarmTasks.filter { !$0.status.isTerminal }.count
         case .approvals:
             store.pendingApprovals().count
         default:

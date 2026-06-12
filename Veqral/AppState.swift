@@ -194,6 +194,10 @@ extension CommandApproval {
     var requiresPreApprovalReview: Bool {
         risk == "高" || tintName == "red"
     }
+
+    var priorityRank: Int {
+        requiresPreApprovalReview ? 0 : 1
+    }
 }
 
 struct CommandDiffEntry: Identifiable, Codable, Equatable {
@@ -676,6 +680,120 @@ struct RemoteGitHubStatus: Codable, Equatable, Sendable {
 struct RemoteDraftPRResponse: Codable, Sendable {
     var ok: Bool
     var url: String
+}
+
+enum RemoteSwarmTaskStatus: String, Codable, CaseIterable, Identifiable, Sendable {
+    case queued
+    case preparing
+    case running
+    case verifying
+    case committing
+    case creatingDraftPR
+    case complete
+    case failed
+    case cancelled
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .queued: "待機中"
+        case .preparing: "準備中"
+        case .running: "実行中"
+        case .verifying: "検証中"
+        case .committing: "コミット中"
+        case .creatingDraftPR: "PR作成中"
+        case .complete: "完了"
+        case .failed: "失敗"
+        case .cancelled: "停止"
+        }
+    }
+
+    var isTerminal: Bool {
+        switch self {
+        case .complete, .failed, .cancelled:
+            true
+        default:
+            false
+        }
+    }
+}
+
+enum RemoteSwarmAgentKind: String, Codable, CaseIterable, Identifiable, Sendable {
+    case codex
+    case claude
+    case hermes
+    case shell
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .codex: "Codex"
+        case .claude: "Claude"
+        case .hermes: "Hermes"
+        case .shell: "Shell"
+        }
+    }
+}
+
+struct RemoteSwarmTaskRequest: Codable, Sendable {
+    var title: String?
+    var repoPath: String?
+    var baseBranch: String?
+    var instruction: String
+    var scopeHints: [String]?
+    var agent: RemoteSwarmAgentKind?
+    var branchName: String?
+    var verifyCommands: [String]?
+    var createDraftPR: Bool?
+    var cleanupWorktree: Bool?
+}
+
+struct RemoteSwarmTaskRecord: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var title: String
+    var repoPath: String
+    var baseBranch: String
+    var branchName: String
+    var worktreePath: String
+    var instruction: String
+    var scopeHints: [String]
+    var agent: RemoteSwarmAgentKind
+    var verifyCommands: [String]
+    var createDraftPR: Bool
+    var cleanupWorktree: Bool
+    var status: RemoteSwarmTaskStatus
+    var queuedAt: Date
+    var startedAt: Date?
+    var completedAt: Date?
+    var prURL: String?
+    var errorMessage: String?
+    var cancelRequested: Bool
+    var logs: [String]
+
+    var shortID: String {
+        String(id.prefix(8))
+    }
+}
+
+struct RemoteSwarmCoordinatorStatus: Codable, Equatable, Sendable {
+    var maxSlots: Int
+    var xcodeMaxSlots: Int
+    var activeSlots: Int
+    var queuedCount: Int
+    var runningCount: Int
+    var thermalState: String
+    var killSwitchActive: Bool
+}
+
+struct RemoteSwarmTaskListResponse: Codable, Sendable {
+    var status: RemoteSwarmCoordinatorStatus
+    var tasks: [RemoteSwarmTaskRecord]
+}
+
+struct RemoteSwarmTaskResponse: Codable, Sendable {
+    var task: RemoteSwarmTaskRecord
 }
 
 enum PortfolioAssetKind: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -1233,6 +1351,11 @@ final class CommandCenterStore: ObservableObject {
     @Published var costGovernanceMessage: String = ""
     @Published var isLoadingPortfolio = false
     @Published var isLoadingSalesLab = false
+    @Published var swarmTasks: [RemoteSwarmTaskRecord] = []
+    @Published var selectedSwarmTaskID: String?
+    @Published var swarmStatus: RemoteSwarmCoordinatorStatus?
+    @Published var swarmMessage: String = ""
+    @Published var isLoadingSwarm = false
     @Published var remoteHistorySessions: [RemoteHistorySession] = []
     @Published var remoteHistoryProjects: [String] = []
     @Published var selectedHistorySession: RemoteHistorySession?
@@ -1354,6 +1477,14 @@ final class CommandCenterStore: ObservableObject {
             return lead
         }
         return salesLeads.first
+    }
+
+    var selectedSwarmTask: RemoteSwarmTaskRecord? {
+        if let selectedSwarmTaskID,
+           let task = swarmTasks.first(where: { $0.id == selectedSwarmTaskID }) {
+            return task
+        }
+        return swarmTasks.first
     }
 
     var selectedAgentProject: AgentProjectSpace? {
@@ -2408,6 +2539,118 @@ final class CommandCenterStore: ObservableObject {
         salesLeads.sort { $0.updatedAt > $1.updatedAt }
     }
 
+    func refreshSwarm() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            swarmMessage = "Mac Host とペアリングすると群制御を読み込めます。"
+            return
+        }
+        isLoadingSwarm = true
+        swarmMessage = "群制御を読み込み中..."
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).swarmTasks()
+                swarmStatus = response.status
+                swarmTasks = response.tasks
+                selectedSwarmTaskID = selectedSwarmTaskID ?? response.tasks.first?.id
+                swarmMessage = response.tasks.isEmpty ? "まだタスクはありません。" : "\(response.tasks.count) 件のタスクを読み込みました。"
+            } catch {
+                swarmMessage = Self.remoteFailureMessage(error, context: "Swarm")
+            }
+            isLoadingSwarm = false
+        }
+    }
+
+    func enqueueSwarmTask(
+        title: String,
+        repoPath: String,
+        instruction: String,
+        scopeHints: [String],
+        agent: RemoteSwarmAgentKind,
+        verifyCommands: [String],
+        createDraftPR: Bool
+    ) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else {
+            swarmMessage = "Mac Host とペアリングするとタスクを登録できます。"
+            return
+        }
+        let trimmedInstruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedInstruction.isEmpty else {
+            swarmMessage = "指示を入力してください。"
+            return
+        }
+        isLoadingSwarm = true
+        swarmMessage = "タスクを登録中..."
+        let configuration = remoteHost
+        let request = RemoteSwarmTaskRequest(
+            title: title.nilIfBlank,
+            repoPath: repoPath.nilIfBlank,
+            baseBranch: "main",
+            instruction: trimmedInstruction,
+            scopeHints: scopeHints.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty },
+            agent: agent,
+            branchName: nil,
+            verifyCommands: verifyCommands.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty },
+            createDraftPR: createDraftPR,
+            cleanupWorktree: true
+        )
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).enqueueSwarmTask(request)
+                replaceSwarmTask(response.task)
+                selectedSwarmTaskID = response.task.id
+                swarmMessage = "タスクを登録しました: \(response.task.shortID)"
+                refreshSwarm()
+            } catch {
+                swarmMessage = Self.remoteFailureMessage(error, context: "Swarm enqueue")
+            }
+            isLoadingSwarm = false
+        }
+    }
+
+    func cancelSwarmTask(_ task: RemoteSwarmTaskRecord) {
+        guard remoteHost.isEnabled, remoteHost.isPaired else { return }
+        isLoadingSwarm = true
+        swarmMessage = "タスクを停止中..."
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).cancelSwarmTask(taskID: task.id)
+                replaceSwarmTask(response.task)
+                swarmMessage = "タスクを停止しました: \(response.task.shortID)"
+            } catch {
+                swarmMessage = Self.remoteFailureMessage(error, context: "Swarm cancel")
+            }
+            isLoadingSwarm = false
+        }
+    }
+
+    func killSwarm() {
+        guard remoteHost.isEnabled, remoteHost.isPaired else { return }
+        isLoadingSwarm = true
+        swarmMessage = "全停止を要求中..."
+        let configuration = remoteHost
+        Task { @MainActor in
+            do {
+                let response = try await RemoteHostClient(configuration: configuration).killSwarm()
+                swarmStatus = response.status
+                swarmTasks = response.tasks
+                swarmMessage = "全停止を要求しました。Host 再起動まで新規投入は止まります。"
+            } catch {
+                swarmMessage = Self.remoteFailureMessage(error, context: "Swarm kill")
+            }
+            isLoadingSwarm = false
+        }
+    }
+
+    private func replaceSwarmTask(_ task: RemoteSwarmTaskRecord) {
+        if let index = swarmTasks.firstIndex(where: { $0.id == task.id }) {
+            swarmTasks[index] = task
+        } else {
+            swarmTasks.insert(task, at: 0)
+        }
+    }
+
     func revokeRemoteDevice(_ device: RemoteDeviceRecord) {
         guard remoteHost.isEnabled, remoteHost.isPaired else { return }
         let configuration = remoteHost
@@ -3003,6 +3246,18 @@ final class CommandCenterStore: ObservableObject {
         persist()
     }
 
+    func approveBatchEligiblePendingApprovals() {
+        let batch = pendingApprovals().filter { !$0.requiresPreApprovalReview }
+        batch.forEach { approve($0) }
+    }
+
+    func rejectPendingApprovals(_ batch: [CommandApproval]) {
+        batch.forEach { approval in
+            guard approvals.first(where: { $0.id == approval.id })?.status == .pending else { return }
+            reject(approval)
+        }
+    }
+
     func pauseOrResumeSelectedRun() {
         guard let selectedRunID, let index = runs.firstIndex(where: { $0.id == selectedRunID }) else { return }
         switch runs[index].status {
@@ -3064,6 +3319,12 @@ final class CommandCenterStore: ObservableObject {
 
     func pendingApprovals(limit: Int? = nil) -> [CommandApproval] {
         let pending = approvals.filter { $0.status == .pending }
+            .sorted {
+                if $0.priorityRank != $1.priorityRank {
+                    return $0.priorityRank < $1.priorityRank
+                }
+                return $0.createdAt < $1.createdAt
+            }
         guard let limit else { return pending }
         return Array(pending.prefix(limit))
     }
@@ -4957,6 +5218,27 @@ struct RemoteHostClient: Sendable {
         let body = try JSONEncoder.commandCenter.encode(requestBody)
         let data = try await request(path: "/v1/budgets", method: "POST", body: body)
         return try JSONDecoder.commandCenter.decode(RemoteProjectCostSummary.self, from: data)
+    }
+
+    func swarmTasks() async throws -> RemoteSwarmTaskListResponse {
+        let data = try await request(path: "/v1/swarm/tasks", method: "GET", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteSwarmTaskListResponse.self, from: data)
+    }
+
+    func enqueueSwarmTask(_ requestBody: RemoteSwarmTaskRequest) async throws -> RemoteSwarmTaskResponse {
+        let body = try JSONEncoder.commandCenter.encode(requestBody)
+        let data = try await request(path: "/v1/swarm/tasks", method: "POST", body: body)
+        return try JSONDecoder.commandCenter.decode(RemoteSwarmTaskResponse.self, from: data)
+    }
+
+    func cancelSwarmTask(taskID: String) async throws -> RemoteSwarmTaskResponse {
+        let data = try await request(path: "/v1/swarm/tasks/\(taskID)/cancel", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteSwarmTaskResponse.self, from: data)
+    }
+
+    func killSwarm() async throws -> RemoteSwarmTaskListResponse {
+        let data = try await request(path: "/v1/swarm/kill", method: "POST", body: Data())
+        return try JSONDecoder.commandCenter.decode(RemoteSwarmTaskListResponse.self, from: data)
     }
 
     func registerPushToken(deviceToken: String, environment: String, bundleID: String, locale: String) async throws -> RemotePushTokenResponse {
