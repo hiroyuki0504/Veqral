@@ -1137,6 +1137,435 @@ private extension PortfolioControls {
     }
 }
 
+struct SwarmView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    @State private var title = ""
+    @State private var repoPath = ""
+    @State private var instruction = ""
+    @State private var scopeHints = ""
+    @State private var verifyCommands = "git diff --check"
+    @State private var selectedAgent: RemoteSwarmAgentKind = .codex
+    @State private var createDraftPR = true
+
+    var body: some View {
+        ScreenScaffold(title: "群制御", systemImage: "square.stack.3d.up") {
+            SwarmOverviewPanel()
+
+            SwarmComposerPanel(
+                title: $title,
+                repoPath: $repoPath,
+                instruction: $instruction,
+                scopeHints: $scopeHints,
+                verifyCommands: $verifyCommands,
+                selectedAgent: $selectedAgent,
+                createDraftPR: $createDraftPR,
+                submit: submit
+            )
+
+            HStack(alignment: .top, spacing: 14) {
+                SwarmTaskListPanel()
+                    .frame(maxWidth: 420)
+                SwarmTaskDetailPanel()
+            }
+        }
+        .onAppear {
+            if repoPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                repoPath = store.workspace.rootPath.vqNilIfBlank ?? store.workingDirectory
+            }
+            if store.swarmTasks.isEmpty {
+                store.refreshSwarm()
+            }
+        }
+    }
+
+    private func submit() {
+        let hints = scopeHints
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let checks = verifyCommands
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        store.enqueueSwarmTask(
+            title: title,
+            repoPath: repoPath,
+            instruction: instruction,
+            scopeHints: hints,
+            agent: selectedAgent,
+            verifyCommands: checks,
+            createDraftPR: createDraftPR
+        )
+        title = ""
+        instruction = ""
+        scopeHints = ""
+    }
+}
+
+private struct SwarmOverviewPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
+    var body: some View {
+        VQPanel("並列状況", systemImage: "chart.bar.xaxis", actionImage: "arrow.clockwise", action: store.refreshSwarm) {
+            HStack(spacing: 10) {
+                metric("同時枠", value: "\(store.swarmStatus?.activeSlots ?? 0)/\(store.swarmStatus?.maxSlots ?? 0)", symbol: "rectangle.split.3x1")
+                metric("待機", value: "\(store.swarmStatus?.queuedCount ?? queuedCount)", symbol: "hourglass")
+                metric("実行中", value: "\(store.swarmStatus?.runningCount ?? runningCount)", symbol: "bolt")
+                metric("Xcode枠", value: "\(store.swarmStatus?.xcodeMaxSlots ?? 1)", symbol: "hammer")
+                metric("熱状態", value: thermalTitle(store.swarmStatus?.thermalState), symbol: "thermometer.medium")
+            }
+
+            HStack(spacing: 10) {
+                StatusPill(
+                    title: store.swarmStatus?.killSwitchActive == true ? "全停止中" : "投入可能",
+                    tint: store.swarmStatus?.killSwitchActive == true ? VQTheme.red : VQTheme.green
+                )
+                Text(store.swarmMessage.isEmpty ? "キューは Mac Host で保持されます。" : store.swarmMessage)
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(2)
+                Spacer()
+                Button(role: .destructive) {
+                    store.killSwarm()
+                } label: {
+                    Label("全停止", systemImage: "stop.circle")
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.isLoadingSwarm || store.swarmStatus?.killSwitchActive == true)
+            }
+        }
+    }
+
+    private var queuedCount: Int {
+        store.swarmTasks.filter { $0.status == .queued }.count
+    }
+
+    private var runningCount: Int {
+        store.swarmTasks.filter { !$0.status.isTerminal && $0.status != .queued }.count
+    }
+
+    private func metric(_ title: String, value: String, symbol: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: symbol)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.secondaryText)
+                Text(title)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(VQTheme.secondaryText)
+            }
+            Text(value)
+                .font(.system(.callout, design: .monospaced, weight: .semibold))
+                .foregroundStyle(VQTheme.ink)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(VQTheme.control.opacity(0.34))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func thermalTitle(_ state: String?) -> String {
+        switch state {
+        case "nominal": "通常"
+        case "fair": "軽負荷"
+        case "serious": "高負荷"
+        case "critical": "危険"
+        case .some(let value): value
+        case nil: "未取得"
+        }
+    }
+}
+
+private struct SwarmComposerPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    @Binding var title: String
+    @Binding var repoPath: String
+    @Binding var instruction: String
+    @Binding var scopeHints: String
+    @Binding var verifyCommands: String
+    @Binding var selectedAgent: RemoteSwarmAgentKind
+    @Binding var createDraftPR: Bool
+    let submit: () -> Void
+
+    var body: some View {
+        VQPanel("タスク登録", systemImage: "plus.square.on.square") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    TextField("タイトル", text: $title)
+                        .textFieldStyle(.roundedBorder)
+                    Picker("担当", selection: $selectedAgent) {
+                        ForEach(RemoteSwarmAgentKind.allCases) { agent in
+                            Text(agent.title).tag(agent)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 360)
+                }
+
+                TextField("リポジトリパス", text: $repoPath)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("指示")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(VQTheme.secondaryText)
+                    TextEditor(text: $instruction)
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 88)
+                        .padding(8)
+                        .background(VQTheme.terminal.opacity(0.82))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(VQTheme.hairline, lineWidth: 1)
+                        }
+                }
+
+                HStack(alignment: .top, spacing: 10) {
+                    labeledEditor("スコープヒント", text: $scopeHints, placeholder: "例: Veqral/Screens.swift")
+                    labeledEditor("検証コマンド", text: $verifyCommands, placeholder: "例: git diff --check")
+                }
+
+                HStack(spacing: 12) {
+                    Toggle("Draft PR を作成", isOn: $createDraftPR)
+                        .toggleStyle(.switch)
+                    Spacer()
+                    Button(action: submit) {
+                        Label("キューに追加", systemImage: "arrow.up.forward.app")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(VQTheme.accent)
+                    .disabled(store.isLoadingSwarm || instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+
+    private func labeledEditor(_ title: String, text: Binding<String>, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VQTheme.secondaryText)
+            TextEditor(text: text)
+                .font(.system(.caption, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .frame(minHeight: 64)
+                .padding(8)
+                .background(VQTheme.control.opacity(0.34))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(alignment: .topLeading) {
+                    if text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(placeholder)
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.mutedText)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 14)
+                    }
+                }
+        }
+    }
+}
+
+private struct SwarmTaskListPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
+    var body: some View {
+        VQPanel("エージェント", systemImage: "person.3.sequence") {
+            if store.swarmTasks.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("まだ並列タスクはありません。")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                    Text("登録すると Mac Host が worktree とブランチを切り、空き枠に流します。")
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(VQTheme.control.opacity(0.28))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(store.swarmTasks) { task in
+                        Button {
+                            store.selectedSwarmTaskID = task.id
+                        } label: {
+                            SwarmTaskRow(task: task, isSelected: store.selectedSwarmTaskID == task.id)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct SwarmTaskRow: View {
+    let task: RemoteSwarmTaskRecord
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Circle()
+                .fill(tint)
+                .frame(width: 9, height: 9)
+                .padding(.top, 7)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(task.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(VQTheme.ink)
+                        .lineLimit(1)
+                    Spacer()
+                    StatusPill(title: task.status.title, tint: tint)
+                }
+                Text(task.branchName)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(1)
+                Text("\(task.agent.title) ・ \(task.shortID)")
+                    .font(.caption2)
+                    .foregroundStyle(VQTheme.mutedText)
+            }
+        }
+        .padding(10)
+        .background(isSelected ? VQTheme.accent.opacity(0.12) : VQTheme.control.opacity(0.28))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(isSelected ? VQTheme.accent.opacity(0.42) : VQTheme.hairline.opacity(0.8), lineWidth: 1)
+        }
+    }
+
+    private var tint: Color {
+        task.status.swarmTint
+    }
+}
+
+private struct SwarmTaskDetailPanel: View {
+    @EnvironmentObject private var store: CommandCenterStore
+
+    var body: some View {
+        VQPanel("詳細ログ", systemImage: "list.bullet.rectangle") {
+            if let task = store.selectedSwarmTask {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(task.title)
+                                .font(.headline)
+                                .foregroundStyle(VQTheme.ink)
+                            Text(task.repoPath)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(VQTheme.secondaryText)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        StatusPill(title: task.status.title, tint: task.status.swarmTint)
+                    }
+
+                    HStack(spacing: 10) {
+                        KeyValueLine(key: "ブランチ", value: task.branchName)
+                        KeyValueLine(key: "担当", value: task.agent.title)
+                    }
+                    HStack(spacing: 10) {
+                        KeyValueLine(key: "投入", value: Self.dateFormatter.string(from: task.queuedAt))
+                        KeyValueLine(key: "完了", value: task.completedAt.map { Self.dateFormatter.string(from: $0) } ?? "—")
+                    }
+
+                    if !task.scopeHints.isEmpty {
+                        FlowLayout(items: task.scopeHints)
+                    }
+
+                    if let error = task.errorMessage, !error.isEmpty {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.red)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(VQTheme.red.opacity(0.10))
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+
+                    HStack(spacing: 10) {
+                        if let prURL = task.prURL, let url = URL(string: prURL) {
+                            Link(destination: url) {
+                                Label("Draft PR", systemImage: "arrow.up.right.square")
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        Button {
+                            store.cancelSwarmTask(task)
+                        } label: {
+                            Label("個別停止", systemImage: "xmark.circle")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(task.status.isTerminal || store.isLoadingSwarm)
+                        Spacer()
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("ログ")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(VQTheme.secondaryText)
+                        ScrollView {
+                            Text(task.logs.suffix(80).joined(separator: "\n"))
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(VQTheme.ink)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                                .padding(10)
+                        }
+                        .frame(minHeight: 190, maxHeight: 300)
+                        .background(VQTheme.terminal.opacity(0.9))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(VQTheme.hairline, lineWidth: 1)
+                        }
+                    }
+                }
+            } else {
+                Text("左の一覧からタスクを選択してください。")
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(VQTheme.control.opacity(0.28))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
+private extension RemoteSwarmTaskStatus {
+    var swarmTint: Color {
+        switch self {
+        case .complete:
+            VQTheme.green
+        case .failed:
+            VQTheme.red
+        case .cancelled:
+            VQTheme.unavailable
+        case .queued, .preparing:
+            VQTheme.amber
+        case .running, .verifying, .committing, .creatingDraftPR:
+            VQTheme.accent
+        }
+    }
+}
+
 private extension String {
     var vqNilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3180,6 +3609,10 @@ struct ApprovalsView: View {
             }
 
             let pending = store.pendingApprovals()
+            if !pending.isEmpty {
+                ApprovalBatchControls(pending: pending)
+            }
+
             if pending.isEmpty {
                 VQPanel("Queue", systemImage: "checkmark.shield") {
                     Text(L10n.tr("No pending approvals. Risky commands stop here and run from the Mac build after approval."))
@@ -3195,6 +3628,69 @@ struct ApprovalsView: View {
             }
         }
         .accessibilityIdentifier("gate2.screen.approvals")
+    }
+}
+
+private struct ApprovalBatchControls: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let pending: [CommandApproval]
+    @State private var isConfirmingRejectAll = false
+
+    private var highCount: Int {
+        pending.filter { $0.requiresPreApprovalReview }.count
+    }
+
+    private var batchApprovable: [CommandApproval] {
+        pending.filter { !$0.requiresPreApprovalReview }
+    }
+
+    var body: some View {
+        VQPanel(L10n.tr("Approval priority"), systemImage: "line.3.horizontal.decrease.circle") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    StatusPill(title: "\(L10n.tr("High risk")) \(highCount)", tint: VQTheme.red)
+                    StatusPill(title: "\(L10n.tr("Medium risk")) \(batchApprovable.count)", tint: VQTheme.amber)
+                    Spacer(minLength: 0)
+                }
+
+                Text(L10n.tr("High-risk approvals stay in individual review. Medium-risk approvals can be handled together."))
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+
+                HStack(spacing: 10) {
+                    Button {
+                        store.approveBatchEligiblePendingApprovals()
+                    } label: {
+                        Label(L10n.tr("Approve medium risk"), systemImage: "checkmark.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(batchApprovable.isEmpty)
+
+                    Button(role: .destructive) {
+                        isConfirmingRejectAll = true
+                    } label: {
+                        Label(L10n.tr("Reject all"), systemImage: "xmark.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .buttonBorderShape(.roundedRectangle(radius: 8))
+                .font(.footnote.weight(.semibold))
+            }
+        }
+        .confirmationDialog(
+            L10n.tr("Reject all pending approvals?"),
+            isPresented: $isConfirmingRejectAll,
+            titleVisibility: .visible
+        ) {
+            Button(L10n.tr("Reject all"), role: .destructive) {
+                store.rejectPendingApprovals(pending)
+            }
+            Button(L10n.tr("Cancel"), role: .cancel) {}
+        } message: {
+            Text(L10n.tr("This stops every pending run in the approval queue."))
+        }
     }
 }
 

@@ -49,6 +49,14 @@
 "No pending approvals." = "承認待ちはありません。";
 "Risk: High" = "高リスク";
 "Risk: Medium" = "中リスク";
+"Approval priority" = "承認の優先度";
+"High risk" = "高リスク";
+"Medium risk" = "中リスク";
+"High-risk approvals stay in individual review. Medium-risk approvals can be handled together." = "高リスクは個別確認のまま、中リスクはまとめて処理できます。";
+"Approve medium risk" = "中リスクを一括承認";
+"Reject all" = "全件拒否";
+"Reject all pending approvals?" = "承認待ちをすべて拒否しますか？";
+"This stops every pending run in the approval queue." = "承認待ちキュー内のすべての実行を停止します。";
 "One-tap approvals" = "ワンタップ承認";
 "Approve or reject without opening a run." = "実行を開かず承認・拒否できます。";
 "Diff Hunk" = "差分 hunk";

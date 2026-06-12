@@ -49,6 +49,14 @@
 "No pending approvals." = "No pending approvals.";
 "Risk: High" = "Risk: High";
 "Risk: Medium" = "Risk: Medium";
+"Approval priority" = "Approval priority";
+"High risk" = "High risk";
+"Medium risk" = "Medium risk";
+"High-risk approvals stay in individual review. Medium-risk approvals can be handled together." = "High-risk approvals stay in individual review. Medium-risk approvals can be handled together.";
+"Approve medium risk" = "Approve medium risk";
+"Reject all" = "Reject all";
+"Reject all pending approvals?" = "Reject all pending approvals?";
+"This stops every pending run in the approval queue." = "This stops every pending run in the approval queue.";
 "One-tap approvals" = "One-tap approvals";
 "Approve or reject without opening a run." = "Approve or reject without opening a run.";
 "Diff Hunk" = "Diff Hunk";

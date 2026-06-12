@@ -72,10 +72,14 @@ Device(Mac)
 - #33 (`codex/a3-cost-governance`): #A3。Project token/cost budget、Host `/v1/budgets`、Run/司令塔の予算表示、超過 pause/承認再開を追加。
 - #34 (`codex/a4-portfolio-real-data`): #A4。実ルート未設定時の isolated portfolio sample acceptance、`VEQRAL_HOST_HOME`、`includeGitHub`、Discord webhook disable を追加。実資産 roots/registry は未設定。
 - #35 (`codex/a5-auth-onboarding`): #A5。Host auth onboarding API、Devices の認証オンボーディング panel、Keychain readiness marker、`smoke-auth-onboarding` を追加。
-- #36 (`codex/a6-watch-approval`): #A6。Apple Watch 承認 scaffold。`VeqralWatch` target/scheme、Watch HMAC client、Keychain token、approve/reject UI、一言コマンド、complication 用 status view を追加。watchOS 26.5 platform 未インストールのため Watch build/実機/cellular/APNs は partial として `WATCH_APPROVAL_PR_A6.md` に明記。
+- #36 (`codex/a6-watch-approval`): #A6。Apple Watch 承認 scaffold。`VeqralWatch` target/scheme、Watch HMAC client、Keychain token、approve/reject UI、一言コマンド、complication 用 status view を追加。後続で watchOS 26.5 platform を `xcodebuild -downloadPlatform watchOS` で取得済み、`VeqralWatch` の generic watchOS build（`CODE_SIGNING_ALLOWED=NO`）は PASS。実 Watch 配布/cellular/APNs は環境待ち。
 - #37 (`codex/a7-cross-vendor-memory`): #A7。Claude→GPT の cross-vendor #0 を `anthropic/claude-haiku-4-5 -> openai-codex/gpt-5.5` で試行。Claude 側は subscription/login auth のみを許可し、API key fallback では通していない。Hermes-readable Claude/Anthropic login が未復旧のため preflight で停止し、`HERMES_CROSS_VENDOR_PR_A7.md` と `HERMES_MEMORY_INHERITANCE_PR0.md` に未到達理由を記録。
-- Final A integration (`codex/final-a-union-20260602`): #A0〜#A7 を 1 回の union integration で clean `main` に統合。pre-merge / integration / post-main で MacHost build、iOS Simulator build、Mac Catalyst build、Host smokes、#0 verify-memory-inheritance、Gate2 XCUITest、grep/l10n を確認。Gate2 は iPhone Simulator / iPad Simulator とも PASS。Watch build は watchOS 26.5 platform 未インストールのため partial のまま。
+- Final A integration (`codex/final-a-union-20260602`): #A0〜#A7 を 1 回の union integration で clean `main` に統合。pre-merge / integration / post-main で MacHost build、iOS Simulator build、Mac Catalyst build、Host smokes、#0 verify-memory-inheritance、Gate2 XCUITest、grep/l10n を確認。Gate2 は iPhone Simulator / iPad Simulator とも PASS。Watch 実機配布/cellular/APNs は partial のまま。
 - `codex/local-business-redesign-engine`: Web改善営業の「営業ラボ」を More 配下の案件生成ツールとして追加。手動登録/CSV import、`~/.veqral-host/local-business-leads/` JSON repository、公式URL監査、スマホ改善案、提案書HTML/PDF/画像、コピー用メール/DM/電話文案、manual contacted、won lead の Portfolio 昇格、Hermes Desktop handoff note を実装。Google Places discovery は `501` で無効、Google reviews/photos/store info の wholesale persistence なし、自動送信なし。`SALES_LAB_PR.md` に safety と smoke 結果を記録。
+- #38 (`codex/swarm-orchestration-phase1`): Swarm Phase 1。Mac Host に worktree 並列ランナーを追加。task ledger、`git worktree` 隔離、agent kind（Codex/Claude/Hermes/Shell）、verify、commit、optional push/Draft PR、cancel/kill API、`smoke-swarm-runner` を実装。main には触れない。
+- #39 (`codex/swarm-orchestration-phase2`): Swarm Phase 2。SwiftUI に「群制御」画面を追加。タスク登録、状態一覧、進捗/ログ、個別 cancel、全停止キルスイッチ、PR link、Host client models を追加。既存 Run/司令塔基盤を再利用。
+- #40 (`codex/swarm-orchestration-phase3`): Swarm Phase 3。scope hint による同一ファイル/同一モジュールの直列化、Xcode build slot 制限、thermal/load による adaptive slots、衝突/資源 smoke を追加。native Swift/iOS build はコンテナ化せず同時数を絞る前提。
+- #41 (`codex/swarm-orchestration-phase4`): Swarm Phase 4。`POST /v1/swarm/integration/prepare` と `smoke-swarm-integration` を追加。複数 branch を別 worktree の integration branch に直列 merge して verify し、optional Draft PR まで作るが、`main` への merge/push は行わない。Approvals には優先度表示と安全な batch 操作（中リスク一括承認 / 全件拒否、ただし高リスクは個別確認維持）を追加。
 
 ## 未完了・次の手番
 
@@ -86,7 +90,7 @@ Device(Mac)
 4. Gate2（継続）: #A1 XCUITest は iPhone Simulator / iPad Simulator で PASS 済み。実機では `DEVICE_ACCEPTANCE.md` に沿って iPhone/iPad 5項目を確認。
    - 対象: voice input / host telemetry / saved command / Discord 実 webhook / Hermes memory visibility。
    - ユーザーが落ちた項目を報告したら、その項目だけ Draft PR で修正。
-5. #A6 Watch（環境待ち）: Xcode に watchOS 26.5 platform を入れた後、`VeqralWatch` を build し、iOS target への embed、実 Watch/Tailscale/WebSocket/cellular reachability、APNs capability を順に検証する。現 free team では push は不可。
+5. #A6 Watch（環境待ち）: watchOS 26.5 platform は取得済みで `VeqralWatch` generic build は PASS。次は iOS target への embed、実 Watch 配布、Tailscale/WebSocket/cellular reachability、APNs capability を順に検証する。現 free team では push は不可。
 6. 実機検証（継続）
    - QR ペアリング（ユーザー報告ではカメラ認識→connected 済み。#18 端末配布後に念のため再確認）
    - Hermes memory visibility。同 Project で Chat①(モデル A)に記憶→Chat②(モデル B)が継承され、Memory 画面で同じ事実が見えること（Gate1 smoke は PASS 済み）
@@ -104,7 +108,8 @@ Device(Mac)
 7. 司令塔 Host 設定: `VEQRAL_PORTFOLIO_CODE_ROOTS` / `VEQRAL_PORTFOLIO_ENGAGEMENT_ROOTS` / registry repo / Discord webhook を実環境に入れて discover 精度と通知を確認。
 8. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
 9. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
-10. 組織化：worker → skills で精度 → PM を置く → 上に積む（段階的）
+10. Swarm orchestration follow-up: Phase 1〜4 は `codex/salvage-swarm-orchestration` で救出統合。main 着地後、実運用の並列タスク数、Xcode slot、approval batch の安全性を実機で確認し、Phase 5 の PM/委任は将来作業として残す。
+11. 組織化：worker → skills で精度 → PM を置く → 上に積む（段階的）
 
 ## 作業の型（毎回）
 
