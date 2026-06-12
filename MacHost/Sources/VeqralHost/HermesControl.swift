@@ -265,6 +265,7 @@ final class HermesControlStore: Sendable {
         guard let path = presetsPath,
               let content = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
         var presets: [HermesPresetWire] = []
+        var columns: [String: Int]?
         for line in content.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard trimmed.hasPrefix("|") else { continue }
@@ -272,12 +273,19 @@ final class HermesControlStore: Sendable {
                 .trimmingCharacters(in: CharacterSet(charactersIn: "|"))
                 .components(separatedBy: "|")
                 .map { $0.trimmingCharacters(in: .whitespaces) }
-            guard cells.count >= 3 else { continue }
-            let label = cells[0]
-            let model = cells[1]
-            let reasoning = cells[2].lowercased()
+            guard cells.count >= 3, !Self.isMarkdownSeparatorRow(cells) else { continue }
+            if columns == nil {
+                let headerColumns = Self.presetColumnMap(cells)
+                if headerColumns["label"] != nil, headerColumns["model"] != nil, headerColumns["reasoning"] != nil {
+                    columns = headerColumns
+                    continue
+                }
+            }
+            let label = Self.tableCell(cells, columns?["label"] ?? 0)
+            let model = Self.tableCell(cells, columns?["model"] ?? 1)
+            let reasoning = Self.tableCell(cells, columns?["reasoning"] ?? 2).lowercased()
             guard Self.reasoningLevels.contains(reasoning), !label.isEmpty, !model.isEmpty else { continue }
-            let provider = cells.count >= 4 ? cells[3].nilIfBlank : nil
+            let provider = Self.tableCell(cells, columns?["provider"] ?? 3).nilIfBlank
             presets.append(HermesPresetWire(
                 id: "preset-\(presets.count + 1)",
                 label: label,
@@ -288,6 +296,39 @@ final class HermesControlStore: Sendable {
             ))
         }
         return presets
+    }
+
+    private static func presetColumnMap(_ headers: [String]) -> [String: Int] {
+        var result: [String: Int] = [:]
+        for (index, rawHeader) in headers.enumerated() {
+            switch rawHeader.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "label", "ラベル":
+                result["label"] = index
+            case "model", "モデル":
+                result["model"] = index
+            case "provider", "プロバイダ":
+                result["provider"] = index
+            case "reasoning", "reasoning_effort", "reasoning effort", "思考深度":
+                result["reasoning"] = index
+            default:
+                continue
+            }
+        }
+        return result
+    }
+
+    private static func tableCell(_ cells: [String], _ index: Int) -> String {
+        guard index >= 0, index < cells.count else { return "" }
+        return cells[index]
+    }
+
+    private static func isMarkdownSeparatorRow(_ cells: [String]) -> Bool {
+        cells.allSatisfy { cell in
+            let stripped = cell.replacingOccurrences(of: ":", with: "")
+                .replacingOccurrences(of: "-", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            return stripped.isEmpty
+        }
     }
 
     // MARK: Approvals (vault/90_Org/Approvals)

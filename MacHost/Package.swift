@@ -13,6 +13,11 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "VeqralHost",
+            swiftSettings: [
+                // Two source files mean SwiftPM no longer compiles main.swift in
+                // single-file mode; @main requires library parsing.
+                .unsafeFlags(["-parse-as-library"])
+            ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("Network"),
