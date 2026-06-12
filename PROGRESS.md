@@ -20,7 +20,7 @@ This file is the resume point for the clean main baseline. The former stacked Dr
 
 ## Current Item
 
-Clean main baseline. #A0〜#A7 were union-integrated after explicit user GO via `codex/final-a-union-20260602`.
+Clean main baseline. #A0〜#A7 were union-integrated after explicit user GO via `codex/final-a-union-20260602`. Swarm orchestration Phase 1〜4 were salvaged from #38〜#41 into `codex/salvage-swarm-orchestration`.
 
 ## Audit / Differentiation Backlog
 
@@ -34,6 +34,14 @@ Clean main baseline. #A0〜#A7 were union-integrated after explicit user GO via 
 - [x] #A7 クロスベンダー #0 再実走 — Draft PR #37 (`codex/a7-cross-vendor-memory`), blocked before LLM execution because Hermes-readable Claude/Anthropic subscription login is not restored. See `HERMES_CROSS_VENDOR_PR_A7.md`.
 - [x] Final main 統合 — completed after explicit user GO via `codex/final-a-union-20260602`
 
+## Swarm Orchestration Backlog
+
+- [x] Phase 1 worktree 並列ランナー — salvaged from #38, Host worktree isolation, task ledger, scheduler, cancel/kill APIs, verify, commit, optional push/Draft PR, and `smoke-swarm-runner`.
+- [x] Phase 2 群制御ボード UI — salvaged from #39, `群制御` screen, task enqueue/cancel/kill controls, per-agent logs, status overview, and PR links.
+- [x] Phase 3 衝突管理 + 資源適応 — salvaged from #40, scope-hint serialization, Xcode build slot limiting, thermal/load adaptive slots, and expanded parallel smoke coverage.
+- [x] Phase 4 直列・GO 制統合準備 — salvaged from #41, serial integration worktree endpoint/smoke that prepares an integration branch without touching main, plus approval priority/batch controls that keep high-risk review intact.
+- [ ] Phase 5 PM/委任 — future only. Hermes task decomposition/allocation is intentionally not implemented yet.
+
 ## Notes
 
 - #0 report: `HERMES_MEMORY_INHERITANCE_PR0.md`.
@@ -44,6 +52,8 @@ Clean main baseline. #A0〜#A7 were union-integrated after explicit user GO via 
 - #0 backend decision: Hermes can drive ChatGPT subscription login through `openai-codex` when `~/.hermes/auth.json` is available. The smoke links that auth file into the disposable `HERMES_HOME` instead of copying credentials or using API keys. Claude/Anthropic login is not currently usable on this Mac, and local Ollama is not running at `127.0.0.1:11434`.
 - #0 model rationale: same-provider model swap is weaker than cross-vendor Claude/GPT, but it satisfies the accepted A≠B route because both are real monthly-login models and the native memory fact crossed from `gpt-5.5` to `gpt-5.4`. Cross-vendor can be rerun later after Hermes-readable Claude auth is restored.
 - #A7 cross-vendor result: attempted `anthropic/claude-haiku-4-5 -> openai-codex/gpt-5.5` as subscription/login auth only. The verifier did not run the LLMs because the Claude side reports logged out when API-key environment is removed. This is recorded in `HERMES_CROSS_VENDOR_PR_A7.md` and appended to `HERMES_MEMORY_INHERITANCE_PR0.md`; no fake pass was created.
+- Apple Watch platform: watchOS 26.5 was downloaded locally with `xcodebuild -downloadPlatform watchOS`, and `VeqralWatch` generic watchOS build passes with code signing disabled. Real Watch install, iOS app embed, cellular reachability, and APNs remain environment-dependent follow-ups.
+- Swarm orchestration: #38〜#41 were stacked Draft PRs and are superseded by `codex/salvage-swarm-orchestration`. Phase 4 can prepare integration branches and verify them, but it never merges/pushes `main`; final main landing still requires explicit user GO.
 - Gate2 device acceptance checklist is in `DEVICE_ACCEPTANCE.md`. It covers iPhone/iPad tap checks for voice input, host telemetry, saved command drafts, Discord webhook delivery, and Hermes memory visibility. Light instrumentation added in this branch: Discord test notification, telemetry failure message, and Memory last fetch time.
 - #3 reconnect/resume implementation is documented in `WEBSOCKET_RECONNECT_PR3.md`. Manual device smoke is still needed for real network interruption.
 - #4 Discord implementation is documented in `DISCORD_NOTIFICATIONS_PR4.md`. Local Host smoke passed with 4 redacted payloads; external Discord delivery still needs a real webhook URL configured on the paired Host.

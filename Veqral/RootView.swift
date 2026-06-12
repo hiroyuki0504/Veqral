@@ -343,6 +343,8 @@ private func sectionDestination(_ section: AppSection) -> some View {
         CommandCenterRunView()
     case .portfolio:
         PortfolioView()
+    case .swarm:
+        SwarmView()
     case .projects:
         ProjectsView()
     case .devices:
