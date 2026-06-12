@@ -33,24 +33,21 @@
 
 ## 検証結果
 
-- **未実施（この環境は Linux コンテナで Xcode/macOS SDK なし）。** Mac で以下を順に:
-  1. `swift build --package-path MacHost`
-  2. iOS Simulator build / Mac Catalyst build（既存 scheme）
-  3. `git diff --check` / redact grep / production grep（mock/stub なし）
-  4. Host 起動後の手動 smoke:
-     ```sh
-     export VEQRAL_HERMES_VAULT="$HOME/Obsidian/vault"   # 実パスに置換
-     # GET control / approvals は iPhone の Hermes 操作画面から確認が早い
-     ```
-  5. vault 側に `90_Org/Approvals/pending/test.md` と `90_Org/presets.md` を置いて、iPhone→一覧表示→承認→approved/ へ移動 + footer 追記を確認。
-  6. `POST /v1/hermes/control` 適用後、`~/.hermes/config.yaml` の該当キーのみ差分になっていること（`diff config.yaml config.yaml.veqral-bak`）。
+- 2026-06-12 Mac activation pass:
+  1. `swift build --package-path MacHost` PASS.
+  2. iOS Simulator build / Mac Catalyst build / Watch Simulator build PASS with signing disabled.
+  3. `git diff --check` PASS.
+  4. Host `GET /v1/hermes/control` and `GET /v1/hermes/approvals` returned 200 on `127.0.0.1:7878`.
+  5. `POST /v1/hermes/control` with preset `標準` applied only `model.default`, `model.provider`, and `agent.reasoning_effort` in `~/.hermes/config.yaml`.
+  6. Test approval moved from `pending/` to `approved/` and received a `decided_via: veqral` footer.
+- Activation note: the LaunchAgent can start the Host, but this Mac currently blocks LaunchAgent file access to `~/Documents/AI-Hub/vault/90_Org/presets.md`. Until TCC/packaging is fixed, AI-Hub healthcheck keeps the Host alive in screen session `veqral-aihub-host`.
 
 ## 残課題
 
 1. VeqralHostSmoke の Ollama フォールバック（`isLocalOllamaBaseURL` 一式、main.swift:410/468/541/583/600 付近）削除 — smoke の Gate1 動作を Mac で検証しながら別コミットで。
 2. 新 endpoint の smoke（`smoke-hermes-control`）追加と Gate2 XCUITest への「Hermes 操作」シナリオ追加（pbxproj 編集を伴うため Mac 上の Xcode で）。
 3. 承認決定の Discord webhook 通知（既存 Notifier 流用、任意）。
-4. presets の `{{ }}` プレースホルダを実モデル slug へ（vault 側作業）。
+4. iPhone/Watch 実機で More→Hermes 操作、Approvals、Watch preset/approval を確認。
 5. アクティブセッションへの `/model`・`/reasoning` 注入は Hermes 側 API 待ち。現状は新セッション適用のみ（マスタープロンプト Decisions 記録対象）。
 
 ## 実機確認手順
