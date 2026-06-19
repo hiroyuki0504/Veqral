@@ -24,6 +24,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-run-usage" {
             RunUsageSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-aihub-digest-bridge" {
+            AIHubDigestBridgeSmoke.runAndExit()
+        }
         if CommandLine.arguments.dropFirst().first == "smoke-host-telemetry" {
             HostTelemetrySmoke.runAndExit()
         }
@@ -137,6 +140,9 @@ struct HostConfig: Codable, Sendable {
     var discordWebhook: String?
     var portfolioDiscordWebhook: String?
     var projectBudgets: [String: ProjectBudgetLimit]? = nil
+    var aiHubRoot: String? = nil
+    var aiHubConfigPath: String? = nil
+    var aiHubDigestEnabled: Bool? = nil
 
     static var folder: URL {
         if let path = ProcessInfo.processInfo.environment["VEQRAL_HOST_HOME"]?.nilIfBlank {
@@ -231,6 +237,33 @@ struct HostConfig: Codable, Sendable {
 
     var resolvedProjectBudgets: [String: ProjectBudgetLimit] {
         projectBudgets ?? [:]
+    }
+
+    var resolvedAIHubDigestEnabled: Bool {
+        let env = ProcessInfo.processInfo.environment
+        if Self.booleanValue(env["VEQRAL_AIHUB_DIGEST_DISABLED"]) {
+            return false
+        }
+        if let value = env["VEQRAL_AIHUB_DIGEST_ENABLED"]?.nilIfBlank {
+            return Self.booleanValue(value)
+        }
+        if let aiHubDigestEnabled {
+            return aiHubDigestEnabled
+        }
+        return true
+    }
+
+    var resolvedAIHubRoot: String {
+        ProcessInfo.processInfo.environment["VEQRAL_AIHUB_ROOT"]?.nilIfBlank?.expandingTilde
+            ?? aiHubRoot?.nilIfBlank?.expandingTilde
+            ?? "\(NSHomeDirectory())/Documents/AI-Hub/hermes-hub"
+    }
+
+    var resolvedAIHubConfigPath: String {
+        ProcessInfo.processInfo.environment["VEQRAL_AIHUB_CONFIG"]?.nilIfBlank?.expandingTilde
+            ?? ProcessInfo.processInfo.environment["AI_HUB_CONFIG"]?.nilIfBlank?.expandingTilde
+            ?? aiHubConfigPath?.nilIfBlank?.expandingTilde
+            ?? "\(resolvedAIHubRoot)/config/vault.yaml"
     }
 
     private static func booleanValue(_ value: String?) -> Bool {
@@ -937,6 +970,83 @@ enum RunUsageSmoke {
             throw SmokeError("\(label) から usage を抽出できませんでした。")
         }
         return usage
+    }
+}
+
+enum AIHubDigestBridgeSmoke {
+    static func runAndExit() -> Never {
+        Task {
+            do {
+                let note = try await runSmoke()
+                print("PASS: AI-Hub digest bridge wrote \(note.path)")
+                Foundation.exit(0)
+            } catch {
+                print("FAIL: AI-Hub digest bridge smoke failed: \(error.localizedDescription)")
+                Foundation.exit(1)
+            }
+        }
+        dispatchMain()
+    }
+
+    private static func runSmoke() async throws -> URL {
+        do {
+            let aiHubRoot = ProcessInfo.processInfo.environment["VEQRAL_AIHUB_ROOT"]?.nilIfBlank?.expandingTilde
+                ?? "\(NSHomeDirectory())/Documents/AI-Hub/hermes-hub"
+            let script = "\(aiHubRoot)/skills/session-digest/scripts/session_digest.py"
+            guard FileManager.default.fileExists(atPath: script) else {
+                throw SmokeError("session-digest script not found at \(script)")
+            }
+
+            let tempRoot = FileManager.default.temporaryDirectory
+                .appendingPathComponent("VeqralAIHubDigestSmoke-\(UUID().uuidString)", isDirectory: true)
+            let vault = tempRoot.appendingPathComponent("vault", isDirectory: true)
+            let configURL = tempRoot.appendingPathComponent("vault.yaml")
+            let hostHome = tempRoot.appendingPathComponent("host", isDirectory: true)
+            try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: hostHome, withIntermediateDirectories: true)
+            try """
+            vault_path: \(vault.path)
+            sessions_dir: 90_Org/Sessions
+            approvals_pending_dir: 90_Org/Approvals/pending
+            approvals_approved_dir: 90_Org/Approvals/approved
+            approvals_rejected_dir: 90_Org/Approvals/rejected
+            research_outreach_dir: 30_Research/outreach
+            clients_dir: 20_Clients
+            playbooks_dir: 70_Playbooks
+            skills_mirror_dir: 80_Skills_Mirror
+            templates_dir: 99_Templates
+            style_note: 70_Playbooks/style.md
+            vitrine_db_path: \(tempRoot.appendingPathComponent("vitrine.db").path)
+            """.write(to: configURL, atomically: true, encoding: .utf8)
+
+            var config = HostConfig()
+            config.aiHubRoot = aiHubRoot
+            config.aiHubConfigPath = configURL.path
+            setenv("VEQRAL_HOST_HOME", hostHome.path, 1)
+            let state = HostState(config: config)
+            let run = try await state.createRun(
+                prompt: "Verify automatic AI-Hub digest bridge.",
+                workingDirectory: "/Users/hiroyuki/Documents/Veqral",
+                engine: .codex,
+                model: "gpt-5.5"
+            )
+            await state.appendLog(runID: run.id, stream: "pty", message: "implemented bridge")
+            await state.finish(runID: run.id, exitCode: 0)
+
+            let day = AIHubSessionDigestBridge.jstDay(for: Date())
+            let note = vault.appendingPathComponent("90_Org/Sessions/\(day)-session-digest.md")
+            let body = try String(contentsOf: note, encoding: .utf8)
+            let runLogs = await state.replayLogs(runID: run.id)
+            guard body.contains("Verify automatic AI-Hub digest bridge."),
+                  body.contains("veqral"),
+                  body.contains("codex"),
+                  runLogs.contains(where: { $0.stream == "aihub" && $0.message.contains("AI-Hub digest wrote") }) else {
+                throw SmokeError("digest note or host log did not contain expected bridge content")
+            }
+            return note
+        } catch {
+            throw error
+        }
     }
 }
 
@@ -2071,6 +2181,14 @@ actor HostState {
         persistRuns()
         pauseBudgetIfNeeded(after: run)
         appendAudit("finished run id=\(runID) exit=\(exitCode)")
+        let digest = AIHubSessionDigestBridge.record(run: run, logs: logs[runID] ?? [], config: config)
+        if digest.ok {
+            appendAudit("aihub digest run id=\(runID) path=\(digest.path ?? "none")")
+            publish(HostLogEvent(runID: runID, kind: .log, stream: "aihub", message: digest.path.map { "AI-Hub digest wrote \($0)" } ?? digest.message, createdAt: Date(), sessionID: run.sessionID))
+        } else {
+            appendAudit("aihub digest failed run id=\(runID) error=\(digest.message)")
+            publish(HostLogEvent(runID: runID, kind: .log, stream: "aihub", message: "AI-Hub digest failed: \(digest.message)", createdAt: Date(), sessionID: run.sessionID))
+        }
         publish(HostLogEvent(runID: runID, kind: .complete, stream: "host", message: "Exit code: \(exitCode)", createdAt: Date(), sessionID: run.sessionID, exitCode: exitCode))
         notifyDevices(
             run: run,
@@ -3086,6 +3204,9 @@ enum CLIAdapterRegistry {
         Chat: \(run.chatID ?? "new")
         Model/provider selection: \(modelLine.isEmpty ? "Hermes configured default" : modelLine)
         Use Hermes native persistent memory, skills, checkpoints, and session history. Do not create a separate shared memory store for Veqral.
+        AI-Hub continuity:
+        - Before substantial work, read relevant recent notes from \(NSHomeDirectory())/Documents/AI-Hub/vault/90_Org/Sessions and the matching playbook under \(NSHomeDirectory())/Documents/AI-Hub/vault/70_Playbooks when those files are accessible.
+        - Use those notes as continuity across Codex/Claude/Hermes runs; the Mac Host records completed runs back into AI-Hub automatically.
         Follow Veqral's P0 policy:
         - Use --worktree for repository work.
         - Auto-run implementation, tests, commits, branch creation, non-main push, and draft PR creation when appropriate.
@@ -7445,6 +7566,207 @@ enum HistoryLineReader {
             try handle(line)
         } else if bytes >= maxBytes || lines >= maxLines {
             onTruncated?()
+        }
+    }
+}
+
+struct AIHubSessionDigestPayload: Codable {
+    var configPath: String
+    var date: String
+    var taskType: String
+    var agent: String
+    var model: String
+    var reasoning: String
+    var status: String
+    var costUSD: Double?
+    var outcome: String
+    var projects: [String]
+    var tags: [String]
+    var summary: [String]
+    var decisions: [String]
+    var nextActions: [String]
+    var openItems: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case configPath = "config_path"
+        case date
+        case taskType = "task_type"
+        case agent
+        case model
+        case reasoning
+        case status
+        case costUSD = "cost_usd"
+        case outcome
+        case projects
+        case tags
+        case summary
+        case decisions
+        case nextActions = "next_actions"
+        case openItems = "open_items"
+    }
+}
+
+struct AIHubSessionDigestResult {
+    var ok: Bool
+    var message: String
+    var path: String?
+}
+
+enum AIHubSessionDigestBridge {
+    static func record(run: HostRun, logs: [HostLogEvent], config: HostConfig) -> AIHubSessionDigestResult {
+        guard config.resolvedAIHubDigestEnabled else {
+            return AIHubSessionDigestResult(ok: true, message: "AI-Hub digest disabled", path: nil)
+        }
+        guard run.engineOrDefault != .shell else {
+            return AIHubSessionDigestResult(ok: true, message: "Shell runs are not digested", path: nil)
+        }
+        let root = config.resolvedAIHubRoot
+        let configPath = config.resolvedAIHubConfigPath
+        let script = "\(root)/skills/session-digest/scripts/session_digest.py"
+        guard FileManager.default.fileExists(atPath: script) else {
+            return AIHubSessionDigestResult(ok: false, message: "session-digest script not found at \(script)", path: nil)
+        }
+        guard FileManager.default.fileExists(atPath: configPath) else {
+            return AIHubSessionDigestResult(ok: false, message: "AI-Hub config not found at \(configPath)", path: nil)
+        }
+
+        let payload = payload(for: run, logs: logs, configPath: configPath)
+        let payloadURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("veqral-aihub-digest-\(run.id)-\(UUID().uuidString).json")
+        do {
+            let data = try JSONEncoder.pretty.encode(payload)
+            try data.write(to: payloadURL, options: .atomic)
+            defer { try? FileManager.default.removeItem(at: payloadURL) }
+            let output = ProcessRunner.run("/usr/bin/env", ["python3", script, payloadURL.path], workingDirectory: root, timeout: 25)
+            guard output.exitCode == 0 else {
+                return AIHubSessionDigestResult(ok: false, message: Redactor.redact(output.combinedTrimmed), path: nil)
+            }
+            let response = DigestScriptResponse.parse(output.stdout)
+            return AIHubSessionDigestResult(
+                ok: true,
+                message: response?.action.map { "session-digest \($0)" } ?? "session-digest wrote",
+                path: response?.path
+            )
+        } catch {
+            return AIHubSessionDigestResult(ok: false, message: error.localizedDescription, path: nil)
+        }
+    }
+
+    static func jstDay(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private static func payload(for run: HostRun, logs: [HostLogEvent], configPath: String) -> AIHubSessionDigestPayload {
+        let engine = run.engineOrDefault
+        let model = run.model?.nilIfBlank
+            ?? run.usage?.model?.nilIfBlank
+            ?? run.provider?.nilIfBlank
+            ?? ""
+        let cost = run.usage?.actualCostUSD ?? run.usage?.estimatedCostUSD
+        let status = run.exitCode == 0 ? "done" : "failed"
+        let day = jstDay(for: run.completedAt ?? Date())
+        let projectSlug = slug(run.projectID ?? URL(fileURLWithPath: run.workingDirectory).lastPathComponent)
+        let projects = unique([projectSlug, "veqral"].filter { !$0.isEmpty })
+        let usageLine = usageSummary(run.usage)
+        let recent = recentLogSummary(logs)
+        var summary = [
+            "\(engine.title) run completed from Veqral Mac Host.",
+            "Prompt: \(truncate(cleanOneLine(run.prompt), limit: 360))",
+            "Working directory: \(run.workingDirectory)"
+        ]
+        if let sessionID = run.sessionID?.nilIfBlank ?? run.resumeSessionID?.nilIfBlank {
+            summary.append("Session: \(sessionID)")
+        }
+        if let usageLine {
+            summary.append(usageLine)
+        }
+        summary.append(contentsOf: recent.map { "Log: \($0)" })
+
+        let outcome = run.exitCode == 0 ? "Run completed successfully" : "Run failed with exit code \(run.exitCode ?? -1)"
+        let openItems = run.exitCode == 0 ? [] : ["Review the Veqral run logs and fix the failing command."]
+
+        return AIHubSessionDigestPayload(
+            configPath: configPath,
+            date: day,
+            taskType: "dev",
+            agent: "Veqral \(engine.title)",
+            model: model,
+            reasoning: "",
+            status: status,
+            costUSD: cost,
+            outcome: outcome,
+            projects: projects,
+            tags: unique(["veqral-run", "auto-digest", engine.rawValue]),
+            summary: summary,
+            decisions: [],
+            nextActions: run.exitCode == 0 ? ["Use this Obsidian session note as context before related follow-up work."] : ["Inspect the failed run before retrying."],
+            openItems: openItems
+        )
+    }
+
+    private static func usageSummary(_ usage: RunUsage?) -> String? {
+        guard let usage = usage?.normalized else { return nil }
+        var parts: [String] = []
+        if let input = usage.inputTokens { parts.append("input \(input)") }
+        if let output = usage.outputTokens { parts.append("output \(output)") }
+        if let reasoning = usage.reasoningTokens { parts.append("reasoning \(reasoning)") }
+        if let total = usage.totalTokens { parts.append("total \(total)") }
+        if let cost = usage.actualCostUSD ?? usage.estimatedCostUSD {
+            parts.append(String(format: "cost $%.6f", cost))
+        }
+        guard !parts.isEmpty else { return nil }
+        return "Usage: \(parts.joined(separator: ", "))"
+    }
+
+    private static func recentLogSummary(_ logs: [HostLogEvent]) -> [String] {
+        logs
+            .suffix(40)
+            .map { cleanOneLine($0.message) }
+            .filter { !$0.isEmpty }
+            .suffix(8)
+            .map { truncate($0, limit: 220) }
+    }
+
+    private static func cleanOneLine(_ value: String) -> String {
+        Redactor.redact(value)
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func truncate(_ value: String, limit: Int) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit - 1)) + "…"
+    }
+
+    private static func unique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { seen.insert($0).inserted }
+    }
+
+    private static func slug(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let mapped = value.lowercased().unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        return String(mapped).trimmingCharacters(in: CharacterSet(charactersIn: "-")).nilIfBlank ?? "project"
+    }
+
+    private struct DigestScriptResponse: Decodable {
+        var ok: Bool?
+        var action: String?
+        var path: String?
+
+        static func parse(_ text: String) -> DigestScriptResponse? {
+            guard let data = text.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode(DigestScriptResponse.self, from: data)
         }
     }
 }
