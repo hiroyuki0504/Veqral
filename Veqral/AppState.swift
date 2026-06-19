@@ -5370,6 +5370,8 @@ struct HermesControlPreset: Codable, Identifiable, Equatable {
     var label: String
     var model: String
     var provider: String?
+    var baseURL: String?
+    var contextLength: String?
     var reasoning: String
     var isPlaceholder: Bool
 }
@@ -5380,6 +5382,8 @@ struct HermesControlStatus: Codable {
     var vaultPath: String?
     var provider: String?
     var model: String?
+    var baseURL: String?
+    var contextLength: String?
     var reasoning: String?
     var presets: [HermesControlPreset]
     var pendingApprovalCount: Int
@@ -5390,6 +5394,8 @@ struct HermesControlUpdate: Codable {
     var presetID: String?
     var provider: String?
     var model: String?
+    var baseURL: String?
+    var contextLength: String?
     var reasoning: String?
 }
 

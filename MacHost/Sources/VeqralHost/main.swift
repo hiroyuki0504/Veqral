@@ -42,6 +42,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-auth-onboarding" {
             AuthOnboardingSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-hermes-control" {
+            HermesControlSmoke.runAndExit()
+        }
         if SalesLabSmoke.runIfRequested(arguments: Array(CommandLine.arguments.dropFirst())) {
             Foundation.exit(0)
         }
@@ -859,6 +862,68 @@ enum ProjectMemorySmoke {
             Foundation.exit(0)
         } catch {
             print("FAIL: Project memory smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+}
+
+enum HermesControlSmoke {
+    static func runAndExit() -> Never {
+        do {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("veqral-hermes-control-smoke-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let vault = root.appendingPathComponent("vault", isDirectory: true)
+            let presets = vault.appendingPathComponent("90_Org/presets.md")
+            let approvals = vault.appendingPathComponent("90_Org/Approvals/pending", isDirectory: true)
+            try FileManager.default.createDirectory(at: presets.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: approvals, withIntermediateDirectories: true)
+            try """
+            | ラベル | Provider | Model | Base URL | Context Length | 思考深度 | 用途 |
+            | --- | --- | --- | --- | --- | --- | --- |
+            | local-fast | custom | qwen3:8b | http://127.0.0.1:11434/v1 | 65536 | low | local |
+            | 標準 | openai-codex | gpt-5.5 |  |  | medium | cloud |
+            """.write(to: presets, atomically: true, encoding: .utf8)
+
+            let config = root.appendingPathComponent("config.yaml")
+            try """
+            model:
+              provider: openai-codex
+              default: gpt-5.5
+              base_url: ""
+              context_length: ""
+              ollama_num_ctx: ""
+            agent:
+              reasoning_effort: medium
+            """.write(to: config, atomically: true, encoding: .utf8)
+
+            let store = HermesControlStore(environment: [
+                "VEQRAL_HERMES_CONFIG": config.path,
+                "VEQRAL_HERMES_VAULT": vault.path,
+            ])
+            let initial = try store.status()
+            guard initial.presets.count == 2 else {
+                throw SmokeError("Expected 2 presets, got \(initial.presets.count)")
+            }
+            guard initial.pendingApprovalCount == 0 else {
+                throw SmokeError("Expected empty approval queue")
+            }
+
+            _ = try store.update(HermesControlUpdateRequest(presetID: "preset-1", provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil))
+            let local = try store.status()
+            guard local.provider == "custom", local.model == "qwen3:8b", local.baseURL == "http://127.0.0.1:11434/v1", local.contextLength == "65536", local.reasoning == "low" else {
+                throw SmokeError("Local preset did not apply provider/model/baseURL/contextLength/reasoning")
+            }
+
+            _ = try store.update(HermesControlUpdateRequest(presetID: "preset-2", provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil))
+            let cloud = try store.status()
+            guard cloud.provider == "openai-codex", cloud.model == "gpt-5.5", cloud.baseURL == nil, cloud.contextLength == nil, cloud.reasoning == "medium" else {
+                throw SmokeError("Cloud preset did not clear baseURL/contextLength and restore provider/model/reasoning")
+            }
+
+            print("PASS: Hermes control smoke provider=\(cloud.provider ?? "") model=\(cloud.model ?? "") baseURL=\(cloud.baseURL ?? "provider-default")")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Hermes control smoke failed: \(error.localizedDescription)")
             Foundation.exit(1)
         }
     }
