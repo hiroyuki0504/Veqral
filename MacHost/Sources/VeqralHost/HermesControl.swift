@@ -7,6 +7,8 @@ struct HermesPresetWire: Codable, Sendable, Equatable {
     var label: String
     var model: String
     var provider: String?
+    var baseURL: String?
+    var contextLength: String?
     var reasoning: String
     var isPlaceholder: Bool
 }
@@ -17,6 +19,8 @@ struct HermesControlStatusWire: Codable, Sendable {
     var vaultPath: String?
     var provider: String?
     var model: String?
+    var baseURL: String?
+    var contextLength: String?
     var reasoning: String?
     var presets: [HermesPresetWire]
     var pendingApprovalCount: Int
@@ -27,6 +31,8 @@ struct HermesControlUpdateRequest: Codable, Sendable {
     var presetID: String?
     var provider: String?
     var model: String?
+    var baseURL: String?
+    var contextLength: String?
     var reasoning: String?
 }
 
@@ -80,7 +86,7 @@ final class HermesControlStore: Sendable {
 
     func status() throws -> HermesControlStatusWire {
         let configured = FileManager.default.fileExists(atPath: configPath)
-        let selection = configured ? currentSelection() : (provider: nil, model: nil, reasoning: nil)
+        let selection = configured ? currentSelection() : (provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil)
         let presets = loadPresets()
         var note: String?
         if !configured {
@@ -94,6 +100,8 @@ final class HermesControlStore: Sendable {
             vaultPath: vaultRoot,
             provider: selection.provider,
             model: selection.model,
+            baseURL: selection.baseURL,
+            contextLength: selection.contextLength,
             reasoning: selection.reasoning ?? (configured ? "medium" : nil),
             presets: presets,
             pendingApprovalCount: (try? listPendingFiles().count) ?? 0,
@@ -106,6 +114,8 @@ final class HermesControlStore: Sendable {
     func update(_ request: HermesControlUpdateRequest) throws -> HermesControlUpdateResponse {
         var provider = request.provider?.nilIfBlank
         var model = request.model?.nilIfBlank
+        var baseURL = request.baseURL
+        var contextLength = request.contextLength
         var reasoning = request.reasoning?.nilIfBlank
 
         if let presetID = request.presetID?.nilIfBlank {
@@ -117,14 +127,16 @@ final class HermesControlStore: Sendable {
             }
             model = preset.model
             provider = preset.provider ?? provider
+            baseURL = preset.baseURL ?? ""
+            contextLength = preset.contextLength ?? ""
             reasoning = preset.reasoning
         }
 
         if let reasoning, !Self.reasoningLevels.contains(reasoning) {
             throw HostError.badRequest("reasoning は \(Self.reasoningLevels.joined(separator: "/")) のいずれかにしてください。")
         }
-        guard model != nil || provider != nil || reasoning != nil else {
-            throw HostError.badRequest("変更内容が空です。presetID か model/provider/reasoning を指定してください。")
+        guard model != nil || provider != nil || baseURL != nil || contextLength != nil || reasoning != nil else {
+            throw HostError.badRequest("変更内容が空です。presetID か model/provider/baseURL/contextLength/reasoning を指定してください。")
         }
         guard FileManager.default.fileExists(atPath: configPath) else {
             throw HostError.badRequest("~/.hermes/config.yaml が見つかりません。先に hermes setup を実行してください。")
@@ -142,6 +154,15 @@ final class HermesControlStore: Sendable {
         if let provider {
             lines = Self.settingTopLevelKey(lines, section: "model", key: "provider", value: provider)
             applied.append("provider=\(provider)")
+        }
+        if let baseURL {
+            lines = Self.settingTopLevelKey(lines, section: "model", key: "base_url", value: baseURL)
+            applied.append(baseURL.nilIfBlank == nil ? "base_url=cleared" : "base_url=\(baseURL)")
+        }
+        if let contextLength {
+            lines = Self.settingTopLevelKey(lines, section: "model", key: "context_length", value: contextLength)
+            lines = Self.settingTopLevelKey(lines, section: "model", key: "ollama_num_ctx", value: contextLength)
+            applied.append(contextLength.nilIfBlank == nil ? "context_length=cleared" : "context_length=\(contextLength)")
         }
         if let reasoning {
             lines = Self.settingTopLevelKey(lines, section: "agent", key: "reasoning_effort", value: reasoning)
@@ -214,14 +235,16 @@ final class HermesControlStore: Sendable {
         return lines
     }
 
-    /// Reads the current provider / model / reasoning from config.yaml with
+    /// Reads the current provider / model / base URL / context length / reasoning from config.yaml with
     /// the same section-aware line scan used for writing.
-    func currentSelection() -> (provider: String?, model: String?, reasoning: String?) {
+    func currentSelection() -> (provider: String?, model: String?, baseURL: String?, contextLength: String?, reasoning: String?) {
         guard let content = try? String(contentsOfFile: configPath, encoding: .utf8) else {
-            return (nil, nil, nil)
+            return (nil, nil, nil, nil, nil)
         }
         var provider: String?
         var model: String?
+        var baseURL: String?
+        var contextLength: String?
         var reasoning: String?
         var section: String?
         for line in content.components(separatedBy: "\n") {
@@ -242,11 +265,13 @@ final class HermesControlStore: Sendable {
             switch (section, key) {
             case ("model", "default"): model = value ?? model
             case ("model", "provider"): provider = value ?? provider
+            case ("model", "base_url"): baseURL = value
+            case ("model", "context_length"): contextLength = value
             case ("agent", "reasoning_effort"): reasoning = value ?? reasoning
             default: break
             }
         }
-        return (provider, model, reasoning)
+        return (provider, model, baseURL, contextLength, reasoning)
     }
 
     private static func unquoted(_ value: String) -> String {
@@ -254,6 +279,8 @@ final class HermesControlStore: Sendable {
         if let comment = value.range(of: " #") { value = String(value[..<comment.lowerBound]) }
         value = value.trimmingCharacters(in: .whitespaces)
         if value.count >= 2, value.hasPrefix("\""), value.hasSuffix("\"") {
+            value = String(value.dropFirst().dropLast())
+        } else if value.count >= 2, value.hasPrefix("'"), value.hasSuffix("'") {
             value = String(value.dropFirst().dropLast())
         }
         return value
@@ -286,11 +313,15 @@ final class HermesControlStore: Sendable {
             let reasoning = Self.tableCell(cells, columns?["reasoning"] ?? 2).lowercased()
             guard Self.reasoningLevels.contains(reasoning), !label.isEmpty, !model.isEmpty else { continue }
             let provider = Self.tableCell(cells, columns?["provider"] ?? 3).nilIfBlank
+            let baseURL = Self.tableCell(cells, columns?["baseURL"] ?? -1).nilIfBlank
+            let contextLength = Self.tableCell(cells, columns?["contextLength"] ?? -1).nilIfBlank
             presets.append(HermesPresetWire(
                 id: "preset-\(presets.count + 1)",
                 label: label,
                 model: model,
                 provider: provider.flatMap { $0.contains("{{") ? nil : $0 },
+                baseURL: baseURL.flatMap { $0.contains("{{") ? nil : $0 },
+                contextLength: contextLength.flatMap { $0.contains("{{") ? nil : $0 },
                 reasoning: reasoning,
                 isPlaceholder: model.contains("{{") || model.contains("}}")
             ))
@@ -308,6 +339,10 @@ final class HermesControlStore: Sendable {
                 result["model"] = index
             case "provider", "プロバイダ":
                 result["provider"] = index
+            case "base url", "base_url", "baseurl":
+                result["baseURL"] = index
+            case "context length", "context_length", "contextlength":
+                result["contextLength"] = index
             case "reasoning", "reasoning_effort", "reasoning effort", "思考深度":
                 result["reasoning"] = index
             default:

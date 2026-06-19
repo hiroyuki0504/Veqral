@@ -3890,6 +3890,8 @@ struct HermesControlView: View {
     @State private var status: HermesControlStatus?
     @State private var modelDraft = ""
     @State private var providerDraft = ""
+    @State private var baseURLDraft = ""
+    @State private var contextLengthDraft = ""
     @State private var reasoningDraft = "medium"
     @State private var message = ""
     @State private var isWorking = false
@@ -3901,6 +3903,8 @@ struct HermesControlView: View {
                     if let status {
                         HermesStatusLine(label: "モデル", value: status.model ?? "未設定")
                         HermesStatusLine(label: "プロバイダ", value: status.provider ?? "auto")
+                        HermesStatusLine(label: "Base URL", value: status.baseURL?.isEmpty == false ? status.baseURL! : "provider default")
+                        HermesStatusLine(label: "Context", value: status.contextLength?.isEmpty == false ? status.contextLength! : "provider default")
                         HermesStatusLine(label: "思考深度", value: status.reasoning ?? "medium")
                         if let note = status.note {
                             Text(note)
@@ -3929,7 +3933,7 @@ struct HermesControlView: View {
                         HStack(spacing: 10) {
                             ForEach(presets.prefix(3)) { preset in
                                 Button {
-                                    Task { await apply(HermesControlUpdate(presetID: preset.id, provider: nil, model: nil, reasoning: nil)) }
+                                    Task { await apply(HermesControlUpdate(presetID: preset.id, provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil)) }
                                 } label: {
                                     VStack(spacing: 2) {
                                         Text(preset.label)
@@ -3969,6 +3973,15 @@ struct HermesControlView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .accessibilityIdentifier("hermes.field.provider")
+                    TextField("Base URL（local: http://127.0.0.1:11434/v1 / provider既定に戻すなら空欄で適用）", text: $baseURLDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("hermes.field.baseURL")
+                    TextField("Context Length（local: 65536 / provider既定に戻すなら空欄で適用）", text: $contextLengthDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.numberPad)
+                        .accessibilityIdentifier("hermes.field.contextLength")
                     Picker("思考深度", selection: $reasoningDraft) {
                         ForEach(CommandCenterStore.hermesReasoningLevels, id: \.self) { level in
                             Text(level).tag(level)
@@ -3982,6 +3995,8 @@ struct HermesControlView: View {
                                 presetID: nil,
                                 provider: providerDraft.trimmingCharacters(in: .whitespaces).isEmpty ? nil : providerDraft.trimmingCharacters(in: .whitespaces),
                                 model: modelDraft.trimmingCharacters(in: .whitespaces).isEmpty ? nil : modelDraft.trimmingCharacters(in: .whitespaces),
+                                baseURL: baseURLDraft.trimmingCharacters(in: .whitespaces),
+                                contextLength: contextLengthDraft.trimmingCharacters(in: .whitespaces),
                                 reasoning: reasoningDraft
                             ))
                         }
@@ -4026,6 +4041,8 @@ struct HermesControlView: View {
             self.status = status
             modelDraft = status.model ?? ""
             providerDraft = status.provider ?? ""
+            baseURLDraft = status.baseURL ?? ""
+            contextLengthDraft = status.contextLength ?? ""
             if let reasoning = status.reasoning, CommandCenterStore.hermesReasoningLevels.contains(reasoning) {
                 reasoningDraft = reasoning
             }
@@ -4043,6 +4060,8 @@ struct HermesControlView: View {
             status = result.status
             modelDraft = result.status.model ?? modelDraft
             providerDraft = result.status.provider ?? providerDraft
+            baseURLDraft = result.status.baseURL ?? ""
+            contextLengthDraft = result.status.contextLength ?? ""
             if let reasoning = result.status.reasoning { reasoningDraft = reasoning }
             message = "\(result.applied.joined(separator: " / "))。\(result.note)"
         } catch {

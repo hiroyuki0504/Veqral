@@ -39,6 +39,8 @@ struct WatchHermesPreset: Codable, Identifiable, Equatable {
     var label: String
     var model: String
     var provider: String?
+    var baseURL: String?
+    var contextLength: String?
     var reasoning: String
     var isPlaceholder: Bool
 }
@@ -46,6 +48,8 @@ struct WatchHermesPreset: Codable, Identifiable, Equatable {
 struct WatchHermesStatus: Codable {
     var configured: Bool
     var model: String?
+    var baseURL: String?
+    var contextLength: String?
     var reasoning: String?
     var presets: [WatchHermesPreset]
     var pendingApprovalCount: Int
