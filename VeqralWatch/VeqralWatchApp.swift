@@ -38,6 +38,8 @@ struct WatchHermesPreset: Codable, Identifiable, Equatable {
     var id: String
     var label: String
     var model: String
+    var policy: String?
+    var resolvedModel: String?
     var provider: String?
     var baseURL: String?
     var contextLength: String?
@@ -184,7 +186,7 @@ final class WatchCommandStore: ObservableObject {
         Task { @MainActor in
             do {
                 try await client.applyHermesPreset(presetID: preset.id)
-                hermesModel = preset.model
+                hermesModel = preset.resolvedModel ?? preset.model
                 hermesReasoning = preset.reasoning
                 message = "プリセット「\(preset.label)」を適用しました。新セッションから有効。"
             } catch {
@@ -264,9 +266,12 @@ struct WatchCommandView: View {
                             HStack {
                                 Text(preset.label)
                                 Spacer()
-                                Text(preset.reasoning)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .trailing, spacing: 1) {
+                                    Text(preset.policy ?? preset.model)
+                                    Text(preset.reasoning)
+                                }
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                             }
                         }
                         .disabled(preset.isPlaceholder || store.isLoading)

@@ -11,8 +11,12 @@ let package = Package(
         .executable(name: "VeqralHostSmoke", targets: ["VeqralHostSmoke"])
     ],
     targets: [
+        .target(
+            name: "VeqralShared"
+        ),
         .executableTarget(
             name: "VeqralHost",
+            dependencies: ["VeqralShared"],
             swiftSettings: [
                 // Two source files mean SwiftPM no longer compiles main.swift in
                 // single-file mode; @main requires library parsing.
@@ -26,6 +30,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "VeqralHostSmoke"
+        ),
+        .testTarget(
+            name: "VeqralSharedTests",
+            dependencies: ["VeqralShared"]
         )
     ]
 )

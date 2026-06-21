@@ -2888,22 +2888,7 @@ final class CommandCenterStore: ObservableObject {
     }
 
     private static func redactedHandoffText(_ text: String, limit: Int) -> String {
-        var output = text
-        let replacements: [(String, String)] = [
-            (#"(?i)authorization\s*[:=]\s*bearer\s+[^\s'"]+"#, "Authorization: [REDACTED]"),
-            (#"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*['"]?[^'"\s]+"#, "$1=[REDACTED]"),
-            (#"(?i)(OPENAI_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY|VEQRAL_DISCORD_WEBHOOK)\s*=\s*[^\s]+"#, "$1=[REDACTED]"),
-            (#"(?i)sk-[A-Za-z0-9_\-]{12,}"#, "[REDACTED_KEY]")
-        ]
-        for (pattern, replacement) in replacements {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            let range = NSRange(output.startIndex..<output.endIndex, in: output)
-            output = regex.stringByReplacingMatches(in: output, range: range, withTemplate: replacement)
-        }
-        if output.count > limit {
-            return String(output.prefix(limit)) + "\n...（省略）"
-        }
-        return output
+        VeqralRedactor.redact(text, limit: limit)
     }
 
     private static let shortDateTimeFormatter: DateFormatter = {
@@ -5369,6 +5354,8 @@ struct HermesControlPreset: Codable, Identifiable, Equatable {
     var id: String
     var label: String
     var model: String
+    var policy: String?
+    var resolvedModel: String?
     var provider: String?
     var baseURL: String?
     var contextLength: String?

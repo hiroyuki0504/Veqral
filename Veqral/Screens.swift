@@ -3901,7 +3901,7 @@ struct HermesControlView: View {
             VQPanel("現在の設定", systemImage: "cpu") {
                 VStack(alignment: .leading, spacing: 8) {
                     if let status {
-                        HermesStatusLine(label: "モデル", value: status.model ?? "未設定")
+                        HermesStatusLine(label: "実モデル", value: status.model ?? "未設定")
                         HermesStatusLine(label: "プロバイダ", value: status.provider ?? "auto")
                         HermesStatusLine(label: "Base URL", value: status.baseURL?.isEmpty == false ? status.baseURL! : "provider default")
                         HermesStatusLine(label: "Context", value: status.contextLength?.isEmpty == false ? status.contextLength! : "provider default")
@@ -3938,6 +3938,10 @@ struct HermesControlView: View {
                                     VStack(spacing: 2) {
                                         Text(preset.label)
                                             .font(.subheadline.weight(.semibold))
+                                        Text(preset.policy ?? preset.model)
+                                            .font(.caption2)
+                                            .foregroundStyle(VQTheme.secondaryText)
+                                            .lineLimit(1)
                                         Text(preset.reasoning)
                                             .font(.caption2)
                                             .foregroundStyle(VQTheme.secondaryText)
@@ -3950,12 +3954,12 @@ struct HermesControlView: View {
                             }
                         }
                         if presets.contains(where: \.isPlaceholder) {
-                            Text("{{ }} のままのプリセットは vault の 90_Org/presets.md を編集すると有効になります。")
+                            Text("{{ }} のままのプリセットは vault の 90_Org/presets.md を編集すると有効になります。Policy プリセットは AI-Hub が実モデルへ解決します。")
                                 .font(.caption)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
                     } else {
-                        Text("プリセット未定義。vault の 90_Org/presets.md に | ラベル | モデル | 思考深度 | の表を作るとここに並びます。")
+                        Text("プリセット未定義。vault の 90_Org/presets.md に | ラベル | Policy | 思考深度 | の表を作るとここに並びます。")
                             .font(.caption)
                             .foregroundStyle(VQTheme.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
@@ -3965,7 +3969,7 @@ struct HermesControlView: View {
 
             VQPanel("手動設定", systemImage: "wrench.and.screwdriver") {
                 VStack(alignment: .leading, spacing: 10) {
-                    TextField("モデル（例: anthropic/claude-opus-4.6）", text: $modelDraft)
+                    TextField("実モデル（緊急時のみ。通常はプリセット方針を使用）", text: $modelDraft)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .accessibilityIdentifier("hermes.field.model")

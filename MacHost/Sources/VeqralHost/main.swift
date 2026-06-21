@@ -4,6 +4,7 @@ import Foundation
 import Network
 import Security
 import Darwin
+import VeqralShared
 
 private let serviceName = "dev.hiroyuki.veqral.host"
 private let serverGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -873,15 +874,30 @@ enum HermesControlSmoke {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("veqral-hermes-control-smoke-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: root) }
             let vault = root.appendingPathComponent("vault", isDirectory: true)
+            let aiHubRoot = root.appendingPathComponent("hermes-hub", isDirectory: true)
             let presets = vault.appendingPathComponent("90_Org/presets.md")
             let approvals = vault.appendingPathComponent("90_Org/Approvals/pending", isDirectory: true)
             try FileManager.default.createDirectory(at: presets.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: approvals, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: aiHubRoot.appendingPathComponent("scripts", isDirectory: true), withIntermediateDirectories: true)
+            let resolver = aiHubRoot.appendingPathComponent("scripts/hermes-monthly-switch")
             try """
-            | ラベル | Provider | Model | Base URL | Context Length | 思考深度 | 用途 |
-            | --- | --- | --- | --- | --- | --- | --- |
-            | local-fast | custom | qwen3:8b | http://127.0.0.1:11434/v1 | 65536 | low | local |
-            | 標準 | openai-codex | gpt-5.5 |  |  | medium | cloud |
+            import json
+            print(json.dumps({
+                "policy": "local-fast",
+                "provider": "custom",
+                "model": "qwen3:8b",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "context_length": "4096",
+                "reasoning": "low"
+            }))
+            """.write(to: resolver, atomically: true, encoding: .utf8)
+            try """
+            | ラベル | Policy | Provider | Model | Base URL | Context Length | 思考深度 | 用途 |
+            | --- | --- | --- | --- | --- | --- | --- | --- |
+            | local-fast |  | custom | qwen3:8b | http://127.0.0.1:11434/v1 | 65536 | low | local |
+            | 標準 |  | openai-codex | gpt-5.5 |  |  | medium | cloud |
+            | 方針local | local-fast |  | policy:local-fast |  |  | medium | policy |
             """.write(to: presets, atomically: true, encoding: .utf8)
 
             let config = root.appendingPathComponent("config.yaml")
@@ -899,10 +915,11 @@ enum HermesControlSmoke {
             let store = HermesControlStore(environment: [
                 "VEQRAL_HERMES_CONFIG": config.path,
                 "VEQRAL_HERMES_VAULT": vault.path,
+                "VEQRAL_AIHUB_ROOT": aiHubRoot.path,
             ])
             let initial = try store.status()
-            guard initial.presets.count == 2 else {
-                throw SmokeError("Expected 2 presets, got \(initial.presets.count)")
+            guard initial.presets.count == 3 else {
+                throw SmokeError("Expected 3 presets, got \(initial.presets.count)")
             }
             guard initial.pendingApprovalCount == 0 else {
                 throw SmokeError("Expected empty approval queue")
@@ -918,6 +935,12 @@ enum HermesControlSmoke {
             let cloud = try store.status()
             guard cloud.provider == "openai-codex", cloud.model == "gpt-5.5", cloud.baseURL == nil, cloud.contextLength == nil, cloud.reasoning == "medium" else {
                 throw SmokeError("Cloud preset did not clear baseURL/contextLength and restore provider/model/reasoning")
+            }
+
+            _ = try store.update(HermesControlUpdateRequest(presetID: "preset-3", provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil))
+            let policy = try store.status()
+            guard policy.provider == "custom", policy.model == "qwen3:8b", policy.baseURL == "http://127.0.0.1:11434/v1", policy.contextLength == "4096", policy.reasoning == "low" else {
+                throw SmokeError("Policy preset did not resolve through AI-Hub resolver")
             }
 
             print("PASS: Hermes control smoke provider=\(cloud.provider ?? "") model=\(cloud.model ?? "") baseURL=\(cloud.baseURL ?? "provider-default")")
@@ -8589,21 +8612,7 @@ enum RiskClassifier {
 
 enum Redactor {
     static func redact(_ text: String) -> String {
-        var output = text
-        let patterns = [
-            (#"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]+"#, "$1[REDACTED]"),
-            (#"(?i)(token|api[_-]?key|secret|password)\s*[:=]\s*['"]?[^'"\s]+"#, "$1=[REDACTED]"),
-            (#"https://discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9._\-]+"#, "[REDACTED_DISCORD_WEBHOOK]"),
-            (#"(?i)xox[baprs]-[A-Za-z0-9-]+"#, "[REDACTED_SLACK_TOKEN]"),
-            (#"(?i)sk-or-[A-Za-z0-9_-]{12,}"#, "[REDACTED_OPENROUTER_KEY]"),
-            (#"(?i)sk-[A-Za-z0-9]{12,}"#, "[REDACTED]"),
-            (#"(?i)gh[opusr]_[A-Za-z0-9_]+"#, "[REDACTED]"),
-            (#"(?i)github_pat_[A-Za-z0-9_]+"#, "[REDACTED]")
-        ]
-        for (pattern, replacement) in patterns {
-            output = output.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
-        }
-        return output
+        VeqralRedactor.redact(text)
     }
 }
 
