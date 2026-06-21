@@ -6,6 +6,8 @@ struct HermesPresetWire: Codable, Sendable, Equatable {
     var id: String
     var label: String
     var model: String
+    var policy: String?
+    var resolvedModel: String?
     var provider: String?
     var baseURL: String?
     var contextLength: String?
@@ -76,10 +78,12 @@ final class HermesControlStore: Sendable {
 
     private let configPath: String
     private let vaultRoot: String?
+    private let aiHubRoot: String
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         configPath = (environment["VEQRAL_HERMES_CONFIG"]?.nilIfBlank ?? "~/.hermes/config.yaml").expandingTilde
         vaultRoot = environment["VEQRAL_HERMES_VAULT"]?.nilIfBlank?.expandingTilde
+        aiHubRoot = (environment["VEQRAL_AIHUB_ROOT"]?.nilIfBlank ?? "~/Documents/AI-Hub/hermes-hub").expandingTilde
     }
 
     // MARK: Status
@@ -125,11 +129,20 @@ final class HermesControlStore: Sendable {
             guard !preset.isPlaceholder else {
                 throw HostError.badRequest("プリセット「\(preset.label)」のモデルがプレースホルダのままです。vault の presets.md を編集してください。")
             }
-            model = preset.model
-            provider = preset.provider ?? provider
-            baseURL = preset.baseURL ?? ""
-            contextLength = preset.contextLength ?? ""
-            reasoning = preset.reasoning
+            if let policy = preset.policy?.nilIfBlank {
+                let resolved = try resolvePolicy(policy)
+                model = resolved.model
+                provider = resolved.provider.nilIfBlank ?? preset.provider ?? provider
+                baseURL = resolved.baseURL
+                contextLength = resolved.contextLength
+                reasoning = resolved.reasoning.nilIfBlank ?? preset.reasoning
+            } else {
+                model = preset.model
+                provider = preset.provider ?? provider
+                baseURL = preset.baseURL ?? ""
+                contextLength = preset.contextLength ?? ""
+                reasoning = preset.reasoning
+            }
         }
 
         if let reasoning, !Self.reasoningLevels.contains(reasoning) {
@@ -286,6 +299,50 @@ final class HermesControlStore: Sendable {
         return value
     }
 
+    // MARK: Policy resolver (AI-Hub)
+
+    private struct HermesResolvedPolicyWire: Decodable {
+        var policy: String
+        var provider: String
+        var model: String
+        var baseURL: String
+        var contextLength: String
+        var reasoning: String
+
+        enum CodingKeys: String, CodingKey {
+            case policy
+            case provider
+            case model
+            case baseURL = "base_url"
+            case contextLength = "context_length"
+            case reasoning
+        }
+    }
+
+    private func resolvePolicy(_ policy: String) throws -> HermesResolvedPolicyWire {
+        let script = URL(fileURLWithPath: aiHubRoot)
+            .appendingPathComponent("scripts")
+            .appendingPathComponent("hermes-monthly-switch")
+            .path
+        guard FileManager.default.fileExists(atPath: script) else {
+            throw HostError.badRequest("AI-Hub model policy resolver が見つかりません: \(script)")
+        }
+        let output = ProcessRunner.run(
+            "/usr/bin/env",
+            ["python3", script, "--config", configPath, "resolve", policy],
+            workingDirectory: aiHubRoot,
+            timeout: 12
+        )
+        guard output.exitCode == 0 else {
+            throw HostError.badRequest("モデル方針 \(policy) を解決できません: \(Redactor.redact(output.combinedTrimmed))")
+        }
+        guard let data = output.stdout.data(using: .utf8),
+              let resolved = try? JSONDecoder().decode(HermesResolvedPolicyWire.self, from: data) else {
+            throw HostError.badRequest("モデル方針 \(policy) の解決結果を読めませんでした。")
+        }
+        return resolved
+    }
+
     // MARK: Presets (vault/90_Org/presets.md)
 
     func loadPresets() -> [HermesPresetWire] {
@@ -303,27 +360,34 @@ final class HermesControlStore: Sendable {
             guard cells.count >= 3, !Self.isMarkdownSeparatorRow(cells) else { continue }
             if columns == nil {
                 let headerColumns = Self.presetColumnMap(cells)
-                if headerColumns["label"] != nil, headerColumns["model"] != nil, headerColumns["reasoning"] != nil {
+                if headerColumns["label"] != nil,
+                   (headerColumns["model"] != nil || headerColumns["policy"] != nil),
+                   headerColumns["reasoning"] != nil {
                     columns = headerColumns
                     continue
                 }
             }
             let label = Self.tableCell(cells, columns?["label"] ?? 0)
             let model = Self.tableCell(cells, columns?["model"] ?? 1)
+            let policy = Self.tableCell(cells, columns?["policy"] ?? -1).nilIfBlank
+            let resolvedModel = Self.tableCell(cells, columns?["resolvedModel"] ?? -1).nilIfBlank
             let reasoning = Self.tableCell(cells, columns?["reasoning"] ?? 2).lowercased()
-            guard Self.reasoningLevels.contains(reasoning), !label.isEmpty, !model.isEmpty else { continue }
+            guard Self.reasoningLevels.contains(reasoning), !label.isEmpty, !model.isEmpty || policy != nil else { continue }
             let provider = Self.tableCell(cells, columns?["provider"] ?? 3).nilIfBlank
             let baseURL = Self.tableCell(cells, columns?["baseURL"] ?? -1).nilIfBlank
             let contextLength = Self.tableCell(cells, columns?["contextLength"] ?? -1).nilIfBlank
+            let displayedModel = resolvedModel ?? (model.nilIfBlank ?? policy.map { "policy:\($0)" } ?? "")
             presets.append(HermesPresetWire(
                 id: "preset-\(presets.count + 1)",
                 label: label,
-                model: model,
+                model: displayedModel,
+                policy: policy,
+                resolvedModel: resolvedModel,
                 provider: provider.flatMap { $0.contains("{{") ? nil : $0 },
                 baseURL: baseURL.flatMap { $0.contains("{{") ? nil : $0 },
                 contextLength: contextLength.flatMap { $0.contains("{{") ? nil : $0 },
                 reasoning: reasoning,
-                isPlaceholder: model.contains("{{") || model.contains("}}")
+                isPlaceholder: displayedModel.contains("{{") || displayedModel.contains("}}") || (policy?.contains("{{") ?? false)
             ))
         }
         return presets
@@ -335,8 +399,12 @@ final class HermesControlStore: Sendable {
             switch rawHeader.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
             case "label", "ラベル":
                 result["label"] = index
+            case "policy", "方針", "ポリシー":
+                result["policy"] = index
             case "model", "モデル":
                 result["model"] = index
+            case "resolved model", "resolved_model", "resolvedmodel", "実モデル":
+                result["resolvedModel"] = index
             case "provider", "プロバイダ":
                 result["provider"] = index
             case "base url", "base_url", "baseurl":
