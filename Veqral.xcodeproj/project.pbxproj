@@ -7,6 +7,29 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D7000000000000000000002F /* HermesControlModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000030 /* HermesControlModels.swift */; };
+		D7000000000000000000002D /* RemoteHostSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000002E /* RemoteHostSecurity.swift */; };
+		D7000000000000000000002B /* RemoteHostClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000002C /* RemoteHostClient.swift */; };
+		D70000000000000000000029 /* LocalCommandExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000002A /* LocalCommandExecutor.swift */; };
+		D70000000000000000000027 /* CommandCenterPersistenceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000028 /* CommandCenterPersistenceModels.swift */; };
+		D70000000000000000000025 /* AgentSpaceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000026 /* AgentSpaceModels.swift */; };
+		D70000000000000000000023 /* RemoteHistoryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000024 /* RemoteHistoryModels.swift */; };
+		D70000000000000000000021 /* RemoteMemoryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000022 /* RemoteMemoryModels.swift */; };
+		D7000000000000000000001F /* SalesModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000020 /* SalesModels.swift */; };
+		D7000000000000000000001D /* PortfolioModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000001E /* PortfolioModels.swift */; };
+		D7000000000000000000001B /* RemoteDeviceAuditModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000001C /* RemoteDeviceAuditModels.swift */; };
+		D70000000000000000000019 /* RemoteArtifactModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000001A /* RemoteArtifactModels.swift */; };
+		D70000000000000000000017 /* RemoteGitHubModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000018 /* RemoteGitHubModels.swift */; };
+		D70000000000000000000015 /* RemoteCostModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000016 /* RemoteCostModels.swift */; };
+		D70000000000000000000013 /* RemoteAuthModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000014 /* RemoteAuthModels.swift */; };
+		D70000000000000000000011 /* RemoteTelemetryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000012 /* RemoteTelemetryModels.swift */; };
+		D7000000000000000000000F /* RemoteVoiceNotificationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000010 /* RemoteVoiceNotificationModels.swift */; };
+		D7000000000000000000000D /* RemoteRunModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000000E /* RemoteRunModels.swift */; };
+		D7000000000000000000000B /* RemoteStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000000C /* RemoteStreamModels.swift */; };
+		D70000000000000000000009 /* RemoteHostModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000000A /* RemoteHostModels.swift */; };
+		D70000000000000000000007 /* WorkspaceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000008 /* WorkspaceModels.swift */; };
+		D70000000000000000000005 /* RunModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000006 /* RunModels.swift */; };
+		D70000000000000000000003 /* CommandCenterCoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000004 /* CommandCenterCoding.swift */; };
 		A1000000000000000000000A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* Assets.xcassets */; };
 		A10000000000000000000001 /* VeqralApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* VeqralApp.swift */; };
 		A10000000000000000000002 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* Models.swift */; };
@@ -35,6 +58,29 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D70000000000000000000030 /* HermesControlModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesControlModels.swift; sourceTree = "<group>"; };
+		D7000000000000000000002E /* RemoteHostSecurity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteHostSecurity.swift; sourceTree = "<group>"; };
+		D7000000000000000000002C /* RemoteHostClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteHostClient.swift; sourceTree = "<group>"; };
+		D7000000000000000000002A /* LocalCommandExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalCommandExecutor.swift; sourceTree = "<group>"; };
+		D70000000000000000000028 /* CommandCenterPersistenceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCenterPersistenceModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000026 /* AgentSpaceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSpaceModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000024 /* RemoteHistoryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteHistoryModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000022 /* RemoteMemoryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteMemoryModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000020 /* SalesModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SalesModels.swift; sourceTree = "<group>"; };
+		D7000000000000000000001E /* PortfolioModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortfolioModels.swift; sourceTree = "<group>"; };
+		D7000000000000000000001C /* RemoteDeviceAuditModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDeviceAuditModels.swift; sourceTree = "<group>"; };
+		D7000000000000000000001A /* RemoteArtifactModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteArtifactModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000018 /* RemoteGitHubModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteGitHubModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000016 /* RemoteCostModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteCostModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000014 /* RemoteAuthModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteAuthModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000012 /* RemoteTelemetryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTelemetryModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000010 /* RemoteVoiceNotificationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteVoiceNotificationModels.swift; sourceTree = "<group>"; };
+		D7000000000000000000000E /* RemoteRunModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteRunModels.swift; sourceTree = "<group>"; };
+		D7000000000000000000000C /* RemoteStreamModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteStreamModels.swift; sourceTree = "<group>"; };
+		D7000000000000000000000A /* RemoteHostModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteHostModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000008 /* WorkspaceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000006 /* RunModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunModels.swift; sourceTree = "<group>"; };
+		D70000000000000000000004 /* CommandCenterCoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCenterCoding.swift; sourceTree = "<group>"; };
 		A10000000000000000000010 /* Veqral.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Veqral.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000011 /* VeqralApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VeqralApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000012 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
@@ -99,6 +145,29 @@
 				A10000000000000000000011 /* VeqralApp.swift */,
 				A10000000000000000000012 /* Models.swift */,
 				A10000000000000000000019 /* AppState.swift */,
+				D70000000000000000000030 /* HermesControlModels.swift */,
+				D7000000000000000000002E /* RemoteHostSecurity.swift */,
+				D7000000000000000000002C /* RemoteHostClient.swift */,
+				D7000000000000000000002A /* LocalCommandExecutor.swift */,
+				D70000000000000000000028 /* CommandCenterPersistenceModels.swift */,
+				D70000000000000000000026 /* AgentSpaceModels.swift */,
+				D70000000000000000000024 /* RemoteHistoryModels.swift */,
+				D70000000000000000000022 /* RemoteMemoryModels.swift */,
+				D70000000000000000000020 /* SalesModels.swift */,
+				D7000000000000000000001E /* PortfolioModels.swift */,
+				D7000000000000000000001C /* RemoteDeviceAuditModels.swift */,
+				D7000000000000000000001A /* RemoteArtifactModels.swift */,
+				D70000000000000000000018 /* RemoteGitHubModels.swift */,
+				D70000000000000000000016 /* RemoteCostModels.swift */,
+				D70000000000000000000014 /* RemoteAuthModels.swift */,
+				D70000000000000000000012 /* RemoteTelemetryModels.swift */,
+				D70000000000000000000010 /* RemoteVoiceNotificationModels.swift */,
+				D7000000000000000000000E /* RemoteRunModels.swift */,
+				D7000000000000000000000C /* RemoteStreamModels.swift */,
+				D7000000000000000000000A /* RemoteHostModels.swift */,
+				D70000000000000000000008 /* WorkspaceModels.swift */,
+				D70000000000000000000006 /* RunModels.swift */,
+				D70000000000000000000004 /* CommandCenterCoding.swift */,
 				A10000000000000000000014 /* Theme.swift */,
 				A10000000000000000000015 /* Components.swift */,
 				A10000000000000000000018 /* CommandCenterViews.swift */,
@@ -274,6 +343,29 @@
 				A10000000000000000000005 /* Components.swift in Sources */,
 				A10000000000000000000008 /* CommandCenterViews.swift in Sources */,
 				A10000000000000000000009 /* AppState.swift in Sources */,
+				D7000000000000000000002F /* HermesControlModels.swift in Sources */,
+				D7000000000000000000002D /* RemoteHostSecurity.swift in Sources */,
+				D7000000000000000000002B /* RemoteHostClient.swift in Sources */,
+				D70000000000000000000029 /* LocalCommandExecutor.swift in Sources */,
+				D70000000000000000000027 /* CommandCenterPersistenceModels.swift in Sources */,
+				D70000000000000000000025 /* AgentSpaceModels.swift in Sources */,
+				D70000000000000000000023 /* RemoteHistoryModels.swift in Sources */,
+				D70000000000000000000021 /* RemoteMemoryModels.swift in Sources */,
+				D7000000000000000000001F /* SalesModels.swift in Sources */,
+				D7000000000000000000001D /* PortfolioModels.swift in Sources */,
+				D7000000000000000000001B /* RemoteDeviceAuditModels.swift in Sources */,
+				D70000000000000000000019 /* RemoteArtifactModels.swift in Sources */,
+				D70000000000000000000017 /* RemoteGitHubModels.swift in Sources */,
+				D70000000000000000000015 /* RemoteCostModels.swift in Sources */,
+				D70000000000000000000013 /* RemoteAuthModels.swift in Sources */,
+				D70000000000000000000011 /* RemoteTelemetryModels.swift in Sources */,
+				D7000000000000000000000F /* RemoteVoiceNotificationModels.swift in Sources */,
+				D7000000000000000000000D /* RemoteRunModels.swift in Sources */,
+				D7000000000000000000000B /* RemoteStreamModels.swift in Sources */,
+				D70000000000000000000009 /* RemoteHostModels.swift in Sources */,
+				D70000000000000000000007 /* WorkspaceModels.swift in Sources */,
+				D70000000000000000000005 /* RunModels.swift in Sources */,
+				D70000000000000000000003 /* CommandCenterCoding.swift in Sources */,
 				C10000000000000000000001 /* VeqralRedactor.swift in Sources */,
 				A1000000000000000000000B /* Localization.swift in Sources */,
 				A1000000000000000000000D /* PushNotifications.swift in Sources */,

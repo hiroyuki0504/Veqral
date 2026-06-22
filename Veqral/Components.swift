@@ -246,13 +246,6 @@ enum VQDisplay {
     }
 }
 
-private extension String {
-    var nilIfBlank: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-}
-
 struct SpinningCommandNodeMark: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var spin = false
