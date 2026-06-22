@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D70000000000000000000015 /* RemoteCostModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000016 /* RemoteCostModels.swift */; };
 		D70000000000000000000013 /* RemoteAuthModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000014 /* RemoteAuthModels.swift */; };
 		D70000000000000000000011 /* RemoteTelemetryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000012 /* RemoteTelemetryModels.swift */; };
 		D7000000000000000000000F /* RemoteVoiceNotificationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000010 /* RemoteVoiceNotificationModels.swift */; };
@@ -44,6 +45,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D70000000000000000000016 /* RemoteCostModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteCostModels.swift; sourceTree = "<group>"; };
 		D70000000000000000000014 /* RemoteAuthModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteAuthModels.swift; sourceTree = "<group>"; };
 		D70000000000000000000012 /* RemoteTelemetryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteTelemetryModels.swift; sourceTree = "<group>"; };
 		D70000000000000000000010 /* RemoteVoiceNotificationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteVoiceNotificationModels.swift; sourceTree = "<group>"; };
@@ -117,6 +119,7 @@
 				A10000000000000000000011 /* VeqralApp.swift */,
 				A10000000000000000000012 /* Models.swift */,
 				A10000000000000000000019 /* AppState.swift */,
+				D70000000000000000000016 /* RemoteCostModels.swift */,
 				D70000000000000000000014 /* RemoteAuthModels.swift */,
 				D70000000000000000000012 /* RemoteTelemetryModels.swift */,
 				D70000000000000000000010 /* RemoteVoiceNotificationModels.swift */,
@@ -301,6 +304,7 @@
 				A10000000000000000000005 /* Components.swift in Sources */,
 				A10000000000000000000008 /* CommandCenterViews.swift in Sources */,
 				A10000000000000000000009 /* AppState.swift in Sources */,
+				D70000000000000000000015 /* RemoteCostModels.swift in Sources */,
 				D70000000000000000000013 /* RemoteAuthModels.swift in Sources */,
 				D70000000000000000000011 /* RemoteTelemetryModels.swift in Sources */,
 				D7000000000000000000000F /* RemoteVoiceNotificationModels.swift in Sources */,
