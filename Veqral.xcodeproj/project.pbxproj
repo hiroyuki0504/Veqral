@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D7000000000000000000001D /* PortfolioModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000001E /* PortfolioModels.swift */; };
 		D7000000000000000000001B /* RemoteDeviceAuditModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000001C /* RemoteDeviceAuditModels.swift */; };
 		D70000000000000000000019 /* RemoteArtifactModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000001A /* RemoteArtifactModels.swift */; };
 		D70000000000000000000017 /* RemoteGitHubModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000018 /* RemoteGitHubModels.swift */; };
@@ -48,6 +49,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D7000000000000000000001E /* PortfolioModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortfolioModels.swift; sourceTree = "<group>"; };
 		D7000000000000000000001C /* RemoteDeviceAuditModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDeviceAuditModels.swift; sourceTree = "<group>"; };
 		D7000000000000000000001A /* RemoteArtifactModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteArtifactModels.swift; sourceTree = "<group>"; };
 		D70000000000000000000018 /* RemoteGitHubModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteGitHubModels.swift; sourceTree = "<group>"; };
@@ -125,6 +127,7 @@
 				A10000000000000000000011 /* VeqralApp.swift */,
 				A10000000000000000000012 /* Models.swift */,
 				A10000000000000000000019 /* AppState.swift */,
+				D7000000000000000000001E /* PortfolioModels.swift */,
 				D7000000000000000000001C /* RemoteDeviceAuditModels.swift */,
 				D7000000000000000000001A /* RemoteArtifactModels.swift */,
 				D70000000000000000000018 /* RemoteGitHubModels.swift */,
@@ -313,6 +316,7 @@
 				A10000000000000000000005 /* Components.swift in Sources */,
 				A10000000000000000000008 /* CommandCenterViews.swift in Sources */,
 				A10000000000000000000009 /* AppState.swift in Sources */,
+				D7000000000000000000001D /* PortfolioModels.swift in Sources */,
 				D7000000000000000000001B /* RemoteDeviceAuditModels.swift in Sources */,
 				D70000000000000000000019 /* RemoteArtifactModels.swift in Sources */,
 				D70000000000000000000017 /* RemoteGitHubModels.swift in Sources */,
