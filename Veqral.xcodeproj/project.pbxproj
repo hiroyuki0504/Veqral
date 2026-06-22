@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D7000000000000000000002B /* RemoteHostClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000002C /* RemoteHostClient.swift */; };
 		D70000000000000000000029 /* LocalCommandExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000002A /* LocalCommandExecutor.swift */; };
 		D70000000000000000000027 /* CommandCenterPersistenceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000028 /* CommandCenterPersistenceModels.swift */; };
 		D70000000000000000000025 /* AgentSpaceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000026 /* AgentSpaceModels.swift */; };
@@ -55,6 +56,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D7000000000000000000002C /* RemoteHostClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteHostClient.swift; sourceTree = "<group>"; };
 		D7000000000000000000002A /* LocalCommandExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalCommandExecutor.swift; sourceTree = "<group>"; };
 		D70000000000000000000028 /* CommandCenterPersistenceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCenterPersistenceModels.swift; sourceTree = "<group>"; };
 		D70000000000000000000026 /* AgentSpaceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSpaceModels.swift; sourceTree = "<group>"; };
@@ -139,6 +141,7 @@
 				A10000000000000000000011 /* VeqralApp.swift */,
 				A10000000000000000000012 /* Models.swift */,
 				A10000000000000000000019 /* AppState.swift */,
+				D7000000000000000000002C /* RemoteHostClient.swift */,
 				D7000000000000000000002A /* LocalCommandExecutor.swift */,
 				D70000000000000000000028 /* CommandCenterPersistenceModels.swift */,
 				D70000000000000000000026 /* AgentSpaceModels.swift */,
@@ -334,6 +337,7 @@
 				A10000000000000000000005 /* Components.swift in Sources */,
 				A10000000000000000000008 /* CommandCenterViews.swift in Sources */,
 				A10000000000000000000009 /* AppState.swift in Sources */,
+				D7000000000000000000002B /* RemoteHostClient.swift in Sources */,
 				D70000000000000000000029 /* LocalCommandExecutor.swift in Sources */,
 				D70000000000000000000027 /* CommandCenterPersistenceModels.swift in Sources */,
 				D70000000000000000000025 /* AgentSpaceModels.swift in Sources */,
