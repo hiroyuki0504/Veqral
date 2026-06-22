@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D70000000000000000000021 /* RemoteMemoryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000022 /* RemoteMemoryModels.swift */; };
 		D7000000000000000000001F /* SalesModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000020 /* SalesModels.swift */; };
 		D7000000000000000000001D /* PortfolioModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000001E /* PortfolioModels.swift */; };
 		D7000000000000000000001B /* RemoteDeviceAuditModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000001C /* RemoteDeviceAuditModels.swift */; };
@@ -50,6 +51,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D70000000000000000000022 /* RemoteMemoryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteMemoryModels.swift; sourceTree = "<group>"; };
 		D70000000000000000000020 /* SalesModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SalesModels.swift; sourceTree = "<group>"; };
 		D7000000000000000000001E /* PortfolioModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortfolioModels.swift; sourceTree = "<group>"; };
 		D7000000000000000000001C /* RemoteDeviceAuditModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDeviceAuditModels.swift; sourceTree = "<group>"; };
@@ -129,6 +131,7 @@
 				A10000000000000000000011 /* VeqralApp.swift */,
 				A10000000000000000000012 /* Models.swift */,
 				A10000000000000000000019 /* AppState.swift */,
+				D70000000000000000000022 /* RemoteMemoryModels.swift */,
 				D70000000000000000000020 /* SalesModels.swift */,
 				D7000000000000000000001E /* PortfolioModels.swift */,
 				D7000000000000000000001C /* RemoteDeviceAuditModels.swift */,
@@ -319,6 +322,7 @@
 				A10000000000000000000005 /* Components.swift in Sources */,
 				A10000000000000000000008 /* CommandCenterViews.swift in Sources */,
 				A10000000000000000000009 /* AppState.swift in Sources */,
+				D70000000000000000000021 /* RemoteMemoryModels.swift in Sources */,
 				D7000000000000000000001F /* SalesModels.swift in Sources */,
 				D7000000000000000000001D /* PortfolioModels.swift in Sources */,
 				D7000000000000000000001B /* RemoteDeviceAuditModels.swift in Sources */,
