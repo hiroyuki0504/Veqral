@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D70000000000000000000003 /* CommandCenterCoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000004 /* CommandCenterCoding.swift */; };
 		A1000000000000000000000A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* Assets.xcassets */; };
 		A10000000000000000000001 /* VeqralApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* VeqralApp.swift */; };
 		A10000000000000000000002 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* Models.swift */; };
@@ -35,6 +36,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D70000000000000000000004 /* CommandCenterCoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandCenterCoding.swift; sourceTree = "<group>"; };
 		A10000000000000000000010 /* Veqral.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Veqral.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000011 /* VeqralApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VeqralApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000012 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
@@ -99,6 +101,7 @@
 				A10000000000000000000011 /* VeqralApp.swift */,
 				A10000000000000000000012 /* Models.swift */,
 				A10000000000000000000019 /* AppState.swift */,
+				D70000000000000000000004 /* CommandCenterCoding.swift */,
 				A10000000000000000000014 /* Theme.swift */,
 				A10000000000000000000015 /* Components.swift */,
 				A10000000000000000000018 /* CommandCenterViews.swift */,
@@ -274,6 +277,7 @@
 				A10000000000000000000005 /* Components.swift in Sources */,
 				A10000000000000000000008 /* CommandCenterViews.swift in Sources */,
 				A10000000000000000000009 /* AppState.swift in Sources */,
+				D70000000000000000000003 /* CommandCenterCoding.swift in Sources */,
 				C10000000000000000000001 /* VeqralRedactor.swift in Sources */,
 				A1000000000000000000000B /* Localization.swift in Sources */,
 				A1000000000000000000000D /* PushNotifications.swift in Sources */,
