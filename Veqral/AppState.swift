@@ -5324,32 +5324,6 @@ enum AppKeychainStore {
     }
 }
 
-private extension JSONEncoder {
-    static var commandCenter: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return encoder
-    }
-}
-
-private extension JSONDecoder {
-    static var commandCenter: JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
-    }
-}
-
-private extension String {
-    var nilIfBlank: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-}
-
-// MARK: - Hermes remote control (model / reasoning / vault approvals)
-
 struct HermesControlPreset: Codable, Identifiable, Equatable {
     var id: String
     var label: String
