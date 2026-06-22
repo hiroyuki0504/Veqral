@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D7000000000000000000000B /* RemoteStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000000C /* RemoteStreamModels.swift */; };
 		D70000000000000000000009 /* RemoteHostModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7000000000000000000000A /* RemoteHostModels.swift */; };
 		D70000000000000000000007 /* WorkspaceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000008 /* WorkspaceModels.swift */; };
 		D70000000000000000000005 /* RunModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000006 /* RunModels.swift */; };
@@ -39,6 +40,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D7000000000000000000000C /* RemoteStreamModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteStreamModels.swift; sourceTree = "<group>"; };
 		D7000000000000000000000A /* RemoteHostModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteHostModels.swift; sourceTree = "<group>"; };
 		D70000000000000000000008 /* WorkspaceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceModels.swift; sourceTree = "<group>"; };
 		D70000000000000000000006 /* RunModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunModels.swift; sourceTree = "<group>"; };
@@ -107,6 +109,7 @@
 				A10000000000000000000011 /* VeqralApp.swift */,
 				A10000000000000000000012 /* Models.swift */,
 				A10000000000000000000019 /* AppState.swift */,
+				D7000000000000000000000C /* RemoteStreamModels.swift */,
 				D7000000000000000000000A /* RemoteHostModels.swift */,
 				D70000000000000000000008 /* WorkspaceModels.swift */,
 				D70000000000000000000006 /* RunModels.swift */,
@@ -286,6 +289,7 @@
 				A10000000000000000000005 /* Components.swift in Sources */,
 				A10000000000000000000008 /* CommandCenterViews.swift in Sources */,
 				A10000000000000000000009 /* AppState.swift in Sources */,
+				D7000000000000000000000B /* RemoteStreamModels.swift in Sources */,
 				D70000000000000000000009 /* RemoteHostModels.swift in Sources */,
 				D70000000000000000000007 /* WorkspaceModels.swift in Sources */,
 				D70000000000000000000005 /* RunModels.swift in Sources */,
