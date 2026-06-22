@@ -16,6 +16,7 @@
 		A10000000000000000000007 /* Screens.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* Screens.swift */; };
 		A10000000000000000000008 /* CommandCenterViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* CommandCenterViews.swift */; };
 		A10000000000000000000009 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* AppState.swift */; };
+		C10000000000000000000001 /* VeqralRedactor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000002 /* VeqralRedactor.swift */; };
 		A1000000000000000000000B /* Localization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001B /* Localization.swift */; };
 		A1000000000000000000000C /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001E /* Localizable.strings */; };
 		A1000000000000000000000D /* PushNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001F /* PushNotifications.swift */; };
@@ -45,6 +46,7 @@
 		A10000000000000000000019 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		A1000000000000000000001A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000000000000000000001B /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
+		C10000000000000000000002 /* VeqralRedactor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacHost/Sources/VeqralShared/VeqralRedactor.swift; sourceTree = "<group>"; };
 		A1000000000000000000001C /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		A1000000000000000000001D /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
 		A1000000000000000000001F /* PushNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotifications.swift; sourceTree = "<group>"; };
@@ -86,6 +88,7 @@
 				A10000000000000000000031 /* Veqral */,
 				B1000000000000000000000A /* VeqralUITests */,
 				A60000000000000000000031 /* VeqralWatch */,
+				C10000000000000000000002 /* VeqralRedactor.swift */,
 				A10000000000000000000032 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -271,6 +274,7 @@
 				A10000000000000000000005 /* Components.swift in Sources */,
 				A10000000000000000000008 /* CommandCenterViews.swift in Sources */,
 				A10000000000000000000009 /* AppState.swift in Sources */,
+				C10000000000000000000001 /* VeqralRedactor.swift in Sources */,
 				A1000000000000000000000B /* Localization.swift in Sources */,
 				A1000000000000000000000D /* PushNotifications.swift in Sources */,
 				A10000000000000000000006 /* RootView.swift in Sources */,

@@ -77,6 +77,10 @@ Device(Mac)
 - Final A integration (`codex/final-a-union-20260602`): #A0〜#A7 を 1 回の union integration で clean `main` に統合。pre-merge / integration / post-main で MacHost build、iOS Simulator build、Mac Catalyst build、Host smokes、#0 verify-memory-inheritance、Gate2 XCUITest、grep/l10n を確認。Gate2 は iPhone Simulator / iPad Simulator とも PASS。Watch build は watchOS 26.5 platform 未インストールのため partial のまま。
 - `codex/local-business-redesign-engine`: Web改善営業の「営業ラボ」を More 配下の案件生成ツールとして追加。手動登録/CSV import、`~/.veqral-host/local-business-leads/` JSON repository、公式URL監査、スマホ改善案、提案書HTML/PDF/画像、コピー用メール/DM/電話文案、manual contacted、won lead の Portfolio 昇格、Hermes Desktop handoff note を実装。Google Places discovery は `501` で無効、Google reviews/photos/store info の wholesale persistence なし、自動送信なし。`SALES_LAB_PR.md` に safety と smoke 結果を記録。
 
+- `claude/hermes-remote-control`: Hermes×Obsidian 統合の Phase 6–7。Host に HMAC 認証下の `/v1/hermes/control`（config.yaml の model/provider/base_url/context_length/ollama_num_ctx/reasoning_effort 行単位書換、`90_Org/presets.md` プリセット）と `/v1/hermes/approvals(+/decide)`（vault `90_Org/Approvals` の pending 承認）を追加。iPhone に「Hermes 操作」画面と Approvals 内 Hermes セクション、Watch にプリセット 3 ボタン + vault 承認カードを追加。設定は `VEQRAL_HERMES_VAULT` / `VEQRAL_HERMES_CONFIG`。2026-06-20 に AI-Hub が `/Users/hiroyuki/Library/Application Support/AI-Hub` へローカル退避され、LaunchAgent は実体 vault を読む。Ollama local presets は `custom` + `http://127.0.0.1:11434/v1` + context 65536。MacHost build、`smoke-hermes-control`、iOS Simulator build、Watch Simulator build、live `GET /v1/hermes/control`、`GET /v1/hermes/approvals`、local-fast→標準 preset 往復を確認済み。Host binary は `~/.veqral-host/bin/VeqralHost` へ配備し ad-hoc signing 済み。
+- `codex/auto-aihub-digest`: Veqral Mac Host の `HostState.finish()` から AI-Hub `session-digest` skill を呼び、Hermes/Codex/Claude の Run 完了時に `/Users/hiroyuki/Documents/AI-Hub/vault/90_Org/Sessions` へ自動追記する。shell run は対象外。設定は `VEQRAL_AIHUB_ROOT` / `VEQRAL_AIHUB_CONFIG` / `VEQRAL_AIHUB_DIGEST_ENABLED` / `VEQRAL_AIHUB_DIGEST_DISABLED`。`VeqralHost smoke-aihub-digest-bridge` は HostState finish hook 経由で temp vault への note 書き込みと `aihub` log を確認する。AI-Hub 側には terminal wrapper `aihub-codex` / `aihub-claude` があり、bootstrap で `~/.hermes/scripts` に symlink される。
+- `codex/aihub-local-runtime-cleanup`: Hermes model 操作を固定モデル名から AI-Hub policy/lane resolver へ寄せた。AI-Hub `config/ai-diary.yaml` は `local-fast` / `local-reviewer` / `local-coder` / `subscription-fast` / `subscription-standard` / `subscription-strong` の policy を持ち、`scripts/hermes-monthly-switch resolve/apply` が現在の Ollama inventory・OAuth route・provider cache から実モデルを解決する。Veqral Host `/v1/hermes/control` は `90_Org/presets.md` の `Policy` 列を読み、preset apply 時に resolver を呼ぶ。2026-06-22 に release build を `~/.veqral-host/bin/VeqralHost` へ配備し LaunchAgent を再起動、live `GET /v1/health`、`GET/POST /v1/hermes/control`、`GET /v1/hermes/approvals`、AI-Hub `healthcheck.sh` を確認。POST は `local-reviewer` policy を適用し、Hermes config は `custom` + `gpt-oss:20b` + `http://127.0.0.1:11434/v1` + context 65536。
+
 ## 未完了・次の手番
 
 1. #A7 follow-up: Claude/Anthropic を Hermes-readable な subscription/login として復旧した後、`HERMES_CROSS_VENDOR_PR_A7.md` のコマンドで再実走する。API key fallback で偽 pass を作らない。
@@ -105,6 +109,8 @@ Device(Mac)
 8. push 再有効化：有料 Apple Developer Program 加入後（capability 戻す + flag ON + APNs `.p8`/Key ID/Team ID + Host の env: `VEQRAL_PUSH_ENABLED` 他）
 9. UI 磨き：スクショ駆動で気になる画面をピンポイント改善（CC Pocket / Supabase の質感、AI くささ排除）
 10. 組織化：worker → skills で精度 → PM を置く → 上に積む（段階的）
+11. Hermes リモート操作 follow-up: iPhone/Watch 実機で More→Hermes 操作、Approvals 内 Hermes セクション、Watch preset/approval を確認。Host API と local-reviewer policy apply は live 確認済みなので、残りは実機 UI から policy 表示・切替・vault approval decide を確認する。Gate2 シナリオ追加は別 PR。
+12. AI-Hub auto-digest follow-up: 実機 Veqral から Codex/Claude/Hermes Run を1件ずつ流し、Run detail の `aihub` log と Obsidian session note 追記を確認する。Terminal 直運用は `~/.hermes/scripts/aihub-codex` / `~/.hermes/scripts/aihub-claude` を使うか、必要なら人間承認で shell PATH/alias を追加する。
 
 ## 作業の型（毎回）
 

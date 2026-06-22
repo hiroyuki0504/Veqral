@@ -357,6 +357,8 @@ private func sectionDestination(_ section: AppSection) -> some View {
         HistoryView()
     case .salesLab:
         SalesLabView()
+    case .hermes:
+        HermesControlView()
     case .approvals:
         ApprovalsView()
     case .memory:

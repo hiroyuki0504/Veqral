@@ -3179,6 +3179,8 @@ struct ApprovalsView: View {
                 FlowLayout(items: [L10n.tr("File deletion"), L10n.tr("Billing"), L10n.tr("Production"), L10n.tr("Secrets"), L10n.tr("Screen control")])
             }
 
+            HermesApprovalsSection()
+
             let pending = store.pendingApprovals()
             if pending.isEmpty {
                 VQPanel("Queue", systemImage: "checkmark.shield") {
@@ -3878,5 +3880,325 @@ private struct GitHubStep: View {
             Spacer()
             StatusPill(title: status, tint: tint)
         }
+    }
+}
+
+// MARK: - Hermes remote control (model / reasoning / vault approvals)
+
+struct HermesControlView: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    @State private var status: HermesControlStatus?
+    @State private var modelDraft = ""
+    @State private var providerDraft = ""
+    @State private var baseURLDraft = ""
+    @State private var contextLengthDraft = ""
+    @State private var reasoningDraft = "medium"
+    @State private var message = ""
+    @State private var isWorking = false
+
+    var body: some View {
+        ScreenScaffold(title: "Hermes 操作", systemImage: "slider.horizontal.3") {
+            VQPanel("現在の設定", systemImage: "cpu") {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let status {
+                        HermesStatusLine(label: "実モデル", value: status.model ?? "未設定")
+                        HermesStatusLine(label: "プロバイダ", value: status.provider ?? "auto")
+                        HermesStatusLine(label: "Base URL", value: status.baseURL?.isEmpty == false ? status.baseURL! : "provider default")
+                        HermesStatusLine(label: "Context", value: status.contextLength?.isEmpty == false ? status.contextLength! : "provider default")
+                        HermesStatusLine(label: "思考深度", value: status.reasoning ?? "medium")
+                        if let note = status.note {
+                            Text(note)
+                                .font(.caption)
+                                .foregroundStyle(VQTheme.amber)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else {
+                        Text(isWorking ? "読み込み中…" : "Host から未取得です。")
+                            .font(.subheadline)
+                            .foregroundStyle(VQTheme.secondaryText)
+                    }
+                    Button {
+                        Task { await load() }
+                    } label: {
+                        Label("更新", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(isWorking)
+                    .accessibilityIdentifier("hermes.control.refresh")
+                }
+            }
+
+            VQPanel("プリセット", systemImage: "square.grid.3x1.below.line.grid.1x2") {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let presets = status?.presets, !presets.isEmpty {
+                        HStack(spacing: 10) {
+                            ForEach(presets.prefix(3)) { preset in
+                                Button {
+                                    Task { await apply(HermesControlUpdate(presetID: preset.id, provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil)) }
+                                } label: {
+                                    VStack(spacing: 2) {
+                                        Text(preset.label)
+                                            .font(.subheadline.weight(.semibold))
+                                        Text(preset.policy ?? preset.model)
+                                            .font(.caption2)
+                                            .foregroundStyle(VQTheme.secondaryText)
+                                            .lineLimit(1)
+                                        Text(preset.reasoning)
+                                            .font(.caption2)
+                                            .foregroundStyle(VQTheme.secondaryText)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(isWorking || preset.isPlaceholder)
+                                .accessibilityIdentifier("hermes.preset.\(preset.id)")
+                            }
+                        }
+                        if presets.contains(where: \.isPlaceholder) {
+                            Text("{{ }} のままのプリセットは vault の 90_Org/presets.md を編集すると有効になります。Policy プリセットは AI-Hub が実モデルへ解決します。")
+                                .font(.caption)
+                                .foregroundStyle(VQTheme.secondaryText)
+                        }
+                    } else {
+                        Text("プリセット未定義。vault の 90_Org/presets.md に | ラベル | Policy | 思考深度 | の表を作るとここに並びます。")
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            VQPanel("手動設定", systemImage: "wrench.and.screwdriver") {
+                VStack(alignment: .leading, spacing: 10) {
+                    TextField("実モデル（緊急時のみ。通常はプリセット方針を使用）", text: $modelDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("hermes.field.model")
+                    TextField("プロバイダ（空欄なら変更しない）", text: $providerDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("hermes.field.provider")
+                    TextField("Base URL（local: http://127.0.0.1:11434/v1 / provider既定に戻すなら空欄で適用）", text: $baseURLDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("hermes.field.baseURL")
+                    TextField("Context Length（local: 65536 / provider既定に戻すなら空欄で適用）", text: $contextLengthDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.numberPad)
+                        .accessibilityIdentifier("hermes.field.contextLength")
+                    Picker("思考深度", selection: $reasoningDraft) {
+                        ForEach(CommandCenterStore.hermesReasoningLevels, id: \.self) { level in
+                            Text(level).tag(level)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("hermes.field.reasoning")
+                    Button {
+                        Task {
+                            await apply(HermesControlUpdate(
+                                presetID: nil,
+                                provider: providerDraft.trimmingCharacters(in: .whitespaces).isEmpty ? nil : providerDraft.trimmingCharacters(in: .whitespaces),
+                                model: modelDraft.trimmingCharacters(in: .whitespaces).isEmpty ? nil : modelDraft.trimmingCharacters(in: .whitespaces),
+                                baseURL: baseURLDraft.trimmingCharacters(in: .whitespaces),
+                                contextLength: contextLengthDraft.trimmingCharacters(in: .whitespaces),
+                                reasoning: reasoningDraft
+                            ))
+                        }
+                    } label: {
+                        Label("適用", systemImage: "checkmark.circle")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isWorking)
+                    .accessibilityIdentifier("hermes.control.apply")
+                    Text("適用は新しい Hermes セッションから有効。実行中のチャットは /model・/reasoning で切替。")
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            HermesApprovalsSection()
+
+            if !message.isEmpty {
+                VQPanel("結果", systemImage: "info.circle") {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .task { await load() }
+        .accessibilityIdentifier("gate2.screen.hermes")
+    }
+
+    @MainActor
+    private func load() async {
+        guard store.remoteHost.isEnabled else {
+            message = "Host 未接続です。Devices からペアリングしてください。"
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let status = try await store.hermesControlStatus()
+            self.status = status
+            modelDraft = status.model ?? ""
+            providerDraft = status.provider ?? ""
+            baseURLDraft = status.baseURL ?? ""
+            contextLengthDraft = status.contextLength ?? ""
+            if let reasoning = status.reasoning, CommandCenterStore.hermesReasoningLevels.contains(reasoning) {
+                reasoningDraft = reasoning
+            }
+        } catch {
+            message = "取得失敗: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func apply(_ update: HermesControlUpdate) async {
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let result = try await store.updateHermesControl(update)
+            status = result.status
+            modelDraft = result.status.model ?? modelDraft
+            providerDraft = result.status.provider ?? providerDraft
+            baseURLDraft = result.status.baseURL ?? ""
+            contextLengthDraft = result.status.contextLength ?? ""
+            if let reasoning = result.status.reasoning { reasoningDraft = reasoning }
+            message = "\(result.applied.joined(separator: " / "))。\(result.note)"
+        } catch {
+            message = "適用失敗: \(error.localizedDescription)"
+        }
+    }
+}
+
+private struct HermesStatusLine: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(VQTheme.secondaryText)
+                .frame(width: 72, alignment: .leading)
+            Text(value)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(VQTheme.ink)
+                .textSelection(.enabled)
+        }
+    }
+}
+
+struct HermesApprovalsSection: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    @State private var approvals: [HermesApprovalItem] = []
+    @State private var message = ""
+    @State private var isLoading = false
+
+    var body: some View {
+        VQPanel("Hermes 承認（vault）", systemImage: "tray.full") {
+            VStack(alignment: .leading, spacing: 12) {
+                if !store.remoteHost.isEnabled {
+                    Text("Host 未接続のため取得できません。")
+                        .font(.subheadline)
+                        .foregroundStyle(VQTheme.secondaryText)
+                } else if approvals.isEmpty {
+                    Text(isLoading ? "読み込み中…" : "Hermes の承認待ちはありません。playbook / skill / style の差分提案がここに届きます。")
+                        .font(.subheadline)
+                        .foregroundStyle(VQTheme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                ForEach(approvals) { approval in
+                    HermesApprovalRow(approval: approval) { decision in
+                        Task { await decide(approval, decision: decision) }
+                    }
+                }
+
+                if !message.isEmpty {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+
+                if store.remoteHost.isEnabled {
+                    Button {
+                        Task { await reload() }
+                    } label: {
+                        Label("更新", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(isLoading)
+                    .accessibilityIdentifier("hermes.approvals.refresh")
+                }
+            }
+        }
+        .task { await reload() }
+    }
+
+    @MainActor
+    private func reload() async {
+        guard store.remoteHost.isEnabled else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            approvals = try await store.hermesApprovals()
+            message = ""
+        } catch {
+            message = "取得失敗: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func decide(_ approval: HermesApprovalItem, decision: String) async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            try await store.decideHermesApproval(approval, decision: decision)
+            approvals.removeAll { $0.id == approval.id }
+            message = decision == "approve" ? "承認しました: \(approval.title)" : "却下しました: \(approval.title)"
+        } catch {
+            message = "操作失敗: \(error.localizedDescription)"
+        }
+    }
+}
+
+private struct HermesApprovalRow: View {
+    let approval: HermesApprovalItem
+    let decide: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(approval.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                if let createdAt = approval.createdAt {
+                    Text(createdAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption2)
+                        .foregroundStyle(VQTheme.secondaryText)
+                }
+            }
+            if !approval.summary.isEmpty {
+                Text(approval.summary)
+                    .font(.caption)
+                    .foregroundStyle(VQTheme.secondaryText)
+                    .lineLimit(6)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("却下", role: .destructive) { decide("reject") }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("hermes.approval.reject")
+                Button("承認") { decide("approve") }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("hermes.approval.approve")
+            }
+            .font(.subheadline)
+        }
+        .padding(.vertical, 4)
     }
 }

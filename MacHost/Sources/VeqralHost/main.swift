@@ -4,6 +4,7 @@ import Foundation
 import Network
 import Security
 import Darwin
+import VeqralShared
 
 private let serviceName = "dev.hiroyuki.veqral.host"
 private let serverGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -24,6 +25,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.dropFirst().first == "smoke-run-usage" {
             RunUsageSmoke.runAndExit()
         }
+        if CommandLine.arguments.dropFirst().first == "smoke-aihub-digest-bridge" {
+            AIHubDigestBridgeSmoke.runAndExit()
+        }
         if CommandLine.arguments.dropFirst().first == "smoke-host-telemetry" {
             HostTelemetrySmoke.runAndExit()
         }
@@ -38,6 +42,9 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         }
         if CommandLine.arguments.dropFirst().first == "smoke-auth-onboarding" {
             AuthOnboardingSmoke.runAndExit()
+        }
+        if CommandLine.arguments.dropFirst().first == "smoke-hermes-control" {
+            HermesControlSmoke.runAndExit()
         }
         if SalesLabSmoke.runIfRequested(arguments: Array(CommandLine.arguments.dropFirst())) {
             Foundation.exit(0)
@@ -137,6 +144,9 @@ struct HostConfig: Codable, Sendable {
     var discordWebhook: String?
     var portfolioDiscordWebhook: String?
     var projectBudgets: [String: ProjectBudgetLimit]? = nil
+    var aiHubRoot: String? = nil
+    var aiHubConfigPath: String? = nil
+    var aiHubDigestEnabled: Bool? = nil
 
     static var folder: URL {
         if let path = ProcessInfo.processInfo.environment["VEQRAL_HOST_HOME"]?.nilIfBlank {
@@ -231,6 +241,33 @@ struct HostConfig: Codable, Sendable {
 
     var resolvedProjectBudgets: [String: ProjectBudgetLimit] {
         projectBudgets ?? [:]
+    }
+
+    var resolvedAIHubDigestEnabled: Bool {
+        let env = ProcessInfo.processInfo.environment
+        if Self.booleanValue(env["VEQRAL_AIHUB_DIGEST_DISABLED"]) {
+            return false
+        }
+        if let value = env["VEQRAL_AIHUB_DIGEST_ENABLED"]?.nilIfBlank {
+            return Self.booleanValue(value)
+        }
+        if let aiHubDigestEnabled {
+            return aiHubDigestEnabled
+        }
+        return true
+    }
+
+    var resolvedAIHubRoot: String {
+        ProcessInfo.processInfo.environment["VEQRAL_AIHUB_ROOT"]?.nilIfBlank?.expandingTilde
+            ?? aiHubRoot?.nilIfBlank?.expandingTilde
+            ?? "\(NSHomeDirectory())/Documents/AI-Hub/hermes-hub"
+    }
+
+    var resolvedAIHubConfigPath: String {
+        ProcessInfo.processInfo.environment["VEQRAL_AIHUB_CONFIG"]?.nilIfBlank?.expandingTilde
+            ?? ProcessInfo.processInfo.environment["AI_HUB_CONFIG"]?.nilIfBlank?.expandingTilde
+            ?? aiHubConfigPath?.nilIfBlank?.expandingTilde
+            ?? "\(resolvedAIHubRoot)/config/vault.yaml"
     }
 
     private static func booleanValue(_ value: String?) -> Bool {
@@ -831,6 +868,90 @@ enum ProjectMemorySmoke {
     }
 }
 
+enum HermesControlSmoke {
+    static func runAndExit() -> Never {
+        do {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("veqral-hermes-control-smoke-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let vault = root.appendingPathComponent("vault", isDirectory: true)
+            let aiHubRoot = root.appendingPathComponent("hermes-hub", isDirectory: true)
+            let presets = vault.appendingPathComponent("90_Org/presets.md")
+            let approvals = vault.appendingPathComponent("90_Org/Approvals/pending", isDirectory: true)
+            try FileManager.default.createDirectory(at: presets.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: approvals, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: aiHubRoot.appendingPathComponent("scripts", isDirectory: true), withIntermediateDirectories: true)
+            let resolver = aiHubRoot.appendingPathComponent("scripts/hermes-monthly-switch")
+            try """
+            import json
+            print(json.dumps({
+                "policy": "local-fast",
+                "provider": "custom",
+                "model": "qwen3:8b",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "context_length": "4096",
+                "reasoning": "low"
+            }))
+            """.write(to: resolver, atomically: true, encoding: .utf8)
+            try """
+            | ラベル | Policy | Provider | Model | Base URL | Context Length | 思考深度 | 用途 |
+            | --- | --- | --- | --- | --- | --- | --- | --- |
+            | local-fast |  | custom | qwen3:8b | http://127.0.0.1:11434/v1 | 65536 | low | local |
+            | 標準 |  | openai-codex | gpt-5.5 |  |  | medium | cloud |
+            | 方針local | local-fast |  | policy:local-fast |  |  | medium | policy |
+            """.write(to: presets, atomically: true, encoding: .utf8)
+
+            let config = root.appendingPathComponent("config.yaml")
+            try """
+            model:
+              provider: openai-codex
+              default: gpt-5.5
+              base_url: ""
+              context_length: ""
+              ollama_num_ctx: ""
+            agent:
+              reasoning_effort: medium
+            """.write(to: config, atomically: true, encoding: .utf8)
+
+            let store = HermesControlStore(environment: [
+                "VEQRAL_HERMES_CONFIG": config.path,
+                "VEQRAL_HERMES_VAULT": vault.path,
+                "VEQRAL_AIHUB_ROOT": aiHubRoot.path,
+            ])
+            let initial = try store.status()
+            guard initial.presets.count == 3 else {
+                throw SmokeError("Expected 3 presets, got \(initial.presets.count)")
+            }
+            guard initial.pendingApprovalCount == 0 else {
+                throw SmokeError("Expected empty approval queue")
+            }
+
+            _ = try store.update(HermesControlUpdateRequest(presetID: "preset-1", provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil))
+            let local = try store.status()
+            guard local.provider == "custom", local.model == "qwen3:8b", local.baseURL == "http://127.0.0.1:11434/v1", local.contextLength == "65536", local.reasoning == "low" else {
+                throw SmokeError("Local preset did not apply provider/model/baseURL/contextLength/reasoning")
+            }
+
+            _ = try store.update(HermesControlUpdateRequest(presetID: "preset-2", provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil))
+            let cloud = try store.status()
+            guard cloud.provider == "openai-codex", cloud.model == "gpt-5.5", cloud.baseURL == nil, cloud.contextLength == nil, cloud.reasoning == "medium" else {
+                throw SmokeError("Cloud preset did not clear baseURL/contextLength and restore provider/model/reasoning")
+            }
+
+            _ = try store.update(HermesControlUpdateRequest(presetID: "preset-3", provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil))
+            let policy = try store.status()
+            guard policy.provider == "custom", policy.model == "qwen3:8b", policy.baseURL == "http://127.0.0.1:11434/v1", policy.contextLength == "4096", policy.reasoning == "low" else {
+                throw SmokeError("Policy preset did not resolve through AI-Hub resolver")
+            }
+
+            print("PASS: Hermes control smoke provider=\(cloud.provider ?? "") model=\(cloud.model ?? "") baseURL=\(cloud.baseURL ?? "provider-default")")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Hermes control smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+}
+
 enum CostGovernanceSmoke {
     static func runAndExit() -> Never {
         let projectID = "cost-smoke"
@@ -937,6 +1058,83 @@ enum RunUsageSmoke {
             throw SmokeError("\(label) から usage を抽出できませんでした。")
         }
         return usage
+    }
+}
+
+enum AIHubDigestBridgeSmoke {
+    static func runAndExit() -> Never {
+        Task {
+            do {
+                let note = try await runSmoke()
+                print("PASS: AI-Hub digest bridge wrote \(note.path)")
+                Foundation.exit(0)
+            } catch {
+                print("FAIL: AI-Hub digest bridge smoke failed: \(error.localizedDescription)")
+                Foundation.exit(1)
+            }
+        }
+        dispatchMain()
+    }
+
+    private static func runSmoke() async throws -> URL {
+        do {
+            let aiHubRoot = ProcessInfo.processInfo.environment["VEQRAL_AIHUB_ROOT"]?.nilIfBlank?.expandingTilde
+                ?? "\(NSHomeDirectory())/Documents/AI-Hub/hermes-hub"
+            let script = "\(aiHubRoot)/skills/session-digest/scripts/session_digest.py"
+            guard FileManager.default.fileExists(atPath: script) else {
+                throw SmokeError("session-digest script not found at \(script)")
+            }
+
+            let tempRoot = FileManager.default.temporaryDirectory
+                .appendingPathComponent("VeqralAIHubDigestSmoke-\(UUID().uuidString)", isDirectory: true)
+            let vault = tempRoot.appendingPathComponent("vault", isDirectory: true)
+            let configURL = tempRoot.appendingPathComponent("vault.yaml")
+            let hostHome = tempRoot.appendingPathComponent("host", isDirectory: true)
+            try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: hostHome, withIntermediateDirectories: true)
+            try """
+            vault_path: \(vault.path)
+            sessions_dir: 90_Org/Sessions
+            approvals_pending_dir: 90_Org/Approvals/pending
+            approvals_approved_dir: 90_Org/Approvals/approved
+            approvals_rejected_dir: 90_Org/Approvals/rejected
+            research_outreach_dir: 30_Research/outreach
+            clients_dir: 20_Clients
+            playbooks_dir: 70_Playbooks
+            skills_mirror_dir: 80_Skills_Mirror
+            templates_dir: 99_Templates
+            style_note: 70_Playbooks/style.md
+            vitrine_db_path: \(tempRoot.appendingPathComponent("vitrine.db").path)
+            """.write(to: configURL, atomically: true, encoding: .utf8)
+
+            var config = HostConfig()
+            config.aiHubRoot = aiHubRoot
+            config.aiHubConfigPath = configURL.path
+            setenv("VEQRAL_HOST_HOME", hostHome.path, 1)
+            let state = HostState(config: config)
+            let run = try await state.createRun(
+                prompt: "Verify automatic AI-Hub digest bridge.",
+                workingDirectory: "/Users/hiroyuki/Documents/Veqral",
+                engine: .codex,
+                model: "gpt-5.5"
+            )
+            await state.appendLog(runID: run.id, stream: "pty", message: "implemented bridge")
+            await state.finish(runID: run.id, exitCode: 0)
+
+            let day = AIHubSessionDigestBridge.jstDay(for: Date())
+            let note = vault.appendingPathComponent("90_Org/Sessions/\(day)-session-digest.md")
+            let body = try String(contentsOf: note, encoding: .utf8)
+            let runLogs = await state.replayLogs(runID: run.id)
+            guard body.contains("Verify automatic AI-Hub digest bridge."),
+                  body.contains("veqral"),
+                  body.contains("codex"),
+                  runLogs.contains(where: { $0.stream == "aihub" && $0.message.contains("AI-Hub digest wrote") }) else {
+                throw SmokeError("digest note or host log did not contain expected bridge content")
+            }
+            return note
+        } catch {
+            throw error
+        }
     }
 }
 
@@ -2071,6 +2269,14 @@ actor HostState {
         persistRuns()
         pauseBudgetIfNeeded(after: run)
         appendAudit("finished run id=\(runID) exit=\(exitCode)")
+        let digest = AIHubSessionDigestBridge.record(run: run, logs: logs[runID] ?? [], config: config)
+        if digest.ok {
+            appendAudit("aihub digest run id=\(runID) path=\(digest.path ?? "none")")
+            publish(HostLogEvent(runID: runID, kind: .log, stream: "aihub", message: digest.path.map { "AI-Hub digest wrote \($0)" } ?? digest.message, createdAt: Date(), sessionID: run.sessionID))
+        } else {
+            appendAudit("aihub digest failed run id=\(runID) error=\(digest.message)")
+            publish(HostLogEvent(runID: runID, kind: .log, stream: "aihub", message: "AI-Hub digest failed: \(digest.message)", createdAt: Date(), sessionID: run.sessionID))
+        }
         publish(HostLogEvent(runID: runID, kind: .complete, stream: "host", message: "Exit code: \(exitCode)", createdAt: Date(), sessionID: run.sessionID, exitCode: exitCode))
         notifyDevices(
             run: run,
@@ -2300,6 +2506,7 @@ final class HostServer: @unchecked Sendable {
     private let listener: NWListener
     private let runner: AgentRunner
     private let memoryStore = HermesMemoryStore()
+    private let hermesControl = HermesControlStore()
     private let historyStore = AgentHistoryStore()
     private let telemetryCollector = HostTelemetryCollector()
     private let portfolioStore: PortfolioRegistryStore
@@ -2412,6 +2619,36 @@ final class HostServer: @unchecked Sendable {
                 let url = await state.pairingURL()
                 let code = await state.currentPairingCode()
                 sendJSON(PairingStatus(pairingCode: code, pairingURL: url), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/hermes/control", request.method == "GET" {
+                _ = try await authenticateHermes(request, connection: connection)
+                sendJSON(try hermesControl.status(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/hermes/control", request.method == "POST" {
+                _ = try await authenticateHermes(request, connection: connection)
+                let body = try JSONDecoder.dates.decode(HermesControlUpdateRequest.self, from: request.body)
+                let response = try hermesControl.update(body)
+                await state.recordAudit("hermes control \(response.applied.joined(separator: " "))")
+                sendJSON(response, connection: connection)
+                return
+            }
+
+            if request.path == "/v1/hermes/approvals", request.method == "GET" {
+                _ = try await authenticateHermes(request, connection: connection)
+                sendJSON(try hermesControl.pendingApprovals(), connection: connection)
+                return
+            }
+
+            if request.path == "/v1/hermes/approvals/decide", request.method == "POST" {
+                _ = try await authenticateHermes(request, connection: connection)
+                let body = try JSONDecoder.dates.decode(HermesApprovalDecisionRequest.self, from: request.body)
+                let result = try hermesControl.decide(body)
+                await state.recordAudit("hermes approval \(result.decision) id=\(result.id)")
+                sendJSON(result, connection: connection)
                 return
             }
 
@@ -2834,6 +3071,53 @@ final class HostServer: @unchecked Sendable {
         return device
     }
 
+    private func authenticateHermes(_ request: HTTPRequest, connection: NWConnection? = nil) async throws -> String {
+        if let connection, isLoopback(connection.endpoint) {
+            return "local-loopback"
+        }
+        if let localToken = hermesLocalToken(),
+           let supplied = headerValue("x-veqral-local-token", in: request.headers),
+           secureCompare(supplied, localToken) {
+            return "local-hermes"
+        }
+        return try await authenticate(request)
+    }
+
+    private func isLoopback(_ endpoint: NWEndpoint) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else {
+            return false
+        }
+        let value = String(describing: host).lowercased()
+        return value == "localhost" || value == "127.0.0.1" || value == "::1" || value == "[::1]"
+    }
+
+    private func headerValue(_ name: String, in headers: [String: String]) -> String? {
+        if let exact = headers[name] {
+            return exact
+        }
+        let wanted = name.lowercased()
+        return headers.first { key, _ in key.lowercased() == wanted }?.value
+    }
+
+    private func hermesLocalToken() -> String? {
+        if let token = ProcessInfo.processInfo.environment["VEQRAL_HERMES_LOCAL_TOKEN"]?.nilIfBlank {
+            return token
+        }
+        guard let envPath = ProcessInfo.processInfo.environment["VEQRAL_HERMES_LOCAL_ENV"]?.nilIfBlank?.expandingTilde,
+              let content = try? String(contentsOfFile: envPath, encoding: .utf8) else {
+            return nil
+        }
+        for line in content.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
+            let parts = trimmed.split(separator: "=", maxSplits: 1).map(String.init)
+            guard parts.count == 2, parts[0] == "VEQRAL_HERMES_LOCAL_TOKEN" else { continue }
+            let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.nilIfBlank
+        }
+        return nil
+    }
+
     private func upgradeToWebSocket(_ request: HTTPRequest, connection: NWConnection) async throws {
         guard let key = request.headers["sec-websocket-key"] else {
             throw HostError.badRequest("Missing websocket key")
@@ -3008,6 +3292,9 @@ enum CLIAdapterRegistry {
         Chat: \(run.chatID ?? "new")
         Model/provider selection: \(modelLine.isEmpty ? "Hermes configured default" : modelLine)
         Use Hermes native persistent memory, skills, checkpoints, and session history. Do not create a separate shared memory store for Veqral.
+        AI-Hub continuity:
+        - Before substantial work, read relevant recent notes from \(NSHomeDirectory())/Documents/AI-Hub/vault/90_Org/Sessions and the matching playbook under \(NSHomeDirectory())/Documents/AI-Hub/vault/70_Playbooks when those files are accessible.
+        - Use those notes as continuity across Codex/Claude/Hermes runs; the Mac Host records completed runs back into AI-Hub automatically.
         Follow Veqral's P0 policy:
         - Use --worktree for repository work.
         - Auto-run implementation, tests, commits, branch creation, non-main push, and draft PR creation when appropriate.
@@ -5642,14 +5929,7 @@ final class PortfolioRegistryStore {
             return "ログはまだありません。"
         }
         let prompt = "次のログを日本語で短く要約し、異常があれば先頭に書いてください。\n\n\(String(text.suffix(5000)))"
-        if let ollama = commandPath("ollama") {
-            let result = ProcessRunner.run(ollama, ["run", "llama3.2", prompt], timeout: 25)
-            if result.exitCode == 0, let summary = result.stdout.nilIfBlank {
-                return Redactor.redact(summary)
-            }
-        }
-        if text.localizedCaseInsensitiveContains("error") || text.localizedCaseInsensitiveContains("failed"),
-           let claude = commandPath("claude") {
+        if let claude = commandPath("claude") {
             let result = ProcessRunner.run(claude, ["--print", prompt], timeout: 35)
             if result.exitCode == 0, let summary = result.stdout.nilIfBlank {
                 return Redactor.redact(summary)
@@ -7378,6 +7658,207 @@ enum HistoryLineReader {
     }
 }
 
+struct AIHubSessionDigestPayload: Codable {
+    var configPath: String
+    var date: String
+    var taskType: String
+    var agent: String
+    var model: String
+    var reasoning: String
+    var status: String
+    var costUSD: Double?
+    var outcome: String
+    var projects: [String]
+    var tags: [String]
+    var summary: [String]
+    var decisions: [String]
+    var nextActions: [String]
+    var openItems: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case configPath = "config_path"
+        case date
+        case taskType = "task_type"
+        case agent
+        case model
+        case reasoning
+        case status
+        case costUSD = "cost_usd"
+        case outcome
+        case projects
+        case tags
+        case summary
+        case decisions
+        case nextActions = "next_actions"
+        case openItems = "open_items"
+    }
+}
+
+struct AIHubSessionDigestResult {
+    var ok: Bool
+    var message: String
+    var path: String?
+}
+
+enum AIHubSessionDigestBridge {
+    static func record(run: HostRun, logs: [HostLogEvent], config: HostConfig) -> AIHubSessionDigestResult {
+        guard config.resolvedAIHubDigestEnabled else {
+            return AIHubSessionDigestResult(ok: true, message: "AI-Hub digest disabled", path: nil)
+        }
+        guard run.engineOrDefault != .shell else {
+            return AIHubSessionDigestResult(ok: true, message: "Shell runs are not digested", path: nil)
+        }
+        let root = config.resolvedAIHubRoot
+        let configPath = config.resolvedAIHubConfigPath
+        let script = "\(root)/skills/session-digest/scripts/session_digest.py"
+        guard FileManager.default.fileExists(atPath: script) else {
+            return AIHubSessionDigestResult(ok: false, message: "session-digest script not found at \(script)", path: nil)
+        }
+        guard FileManager.default.fileExists(atPath: configPath) else {
+            return AIHubSessionDigestResult(ok: false, message: "AI-Hub config not found at \(configPath)", path: nil)
+        }
+
+        let payload = payload(for: run, logs: logs, configPath: configPath)
+        let payloadURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("veqral-aihub-digest-\(run.id)-\(UUID().uuidString).json")
+        do {
+            let data = try JSONEncoder.pretty.encode(payload)
+            try data.write(to: payloadURL, options: .atomic)
+            defer { try? FileManager.default.removeItem(at: payloadURL) }
+            let output = ProcessRunner.run("/usr/bin/env", ["python3", script, payloadURL.path], workingDirectory: root, timeout: 25)
+            guard output.exitCode == 0 else {
+                return AIHubSessionDigestResult(ok: false, message: Redactor.redact(output.combinedTrimmed), path: nil)
+            }
+            let response = DigestScriptResponse.parse(output.stdout)
+            return AIHubSessionDigestResult(
+                ok: true,
+                message: response?.action.map { "session-digest \($0)" } ?? "session-digest wrote",
+                path: response?.path
+            )
+        } catch {
+            return AIHubSessionDigestResult(ok: false, message: error.localizedDescription, path: nil)
+        }
+    }
+
+    static func jstDay(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private static func payload(for run: HostRun, logs: [HostLogEvent], configPath: String) -> AIHubSessionDigestPayload {
+        let engine = run.engineOrDefault
+        let model = run.model?.nilIfBlank
+            ?? run.usage?.model?.nilIfBlank
+            ?? run.provider?.nilIfBlank
+            ?? ""
+        let cost = run.usage?.actualCostUSD ?? run.usage?.estimatedCostUSD
+        let status = run.exitCode == 0 ? "done" : "failed"
+        let day = jstDay(for: run.completedAt ?? Date())
+        let projectSlug = slug(run.projectID ?? URL(fileURLWithPath: run.workingDirectory).lastPathComponent)
+        let projects = unique([projectSlug, "veqral"].filter { !$0.isEmpty })
+        let usageLine = usageSummary(run.usage)
+        let recent = recentLogSummary(logs)
+        var summary = [
+            "\(engine.title) run completed from Veqral Mac Host.",
+            "Prompt: \(truncate(cleanOneLine(run.prompt), limit: 360))",
+            "Working directory: \(run.workingDirectory)"
+        ]
+        if let sessionID = run.sessionID?.nilIfBlank ?? run.resumeSessionID?.nilIfBlank {
+            summary.append("Session: \(sessionID)")
+        }
+        if let usageLine {
+            summary.append(usageLine)
+        }
+        summary.append(contentsOf: recent.map { "Log: \($0)" })
+
+        let outcome = run.exitCode == 0 ? "Run completed successfully" : "Run failed with exit code \(run.exitCode ?? -1)"
+        let openItems = run.exitCode == 0 ? [] : ["Review the Veqral run logs and fix the failing command."]
+
+        return AIHubSessionDigestPayload(
+            configPath: configPath,
+            date: day,
+            taskType: "dev",
+            agent: "Veqral \(engine.title)",
+            model: model,
+            reasoning: "",
+            status: status,
+            costUSD: cost,
+            outcome: outcome,
+            projects: projects,
+            tags: unique(["veqral-run", "auto-digest", engine.rawValue]),
+            summary: summary,
+            decisions: [],
+            nextActions: run.exitCode == 0 ? ["Use this Obsidian session note as context before related follow-up work."] : ["Inspect the failed run before retrying."],
+            openItems: openItems
+        )
+    }
+
+    private static func usageSummary(_ usage: RunUsage?) -> String? {
+        guard let usage = usage?.normalized else { return nil }
+        var parts: [String] = []
+        if let input = usage.inputTokens { parts.append("input \(input)") }
+        if let output = usage.outputTokens { parts.append("output \(output)") }
+        if let reasoning = usage.reasoningTokens { parts.append("reasoning \(reasoning)") }
+        if let total = usage.totalTokens { parts.append("total \(total)") }
+        if let cost = usage.actualCostUSD ?? usage.estimatedCostUSD {
+            parts.append(String(format: "cost $%.6f", cost))
+        }
+        guard !parts.isEmpty else { return nil }
+        return "Usage: \(parts.joined(separator: ", "))"
+    }
+
+    private static func recentLogSummary(_ logs: [HostLogEvent]) -> [String] {
+        logs
+            .suffix(40)
+            .map { cleanOneLine($0.message) }
+            .filter { !$0.isEmpty }
+            .suffix(8)
+            .map { truncate($0, limit: 220) }
+    }
+
+    private static func cleanOneLine(_ value: String) -> String {
+        Redactor.redact(value)
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func truncate(_ value: String, limit: Int) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit - 1)) + "…"
+    }
+
+    private static func unique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.filter { seen.insert($0).inserted }
+    }
+
+    private static func slug(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let mapped = value.lowercased().unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "-"
+        }
+        return String(mapped).trimmingCharacters(in: CharacterSet(charactersIn: "-")).nilIfBlank ?? "project"
+    }
+
+    private struct DigestScriptResponse: Decodable {
+        var ok: Bool?
+        var action: String?
+        var path: String?
+
+        static func parse(_ text: String) -> DigestScriptResponse? {
+            guard let data = text.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode(DigestScriptResponse.self, from: data)
+        }
+    }
+}
+
 struct ProcessOutput {
     var exitCode: Int32
     var stdout: String
@@ -8131,21 +8612,7 @@ enum RiskClassifier {
 
 enum Redactor {
     static func redact(_ text: String) -> String {
-        var output = text
-        let patterns = [
-            (#"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]+"#, "$1[REDACTED]"),
-            (#"(?i)(token|api[_-]?key|secret|password)\s*[:=]\s*['"]?[^'"\s]+"#, "$1=[REDACTED]"),
-            (#"https://discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9._\-]+"#, "[REDACTED_DISCORD_WEBHOOK]"),
-            (#"(?i)xox[baprs]-[A-Za-z0-9-]+"#, "[REDACTED_SLACK_TOKEN]"),
-            (#"(?i)sk-or-[A-Za-z0-9_-]{12,}"#, "[REDACTED_OPENROUTER_KEY]"),
-            (#"(?i)sk-[A-Za-z0-9]{12,}"#, "[REDACTED]"),
-            (#"(?i)gh[opusr]_[A-Za-z0-9_]+"#, "[REDACTED]"),
-            (#"(?i)github_pat_[A-Za-z0-9_]+"#, "[REDACTED]")
-        ]
-        for (pattern, replacement) in patterns {
-            output = output.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
-        }
-        return output
+        VeqralRedactor.redact(text)
     }
 }
 
@@ -8469,7 +8936,7 @@ private func appleScriptQuoted(_ value: String) -> String {
     "\"\(value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
 }
 
-private extension String {
+extension String {
     var expandingTilde: String {
         NSString(string: self).expandingTildeInPath
     }
