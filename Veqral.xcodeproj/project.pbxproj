@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		D70000000000000000000025 /* AgentSpaceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000026 /* AgentSpaceModels.swift */; };
 		D70000000000000000000023 /* RemoteHistoryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000024 /* RemoteHistoryModels.swift */; };
 		D70000000000000000000021 /* RemoteMemoryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000022 /* RemoteMemoryModels.swift */; };
 		D7000000000000000000001F /* SalesModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70000000000000000000020 /* SalesModels.swift */; };
@@ -52,6 +53,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D70000000000000000000026 /* AgentSpaceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSpaceModels.swift; sourceTree = "<group>"; };
 		D70000000000000000000024 /* RemoteHistoryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteHistoryModels.swift; sourceTree = "<group>"; };
 		D70000000000000000000022 /* RemoteMemoryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteMemoryModels.swift; sourceTree = "<group>"; };
 		D70000000000000000000020 /* SalesModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SalesModels.swift; sourceTree = "<group>"; };
@@ -133,6 +135,7 @@
 				A10000000000000000000011 /* VeqralApp.swift */,
 				A10000000000000000000012 /* Models.swift */,
 				A10000000000000000000019 /* AppState.swift */,
+				D70000000000000000000026 /* AgentSpaceModels.swift */,
 				D70000000000000000000024 /* RemoteHistoryModels.swift */,
 				D70000000000000000000022 /* RemoteMemoryModels.swift */,
 				D70000000000000000000020 /* SalesModels.swift */,
@@ -325,6 +328,7 @@
 				A10000000000000000000005 /* Components.swift in Sources */,
 				A10000000000000000000008 /* CommandCenterViews.swift in Sources */,
 				A10000000000000000000009 /* AppState.swift in Sources */,
+				D70000000000000000000025 /* AgentSpaceModels.swift in Sources */,
 				D70000000000000000000023 /* RemoteHistoryModels.swift in Sources */,
 				D70000000000000000000021 /* RemoteMemoryModels.swift in Sources */,
 				D7000000000000000000001F /* SalesModels.swift in Sources */,
