@@ -8,30 +8,6 @@ import UserNotifications
 import UIKit
 #endif
 
-struct RemoteHostConfiguration: Codable, Equatable, Sendable {
-    var isEnabled: Bool
-    var endpoint: String
-    var deviceID: String
-    var token: String
-    var name: String
-
-    var isPaired: Bool {
-        !endpoint.isEmpty && !deviceID.isEmpty && !token.isEmpty
-    }
-
-    var displayEndpoint: String {
-        endpoint.isEmpty ? L10n.tr("Not Paired") : endpoint
-    }
-
-    static let empty = RemoteHostConfiguration(
-        isEnabled: false,
-        endpoint: "",
-        deviceID: "",
-        token: "",
-        name: ""
-    )
-}
-
 struct RemoteHostLogEvent: Codable, Sendable {
     var runID: String
     var kind: String
@@ -84,19 +60,6 @@ struct RemoteRunAttachment: Codable, Sendable {
     var data: Data
 }
 
-struct RemoteSimpleResponse: Codable, Sendable {
-    var ok: Bool
-}
-
-struct RemotePairResponse: Codable, Sendable {
-    var deviceID: String
-    var token: String
-}
-
-struct RemotePushTokenResponse: Codable, Sendable {
-    var ok: Bool
-}
-
 struct RemoteVoiceCleanupRequest: Codable, Sendable {
     var rawText: String
     var ruleBasedText: String
@@ -115,16 +78,6 @@ struct RemoteVoiceCleanupResponse: Codable, Sendable {
 struct RemoteNotificationTestResponse: Codable, Sendable {
     var ok: Bool
     var message: String
-}
-
-struct RemoteHealthResponse: Codable, Sendable {
-    var status: String
-    var host: String
-    var tailscaleIP: String?
-    var port: UInt16
-    var hermesVersion: String
-    var toolStatuses: [RemoteCLIToolStatus]?
-    var telemetry: RemoteHostTelemetry?
 }
 
 struct RemoteHostTelemetry: Codable, Equatable, Sendable {
