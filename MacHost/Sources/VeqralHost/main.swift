@@ -16,37 +16,44 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
     private let state = HostState()
 
     static func main() {
-        if CommandLine.arguments.dropFirst().first == "smoke-discord-notifications" {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if HostCommandLineHelp.runIfRequested(arguments: arguments) {
+            Foundation.exit(0)
+        }
+        if arguments.first == "smoke-discord-notifications" {
             DiscordNotificationSmoke.runAndExit()
         }
-        if CommandLine.arguments.dropFirst().first == "smoke-project-memory" {
+        if arguments.first == "smoke-project-memory" {
             ProjectMemorySmoke.runAndExit()
         }
-        if CommandLine.arguments.dropFirst().first == "smoke-run-usage" {
+        if arguments.first == "smoke-run-usage" {
             RunUsageSmoke.runAndExit()
         }
-        if CommandLine.arguments.dropFirst().first == "smoke-aihub-digest-bridge" {
+        if arguments.first == "smoke-aihub-digest-bridge" {
             AIHubDigestBridgeSmoke.runAndExit()
         }
-        if CommandLine.arguments.dropFirst().first == "smoke-host-telemetry" {
+        if arguments.first == "smoke-local-llm" {
+            LocalLLMSmoke.runAndExit()
+        }
+        if arguments.first == "smoke-host-telemetry" {
             HostTelemetrySmoke.runAndExit()
         }
-        if CommandLine.arguments.dropFirst().first == "smoke-voice-cleanup" {
+        if arguments.first == "smoke-voice-cleanup" {
             VoiceCleanupSmoke.runAndExit()
         }
-        if CommandLine.arguments.dropFirst().first == "smoke-cost-governance" {
+        if arguments.first == "smoke-cost-governance" {
             CostGovernanceSmoke.runAndExit()
         }
-        if CommandLine.arguments.dropFirst().first == "smoke-portfolio-real-data" {
+        if arguments.first == "smoke-portfolio-real-data" {
             PortfolioRealDataSmoke.runAndExit()
         }
-        if CommandLine.arguments.dropFirst().first == "smoke-auth-onboarding" {
+        if arguments.first == "smoke-auth-onboarding" {
             AuthOnboardingSmoke.runAndExit()
         }
-        if CommandLine.arguments.dropFirst().first == "smoke-hermes-control" {
+        if arguments.first == "smoke-hermes-control" {
             HermesControlSmoke.runAndExit()
         }
-        if SalesLabSmoke.runIfRequested(arguments: Array(CommandLine.arguments.dropFirst())) {
+        if SalesLabSmoke.runIfRequested(arguments: arguments) {
             Foundation.exit(0)
         }
         // LaunchAgents can inherit an invalid working directory; normalize before Foundation spawns helper processes.
@@ -70,6 +77,42 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         } catch {
             statusController?.setStatus("Failed: \(error.localizedDescription)")
         }
+    }
+}
+
+enum HostCommandLineHelp {
+    static func runIfRequested(arguments: [String]) -> Bool {
+        guard let first = arguments.first?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              ["--help", "-h", "help"].contains(first) else {
+            return false
+        }
+        print("""
+        VeqralHost — local Mac Host for Veqral remote agent control.
+
+        Usage:
+          VeqralHost                         Start the menu-bar Mac Host server.
+          VeqralHost help | --help | -h      Print this help and exit.
+
+        Smoke commands:
+          smoke-project-memory               Verify Hermes memory/project snapshot is readable.
+          smoke-hermes-control               Verify Hermes config/vault presets and approvals bridge.
+          smoke-local-llm                    Verify AI-Hub local policy resolves and Ollama generates content.
+          smoke-aihub-digest-bridge          Verify completed runs are written to AI-Hub/Obsidian session notes.
+          smoke-run-usage                    Verify Claude/Codex/text usage parsing.
+          smoke-host-telemetry               Verify host telemetry collection.
+          smoke-voice-cleanup                Verify voice cleanup fallback chain.
+          smoke-discord-notifications        Verify local Discord webhook payload/redaction.
+          smoke-auth-onboarding              Verify CLI auth onboarding readiness detection.
+          smoke-cost-governance              Verify per-project cost governance.
+          smoke-portfolio-real-data          Verify portfolio registry real-data paths.
+
+        Live runtime requirements:
+          LaunchAgent should provide HOME, PATH, VEQRAL_HERMES_CONFIG,
+          VEQRAL_HERMES_VAULT, and VEQRAL_AIHUB_ROOT so Hermes presets,
+          Obsidian approval queues, AI-Hub policy resolution, and session
+          digests use the same live paths as the desktop Hermes app.
+        """)
+        return true
     }
 }
 
@@ -949,6 +992,136 @@ enum HermesControlSmoke {
             print("FAIL: Hermes control smoke failed: \(error.localizedDescription)")
             Foundation.exit(1)
         }
+    }
+}
+
+enum LocalLLMSmoke {
+    private struct ResolvedPolicy: Decodable {
+        var policy: String
+        var provider: String
+        var model: String
+        var baseURL: String
+        var contextLength: String?
+        var reasoning: String?
+
+        enum CodingKeys: String, CodingKey {
+            case policy
+            case provider
+            case model
+            case baseURL = "base_url"
+            case contextLength = "context_length"
+            case reasoning
+        }
+    }
+
+    private struct ChatMessage: Codable {
+        var role: String
+        var content: String
+        var thinking: String?
+    }
+
+    private struct ChatRequest: Encodable {
+        var model: String
+        var messages: [ChatMessage]
+        var stream: Bool
+        var options: [String: Int]
+    }
+
+    private struct ChatResponse: Decodable {
+        var model: String?
+        var done: Bool?
+        var doneReason: String?
+        var message: ChatMessage?
+
+        enum CodingKeys: String, CodingKey {
+            case model
+            case done
+            case doneReason = "done_reason"
+            case message
+        }
+    }
+
+    static func runAndExit() -> Never {
+        Task {
+            do {
+                let result = try await run()
+                print("PASS: Local LLM smoke policy=\(result.policy) provider=\(result.provider) model=\(result.model) baseURL=\(result.baseURL) response=\(result.response)")
+                Foundation.exit(0)
+            } catch {
+                print("FAIL: Local LLM smoke failed: \(error.localizedDescription)")
+                Foundation.exit(1)
+            }
+        }
+        dispatchMain()
+    }
+
+    private static func run() async throws -> (policy: String, provider: String, model: String, baseURL: String, response: String) {
+        let policy = ProcessInfo.processInfo.environment["VEQRAL_LOCAL_LLM_POLICY"]?.nilIfBlank ?? "local-fast"
+        let configPath = ProcessInfo.processInfo.environment["VEQRAL_HERMES_CONFIG"]?.nilIfBlank?.expandingTilde
+            ?? "\(NSHomeDirectory())/.hermes/config.yaml"
+        let aiHubRoot = ProcessInfo.processInfo.environment["VEQRAL_AIHUB_ROOT"]?.nilIfBlank?.expandingTilde
+            ?? "\(NSHomeDirectory())/Documents/AI-Hub/hermes-hub"
+        let resolver = "\(aiHubRoot)/scripts/hermes-monthly-switch"
+        guard FileManager.default.fileExists(atPath: resolver) else {
+            throw SmokeError("AI-Hub model policy resolver not found at \(resolver)")
+        }
+
+        let output = ProcessRunner.run(
+            "/usr/bin/env",
+            ["python3", resolver, "--config", configPath, "resolve", policy],
+            workingDirectory: aiHubRoot,
+            timeout: 15
+        )
+        guard output.exitCode == 0 else {
+            throw SmokeError("Policy \(policy) did not resolve: \(Redactor.redact(output.combinedTrimmed))")
+        }
+        guard let data = output.stdout.data(using: .utf8),
+              let resolved = try? JSONDecoder().decode(ResolvedPolicy.self, from: data) else {
+            throw SmokeError("Policy \(policy) resolver output was not valid JSON.")
+        }
+        guard resolved.provider == "custom" else {
+            throw SmokeError("Policy \(policy) resolved provider=\(resolved.provider); expected custom local provider.")
+        }
+        guard resolved.baseURL.contains("127.0.0.1") || resolved.baseURL.contains("localhost") else {
+            throw SmokeError("Policy \(policy) resolved non-local baseURL=\(resolved.baseURL)")
+        }
+
+        let response = try await generate(resolved: resolved)
+        return (resolved.policy, resolved.provider, resolved.model, resolved.baseURL, response)
+    }
+
+    private static func generate(resolved: ResolvedPolicy) async throws -> String {
+        let prompt = ProcessInfo.processInfo.environment["VEQRAL_LOCAL_LLM_SMOKE_PROMPT"]?.nilIfBlank
+            ?? "/no_think Return exactly OK."
+        var root = resolved.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if root.hasSuffix("/v1") {
+            root = String(root.dropLast(3))
+        }
+        guard let url = URL(string: "\(root)/api/chat") else {
+            throw SmokeError("Invalid Ollama base URL: \(resolved.baseURL)")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 120
+        request.httpBody = try JSONEncoder().encode(ChatRequest(
+            model: resolved.model,
+            messages: [ChatMessage(role: "user", content: prompt, thinking: nil)],
+            stream: false,
+            options: ["num_predict": 256]
+        ))
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw SmokeError("Ollama local chat returned non-2xx: \(Redactor.redact(body))")
+        }
+        let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
+        let content = decoded.message?.content.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !content.isEmpty else {
+            let thinkingBytes = decoded.message?.thinking?.utf8.count ?? 0
+            throw SmokeError("Ollama model \(resolved.model) returned empty content (thinking bytes=\(thinkingBytes), doneReason=\(decoded.doneReason ?? "unknown")).")
+        }
+        return Redactor.redact(content)
     }
 }
 
@@ -3350,6 +3523,7 @@ enum CLIAdapterRegistry {
         var args = [
             "--print",
             "--output-format", "stream-json",
+            "--verbose",
             "--permission-mode", "auto"
         ]
         if let model = run.model?.nilIfBlank {
@@ -3478,7 +3652,7 @@ enum CLIAdapterRegistry {
         case .codex:
             "codex exec [--model <model>] [resume <session>] <prompt>"
         case .claude:
-            "claude --print --output-format stream-json [--resume <session>] [--model <model>] <prompt>"
+            "claude --print --output-format stream-json --verbose [--resume <session>] [--model <model>] <prompt>"
         case .shell:
             "zsh -lc <approved command>"
         }
