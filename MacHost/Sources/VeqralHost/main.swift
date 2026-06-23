@@ -1024,6 +1024,7 @@ enum LocalLLMSmoke {
         var model: String
         var messages: [ChatMessage]
         var stream: Bool
+        var think: Bool
         var options: [String: Int]
     }
 
@@ -1108,6 +1109,7 @@ enum LocalLLMSmoke {
             model: resolved.model,
             messages: [ChatMessage(role: "user", content: prompt, thinking: nil)],
             stream: false,
+            think: false,
             options: ["num_predict": 256]
         ))
         let (data, response) = try await URLSession.shared.data(for: request)
