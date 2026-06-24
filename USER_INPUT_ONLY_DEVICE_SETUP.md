@@ -21,7 +21,7 @@ VEQRAL_DEVICE_ID=00008140-001611892606801C Scripts/finish_user_input_only_setup.
 
 1. Checks live `VeqralHost` on `http://127.0.0.1:7878/v1/health`.
 2. Detects paired physical iPhone/iPad devices via `xcrun devicectl`.
-3. Builds `Veqral.app` for a physical iOS device using Xcode automatic provisioning.
+3. Builds `Veqral.app` for the selected physical iOS device using Xcode automatic provisioning and device registration.
 4. Installs the `.app` on the selected device.
 5. Launches `dev.hiroyuki.veqral` on the selected device.
 6. Confirms the app is installed and the live Mac Host is still healthy.

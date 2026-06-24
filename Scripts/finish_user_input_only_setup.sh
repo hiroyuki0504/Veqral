@@ -206,9 +206,10 @@ while :; do
     -project Veqral.xcodeproj \
     -scheme Veqral \
     -configuration Debug \
-    -destination 'generic/platform=iOS' \
+    -destination "platform=iOS,id=${DEVICE_ID}" \
     -derivedDataPath "${DD}" \
     -allowProvisioningUpdates \
+    -allowProvisioningDeviceRegistration \
     build 2>&1 | tee "${BUILD_LOG}"
   BUILD_STATUS=${PIPESTATUS[0]}
   set -e
