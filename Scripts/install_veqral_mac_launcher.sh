@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 APP_DIR="${VEQRAL_LAUNCHER_APP:-$HOME/Applications/Veqral.app}"
+APP_PARENT=$(dirname -- "${APP_DIR}")
 ICON_SRC="${ROOT}/Veqral/Assets.xcassets/AppIcon.appiconset/AppIcon.png"
 SCRIPT_SRC=$(mktemp /tmp/veqral-launcher-script.XXXXXX)
 ICON_BASE=$(mktemp -d /tmp/veqral-launcher-icon.XXXXXX)
@@ -20,10 +21,20 @@ on run
 	set msg to "Veqral\n\nMac Host: " & hostStatus & "\n\n通常はこのまま閉じてOKです。プロジェクトを開く場合だけ Project を押してください。"
 	set choice to button returned of (display dialog msg buttons {"Project", "OK"} default button "OK" with title "Veqral")
 	if choice is "Project" then
-		tell application "Finder" to open POSIX file "/Users/hiroyuki/Documents/Veqral"
+		tell application "Finder" to open POSIX file "__VEQRAL_PROJECT_ROOT__"
 	end if
 end run
 APPLESCRIPT
+
+mkdir -p "${APP_PARENT}"
+/usr/bin/python3 - "${SCRIPT_SRC}" "${ROOT}" <<'PY'
+from pathlib import Path
+import sys
+
+script = Path(sys.argv[1])
+root = sys.argv[2].replace('\\', '\\\\').replace('"', '\\"')
+script.write_text(script.read_text().replace('__VEQRAL_PROJECT_ROOT__', root))
+PY
 
 /usr/bin/osacompile -o "${APP_DIR}" "${SCRIPT_SRC}"
 
