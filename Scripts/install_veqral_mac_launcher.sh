@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 APP_DIR="${VEQRAL_LAUNCHER_APP:-$HOME/Applications/Veqral.app}"
-ICON_SRC="${ROOT}/Veqral/Assets.xcassets/AppIconDark.imageset/AppIcon-dark.png"
+ICON_SRC="${ROOT}/Veqral/Assets.xcassets/AppIcon.appiconset/AppIcon.png"
 SCRIPT_SRC=$(mktemp /tmp/veqral-launcher-script.XXXXXX)
 ICON_BASE=$(mktemp -d /tmp/veqral-launcher-icon.XXXXXX)
 ICONSET="${ICON_BASE}/Veqral.iconset"
