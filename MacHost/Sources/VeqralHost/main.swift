@@ -893,6 +893,18 @@ struct SmokeError: LocalizedError {
     }
 }
 
+struct SmokeSkip: LocalizedError {
+    var message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var errorDescription: String? {
+        message
+    }
+}
+
 enum ProjectMemorySmoke {
     static func runAndExit() -> Never {
         do {
@@ -925,12 +937,13 @@ enum HermesControlSmoke {
             try FileManager.default.createDirectory(at: approvals, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: aiHubRoot.appendingPathComponent("scripts", isDirectory: true), withIntermediateDirectories: true)
             let resolver = aiHubRoot.appendingPathComponent("scripts/hermes-monthly-switch")
+            let fixtureLocalModel = "fixture-local-model"
             try """
             import json
             print(json.dumps({
                 "policy": "local-fast",
                 "provider": "custom",
-                "model": "qwen3:8b",
+                "model": "\(fixtureLocalModel)",
                 "base_url": "http://127.0.0.1:11434/v1",
                 "context_length": "4096",
                 "reasoning": "low"
@@ -939,7 +952,7 @@ enum HermesControlSmoke {
             try """
             | ラベル | Policy | Provider | Model | Base URL | Context Length | 思考深度 | 用途 |
             | --- | --- | --- | --- | --- | --- | --- | --- |
-            | local-fast |  | custom | qwen3:8b | http://127.0.0.1:11434/v1 | 65536 | low | local |
+            | local-fast |  | custom | \(fixtureLocalModel) | http://127.0.0.1:11434/v1 | 65536 | low | local |
             | 標準 |  | openai-codex | gpt-5.5 |  |  | medium | cloud |
             | 方針local | local-fast |  | policy:local-fast |  |  | medium | policy |
             """.write(to: presets, atomically: true, encoding: .utf8)
@@ -971,7 +984,7 @@ enum HermesControlSmoke {
 
             _ = try store.update(HermesControlUpdateRequest(presetID: "preset-1", provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil))
             let local = try store.status()
-            guard local.provider == "custom", local.model == "qwen3:8b", local.baseURL == "http://127.0.0.1:11434/v1", local.contextLength == "65536", local.reasoning == "low" else {
+            guard local.provider == "custom", local.model == fixtureLocalModel, local.baseURL == "http://127.0.0.1:11434/v1", local.contextLength == "65536", local.reasoning == "low" else {
                 throw SmokeError("Local preset did not apply provider/model/baseURL/contextLength/reasoning")
             }
 
@@ -983,7 +996,7 @@ enum HermesControlSmoke {
 
             _ = try store.update(HermesControlUpdateRequest(presetID: "preset-3", provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil))
             let policy = try store.status()
-            guard policy.provider == "custom", policy.model == "qwen3:8b", policy.baseURL == "http://127.0.0.1:11434/v1", policy.contextLength == "4096", policy.reasoning == "low" else {
+            guard policy.provider == "custom", policy.model == fixtureLocalModel, policy.baseURL == "http://127.0.0.1:11434/v1", policy.contextLength == "4096", policy.reasoning == "low" else {
                 throw SmokeError("Policy preset did not resolve through AI-Hub resolver")
             }
 
@@ -1043,11 +1056,23 @@ enum LocalLLMSmoke {
         }
     }
 
+    private struct OllamaTagsResponse: Decodable {
+        var models: [OllamaModelTag]
+    }
+
+    private struct OllamaModelTag: Decodable {
+        var name: String
+        var size: Int64?
+    }
+
     static func runAndExit() -> Never {
         Task {
             do {
                 let result = try await run()
                 print("PASS: Local LLM smoke policy=\(result.policy) provider=\(result.provider) model=\(result.model) baseURL=\(result.baseURL) response=\(result.response)")
+                Foundation.exit(0)
+            } catch let skip as SmokeSkip {
+                print("SKIP: Local LLM smoke skipped: \(skip.localizedDescription)")
                 Foundation.exit(0)
             } catch {
                 print("FAIL: Local LLM smoke failed: \(error.localizedDescription)")
@@ -1075,10 +1100,17 @@ enum LocalLLMSmoke {
             timeout: 15
         )
         guard output.exitCode == 0 else {
-            throw SmokeError("Policy \(policy) did not resolve: \(Redactor.redact(output.combinedTrimmed))")
+            let message = Redactor.redact(output.combinedTrimmed)
+            if message.contains("no lightweight installed")
+                || message.contains("no Ollama models are installed")
+                || message.contains("none of the configured local candidates are installed")
+                || message.contains("heavy local model lane is scheduled") {
+                throw SmokeSkip("Policy \(policy) is not runnable as a lightweight local smoke right now: \(message)")
+            }
+            throw SmokeError("Policy \(policy) did not resolve: \(message)")
         }
         guard let data = output.stdout.data(using: .utf8),
-              let resolved = try? JSONDecoder().decode(ResolvedPolicy.self, from: data) else {
+              var resolved = try? JSONDecoder().decode(ResolvedPolicy.self, from: data) else {
             throw SmokeError("Policy \(policy) resolver output was not valid JSON.")
         }
         guard resolved.provider == "custom" else {
@@ -1088,8 +1120,70 @@ enum LocalLLMSmoke {
             throw SmokeError("Policy \(policy) resolved non-local baseURL=\(resolved.baseURL)")
         }
 
+        resolved.model = try await runnableLocalModel(for: resolved)
         let response = try await generate(resolved: resolved)
         return (resolved.policy, resolved.provider, resolved.model, resolved.baseURL, response)
+    }
+
+    private static func runnableLocalModel(for resolved: ResolvedPolicy) async throws -> String {
+        let models = try await ollamaModels(baseURL: resolved.baseURL)
+        let installed = models.map(\.name)
+        guard !installed.isEmpty else {
+            throw SmokeSkip("Ollama is reachable but no local models are installed.")
+        }
+        let allowHeavy = ProcessInfo.processInfo.environment["VEQRAL_LOCAL_LLM_SMOKE_ALLOW_HEAVY"] == "1"
+        if installed.contains(resolved.model), isRunnableChatModel(resolved.model, in: models, allowHeavy: allowHeavy) {
+            return resolved.model
+        }
+        let candidates = models
+            .filter { isRunnableChatModel($0.name, in: models, allowHeavy: allowHeavy) }
+            .map(\.name)
+        if let candidate = candidates.first {
+            return candidate
+        }
+        let heavyHint = models.contains { isHeavyModel($0.name, size: $0.size) }
+            ? " Installed generation models are heavy; set VEQRAL_LOCAL_LLM_SMOKE_ALLOW_HEAVY=1 for an explicit opt-in smoke, or run them from the scheduled heavy lane."
+            : ""
+        throw SmokeSkip("No lightweight installed chat model is available for local smoke.\(heavyHint)")
+    }
+
+    private static func ollamaModels(baseURL: String) async throws -> [OllamaModelTag] {
+        var root = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if root.hasSuffix("/v1") {
+            root = String(root.dropLast(3))
+        }
+        guard let url = URL(string: "\(root)/api/tags") else {
+            throw SmokeError("Invalid Ollama base URL: \(baseURL)")
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw SmokeSkip("Ollama tags endpoint is not available: \(Redactor.redact(body))")
+        }
+        return (try? JSONDecoder().decode(OllamaTagsResponse.self, from: data).models) ?? []
+    }
+
+    private static func isRunnableChatModel(_ name: String, in models: [OllamaModelTag], allowHeavy: Bool) -> Bool {
+        let tag = models.first { $0.name == name }
+        return !isEmbeddingModel(name) && (allowHeavy || !isHeavyModel(name, size: tag?.size))
+    }
+
+    private static func isEmbeddingModel(_ name: String) -> Bool {
+        let lowered = name.lowercased()
+        return lowered.contains("embed") || lowered.contains("embedding") || lowered.contains("nomic-embed")
+    }
+
+    private static func isHeavyModel(_ name: String, size: Int64?) -> Bool {
+        let lowered = name.lowercased()
+        if lowered.contains("35b") || lowered.contains("70b") || lowered.contains("120b") || lowered.contains("gpt-oss:20b") {
+            return true
+        }
+        if let size, size >= 12_000_000_000 {
+            return true
+        }
+        return false
     }
 
     private static func generate(resolved: ResolvedPolicy) async throws -> String {

@@ -58,7 +58,7 @@ bundle already installed: dev.hiroyuki.veqral version 1.0
 
 - Live Mac Host installed and restarted from integration branch.
 - LaunchAgent env includes `VEQRAL_HERMES_CONFIG`, `VEQRAL_HERMES_VAULT`, and `VEQRAL_AIHUB_ROOT`.
-- local LLM smoke passed via Ollama `qwen3:8b` with thinking disabled for smoke.
+- local LLM smoke now uses the AI-Hub policy resolver and skips cleanly when no lightweight installed chat model is available; heavy `qwen3.6:35b-a3b` is a scheduled/explicit lane, not a resident default.
 - Obsidian/Hermes endpoints passed.
 - Codex and Claude history signed API paths passed.
 - iPhone 17 Simulator build/install/launch passed and displayed the Veqral Japanese command UI.
