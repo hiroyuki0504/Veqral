@@ -404,6 +404,7 @@ struct HostRun: Codable, Sendable, Identifiable {
     var model: String?
     var approvalSeverity: ApprovalSeverity? = nil
     var usage: RunUsage? = nil
+    var interaction: VeqralDetectedInteraction? = nil
 
     var engineOrDefault: AgentEngine {
         engine ?? .hermes
@@ -2116,6 +2117,7 @@ struct HostLogEvent: Codable, Sendable {
     var createdAt: Date
     var sessionID: String?
     var exitCode: Int32?
+    var interaction: VeqralDetectedInteraction? = nil
 }
 
 actor HostState {
@@ -2124,6 +2126,7 @@ actor HostState {
     private var logs: [String: [HostLogEvent]] = [:]
     private var subscribers: [String: [UUID: @Sendable (HostLogEvent) -> Void]] = [:]
     private var processes: [String: pid_t] = [:]
+    private var ptyMasters: [String: Int32] = [:]
     private var devices: [DeviceRecord] = []
     private var pairingCode: String = String(UUID().uuidString.prefix(8)).uppercased()
     private var pairingSecret: String = randomToken()
@@ -2405,18 +2408,23 @@ actor HostState {
         return run
     }
 
-    func markStarted(runID: String, pid: pid_t) {
+    func markStarted(runID: String, pid: pid_t, ptyMaster: Int32? = nil) {
         guard var run = runs[runID] else { return }
         run.status = .running
         run.pid = pid
         runs[runID] = run
         processes[runID] = pid
+        if let ptyMaster {
+            ptyMasters[runID] = ptyMaster
+        }
         persistRuns()
         publish(HostLogEvent(runID: runID, kind: .status, stream: "host", message: "Run started pid=\(pid)", createdAt: Date()))
     }
 
     func appendLog(runID: String, stream: String, message: String) {
         let redacted = Redactor.redact(message)
+        let detectionContext = ((logs[runID] ?? []).suffix(12).map(\.message) + [redacted]).joined(separator: "\n")
+        let detectedInteraction = VeqralInteractionDetector.detect(in: detectionContext)
         if var run = runs[runID] {
             var didUpdate = false
             if let sessionID = SessionParser.sessionID(from: redacted), run.sessionID != sessionID {
@@ -2427,12 +2435,24 @@ actor HostState {
                 applyUsage(usage, to: &run)
                 didUpdate = true
             }
+            if let detectedInteraction {
+                run.interaction = detectedInteraction
+                didUpdate = true
+            }
             if didUpdate {
                 runs[runID] = run
                 persistRuns()
             }
         }
-        publish(HostLogEvent(runID: runID, kind: .log, stream: stream, message: redacted, createdAt: Date(), sessionID: runs[runID]?.sessionID))
+        publish(HostLogEvent(
+            runID: runID,
+            kind: detectedInteraction == nil ? .log : .approval,
+            stream: stream,
+            message: redacted,
+            createdAt: Date(),
+            sessionID: runs[runID]?.sessionID,
+            interaction: detectedInteraction
+        ))
     }
 
     private func applyUsage(_ usage: RunUsage, to run: inout HostRun) {
@@ -2455,8 +2475,10 @@ actor HostState {
         run.exitCode = exitCode
         run.completedAt = Date()
         run.pid = nil
+        run.interaction = nil
         runs[runID] = run
         processes[runID] = nil
+        ptyMasters[runID] = nil
         persistRuns()
         pauseBudgetIfNeeded(after: run)
         appendAudit("finished run id=\(runID) exit=\(exitCode)")
@@ -2488,8 +2510,10 @@ actor HostState {
         run.status = .cancelled
         run.completedAt = Date()
         run.pid = nil
+        run.interaction = nil
         runs[runID] = run
         processes[runID] = nil
+        ptyMasters[runID] = nil
         persistRuns()
         appendAudit("cancelled run id=\(runID)")
         publish(HostLogEvent(runID: runID, kind: .status, stream: "host", message: "Run cancelled", createdAt: Date()))
@@ -2505,6 +2529,7 @@ actor HostState {
         run.status = .queued
         run.completedAt = nil
         run.exitCode = nil
+        run.interaction = nil
         runs[runID] = run
         persistRuns()
         appendAudit("resume requested run id=\(runID)")
@@ -2539,10 +2564,43 @@ actor HostState {
         }
         run.status = .queued
         run.approvalReason = nil
+        run.interaction = nil
         runs[runID] = run
         persistRuns()
         appendAudit("approved run id=\(runID)")
         publish(HostLogEvent(runID: runID, kind: .status, stream: "host", message: "Approval accepted", createdAt: Date(), sessionID: run.sessionID))
+        return run
+    }
+
+    func submitInput(runID: String, text: String, submit: Bool = true) throws -> HostRun {
+        guard var run = runs[runID] else {
+            throw HostError.notFound("Run not found")
+        }
+        guard ![RunStatusWire.complete, .failed, .cancelled].contains(run.status) else {
+            throw HostError.badRequest("Run is no longer accepting input")
+        }
+        guard let master = ptyMasters[runID] else {
+            throw HostError.badRequest("Run is not accepting terminal input yet")
+        }
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else {
+            throw HostError.badRequest("Input is empty")
+        }
+        let payload = submit ? clean + "\n" : clean
+        let data = Data(payload.utf8)
+        let written = data.withUnsafeBytes { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Darwin.write(master, base, buffer.count)
+        }
+        guard written == data.count else {
+            let reason = written < 0 ? String(cString: strerror(errno)) : "short write \(written)/\(data.count)"
+            throw HostError.badRequest("Failed to send input: \(reason)")
+        }
+        run.interaction = nil
+        runs[runID] = run
+        persistRuns()
+        appendAudit("submitted input run id=\(runID) bytes=\(data.count)")
+        publish(HostLogEvent(runID: runID, kind: .status, stream: "input", message: "Input sent from Veqral", createdAt: Date(), sessionID: run.sessionID))
         return run
     }
 
@@ -3231,6 +3289,10 @@ final class HostServer: @unchecked Sendable {
                     _ = try await state.approve(runID: runID)
                     sendJSON(SimpleResponse(ok: true), connection: connection)
                     Task { await runner.start(runID: runID) }
+                case ("POST", "input"):
+                    let body = try JSONDecoder.dates.decode(RunInputRequest.self, from: request.body)
+                    _ = try await state.submitInput(runID: runID, text: body.text, submit: body.submit ?? true)
+                    sendJSON(SimpleResponse(ok: true), connection: connection)
                 case ("POST", "reject"):
                     await state.cancel(runID: runID)
                     sendJSON(SimpleResponse(ok: true), connection: connection)
@@ -3821,7 +3883,7 @@ enum PTYProcess {
             await state.finish(runID: runID, exitCode: 127)
             return
         }
-        await state.markStarted(runID: runID, pid: pid)
+        await state.markStarted(runID: runID, pid: pid, ptyMaster: master)
         setNonBlocking(master)
 
         var waitStatus: Int32 = 0
@@ -8639,6 +8701,11 @@ struct CreateRunResponse: Codable {
     var approvalRequired: Bool
     var approvalReason: String?
     var approvalSeverity: String?
+}
+
+struct RunInputRequest: Codable {
+    var text: String
+    var submit: Bool? = true
 }
 
 struct RunListResponse: Codable {

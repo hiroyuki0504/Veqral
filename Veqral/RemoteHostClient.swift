@@ -187,6 +187,15 @@ struct RemoteHostClient: Sendable {
         _ = try await request(path: "/v1/runs/\(remoteRunID)/approve", method: "POST", body: Data())
     }
 
+    func submitInput(remoteRunID: String, text: String, submit: Bool = true) async throws {
+        struct Body: Encodable {
+            var text: String
+            var submit: Bool
+        }
+        let body = try JSONEncoder.commandCenter.encode(Body(text: text, submit: submit))
+        _ = try await request(path: "/v1/runs/\(remoteRunID)/input", method: "POST", body: body)
+    }
+
     func reject(remoteRunID: String) async throws {
         _ = try await request(path: "/v1/runs/\(remoteRunID)/reject", method: "POST", body: Data())
     }

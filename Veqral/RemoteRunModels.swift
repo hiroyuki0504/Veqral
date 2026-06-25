@@ -35,6 +35,7 @@ struct RemoteRunRecord: Codable, Identifiable, Equatable, Sendable {
     var provider: String?
     var model: String?
     var usage: CommandRunUsage?
+    var interaction: CommandInteractionPrompt? = nil
 }
 
 struct RemoteRunListResponse: Codable, Sendable {
