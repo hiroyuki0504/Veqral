@@ -24,4 +24,15 @@ extension String {
     }
 }
 
+extension Array where Element: Hashable {
+    func uniqued() -> [Element] {
+        var seen = Set<Element>()
+        var result: [Element] = []
+        for element in self where seen.insert(element).inserted {
+            result.append(element)
+        }
+        return result
+    }
+}
+
 // MARK: - Hermes remote control (model / reasoning / vault approvals)

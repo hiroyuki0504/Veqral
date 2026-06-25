@@ -2161,10 +2161,26 @@ actor HostState {
         return pairingCode
     }
 
+    func pairingEndpoints() -> [String] {
+        var endpoints: [String] = []
+        endpoints.append("http://\(localHostName()):\(config.port)")
+        if let tailscaleIP = tailscaleIP() {
+            endpoints.append("http://\(tailscaleIP):\(config.port)")
+        }
+        return endpoints.uniqued()
+    }
+
     func pairingURL() -> String {
-        let endpoint = "http://\(tailscaleIP() ?? localHostName()):\(config.port)"
-        let signature = pairingSignature(endpoint: endpoint, code: pairingCode)
-        return "veqral://pair?endpoint=\(endpoint.urlQueryEscaped)&code=\(pairingCode)&signature=\(signature.urlQueryEscaped)"
+        let endpoints = pairingEndpoints()
+        let signedEndpoint = endpoints.first ?? "http://\(localHostName()):\(config.port)"
+        let signature = pairingSignature(endpoint: signedEndpoint, code: pairingCode)
+        var queryParts = [
+            "endpoint=\(signedEndpoint.urlQueryEscaped)",
+            "code=\(pairingCode.urlQueryEscaped)",
+            "signature=\(signature.urlQueryEscaped)"
+        ]
+        queryParts.append(contentsOf: endpoints.dropFirst().map { "fallback=\($0.urlQueryEscaped)" })
+        return "veqral://pair?\(queryParts.joined(separator: "&"))"
     }
 
     func pair(deviceName: String, code: String, pairingEndpoint: String? = nil, pairingSignature: String? = nil) throws -> (deviceID: String, token: String) {
@@ -2793,7 +2809,8 @@ final class HostServer: @unchecked Sendable {
             if request.path == "/v1/pairing", request.method == "GET" {
                 let url = await state.pairingURL()
                 let code = await state.currentPairingCode()
-                sendJSON(PairingStatus(pairingCode: code, pairingURL: url), connection: connection)
+                let endpoints = await state.pairingEndpoints()
+                sendJSON(PairingStatus(pairingCode: code, pairingURL: url, pairingEndpoints: endpoints), connection: connection)
                 return
             }
 
@@ -8555,6 +8572,7 @@ struct HostTelemetryProcess: Codable {
 struct PairingStatus: Codable {
     var pairingCode: String
     var pairingURL: String
+    var pairingEndpoints: [String]
 }
 
 struct PairRequest: Codable {
@@ -9130,6 +9148,17 @@ extension String {
     var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+extension Array where Element: Hashable {
+    func uniqued() -> [Element] {
+        var seen = Set<Element>()
+        var result: [Element] = []
+        for element in self where seen.insert(element).inserted {
+            result.append(element)
+        }
+        return result
     }
 }
 
