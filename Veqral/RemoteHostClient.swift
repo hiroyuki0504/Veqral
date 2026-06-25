@@ -23,10 +23,17 @@ enum RemoteHostError: Error, LocalizedError {
 struct RemoteHostClient: Sendable {
     let configuration: RemoteHostConfiguration
 
-    static func pair(endpoint: String, deviceName: String, pairingCode: String, pairingSignature: String? = nil) async throws -> RemotePairResponse {
+    static func pair(
+        endpoint: String,
+        deviceName: String,
+        pairingCode: String,
+        pairingSignature: String? = nil,
+        signedEndpoint: String? = nil
+    ) async throws -> RemotePairResponse {
         guard let url = URL(string: "/v1/pair", relativeTo: URL(string: endpoint)) else {
             throw RemoteHostError.invalidConfiguration
         }
+        let pairingEndpoint = signedEndpoint?.nilIfBlank ?? endpoint
         struct PairBody: Codable {
             var deviceName: String
             var pairingCode: String
@@ -35,11 +42,12 @@ struct RemoteHostClient: Sendable {
         }
         var request = URLRequest(url: url.absoluteURL)
         request.httpMethod = "POST"
+        request.timeoutInterval = 5
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder.commandCenter.encode(PairBody(
             deviceName: deviceName,
             pairingCode: pairingCode,
-            pairingEndpoint: endpoint,
+            pairingEndpoint: pairingEndpoint,
             pairingSignature: pairingSignature
         ))
         let (data, response) = try await URLSession.shared.data(for: request)

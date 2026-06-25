@@ -533,18 +533,57 @@ final class CommandCenterStore: ObservableObject {
     }
 
     func pairRemoteHost(endpoint: String, pairingCode: String, pairingSignature: String? = nil, deviceName: String) async throws {
-        let cleanEndpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = try await pairRemoteHost(
+            endpoints: [endpoint],
+            signedEndpoint: endpoint,
+            pairingCode: pairingCode,
+            pairingSignature: pairingSignature,
+            deviceName: deviceName
+        )
+    }
+
+    @discardableResult
+    func pairRemoteHost(endpoints: [String], signedEndpoint: String? = nil, pairingCode: String, pairingSignature: String? = nil, deviceName: String) async throws -> String {
+        let cleanEndpoints = endpoints
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .uniqued()
+        guard let firstEndpoint = cleanEndpoints.first else {
+            throw RemoteHostError.invalidConfiguration
+        }
+        let signatureEndpoint = signedEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank ?? firstEndpoint
         let cleanCode = pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanSignature = pairingSignature?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
-        let response = try await RemoteHostClient.pair(
-            endpoint: cleanEndpoint,
-            deviceName: deviceName,
-            pairingCode: cleanCode,
-            pairingSignature: cleanSignature
+        var failures: [String] = []
+        for candidate in cleanEndpoints {
+            do {
+                let response = try await RemoteHostClient.pair(
+                    endpoint: candidate,
+                    deviceName: deviceName,
+                    pairingCode: cleanCode,
+                    pairingSignature: cleanSignature,
+                    signedEndpoint: signatureEndpoint
+                )
+                configureRemoteHost(endpoint: candidate, deviceID: response.deviceID, token: response.token, name: "Mac Host")
+                refreshRemoteHostTelemetry()
+                refreshRemoteHostStatus()
+                return candidate
+            } catch {
+                failures.append("\(candidate): \(error.localizedDescription)")
+            }
+        }
+        throw RemoteHostError.server("All pairing endpoints failed. \(failures.joined(separator: " / "))")
+    }
+
+    func pairRemoteHost(endpoint: String, pairingCode: String, pairingSignature: String? = nil, deviceName: String, signedEndpoint: String?) async throws {
+        let cleanEndpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = try await pairRemoteHost(
+            endpoints: [cleanEndpoint],
+            signedEndpoint: signedEndpoint ?? cleanEndpoint,
+            pairingCode: pairingCode,
+            pairingSignature: pairingSignature,
+            deviceName: deviceName
         )
-        configureRemoteHost(endpoint: cleanEndpoint, deviceID: response.deviceID, token: response.token, name: "Mac Host")
-        refreshRemoteHostTelemetry()
-        refreshRemoteHostStatus()
     }
 
     func disableRemoteHost() {
@@ -570,26 +609,56 @@ final class CommandCenterStore: ObservableObject {
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return
         }
+        let values = Self.queryValues(from: components)
+        let endpoints = Self.pairingEndpointCandidates(from: components)
+        guard let endpoint = endpoints.first, let code = values["code"] else {
+            remoteHostMessage = "Pairing URL is missing endpoint or code."
+            return
+        }
+        let signature = values["signature"] ?? values["sig"]
+        remoteHostMessage = endpoints.count > 1 ? "Pairing from QR link across \(endpoints.count) endpoints..." : "Pairing from QR link..."
+        Task { @MainActor in
+            do {
+                let pairedEndpoint = try await pairRemoteHost(
+                    endpoints: endpoints,
+                    signedEndpoint: endpoint,
+                    pairingCode: code,
+                    pairingSignature: signature,
+                    deviceName: ProcessInfo.processInfo.hostName
+                )
+                remoteHostMessage = "Paired from QR link via \(pairedEndpoint)."
+            } catch {
+                remoteHostMessage = "QR pairing failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private static func queryValues(from components: URLComponents) -> [String: String] {
         var values: [String: String] = [:]
         components.queryItems?.forEach { item in
             if let value = item.value {
                 values[item.name] = value
             }
         }
-        guard let endpoint = values["endpoint"], let code = values["code"] else {
-            remoteHostMessage = "Pairing URL is missing endpoint or code."
-            return
-        }
-        let signature = values["signature"] ?? values["sig"]
-        remoteHostMessage = "Pairing from QR link..."
-        Task { @MainActor in
-            do {
-                try await pairRemoteHost(endpoint: endpoint, pairingCode: code, pairingSignature: signature, deviceName: ProcessInfo.processInfo.hostName)
-                remoteHostMessage = "Paired from QR link."
-            } catch {
-                remoteHostMessage = "QR pairing failed: \(error.localizedDescription)"
+        return values
+    }
+
+    private static func pairingEndpointCandidates(from components: URLComponents) -> [String] {
+        var endpoints: [String] = []
+        components.queryItems?.forEach { item in
+            guard let value = item.value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+                return
+            }
+            switch item.name {
+            case "endpoint", "fallback", "fallbackEndpoint", "endpointFallback":
+                endpoints.append(value)
+            case "endpoints":
+                endpoints.append(contentsOf: value.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) })
+            default:
+                break
             }
         }
+        return endpoints.filter { !$0.isEmpty }.uniqued()
     }
 
     func receiveRemoteNotificationToken(_ token: String, environment: String) {

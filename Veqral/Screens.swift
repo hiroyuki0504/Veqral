@@ -1609,17 +1609,28 @@ struct DevicesView: View {
         }
     }
 
-    private func pairRemoteHost(pairingSignature: String? = nil) {
+    private func pairRemoteHost(pairingSignature: String? = nil, endpoints: [String]? = nil, signedEndpoint: String? = nil) {
         isPairing = true
         remoteStatusMessage = L10n.tr("Pairing with Mac Host...")
         let endpoint = remoteEndpoint
+        let endpointCandidates = (endpoints ?? [endpoint])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .uniqued()
         let code = remotePairingCode
         let deviceName = remoteDeviceName.isEmpty ? ProcessInfo.processInfo.hostName : remoteDeviceName
         Task { @MainActor in
             do {
-                try await store.pairRemoteHost(endpoint: endpoint, pairingCode: code, pairingSignature: pairingSignature, deviceName: deviceName)
+                let pairedEndpoint = try await store.pairRemoteHost(
+                    endpoints: endpointCandidates,
+                    signedEndpoint: signedEndpoint ?? endpointCandidates.first ?? endpoint,
+                    pairingCode: code,
+                    pairingSignature: pairingSignature,
+                    deviceName: deviceName
+                )
+                remoteEndpoint = pairedEndpoint
                 remotePairingCode = ""
-                remoteStatusMessage = L10n.tr("Paired. Future runs will launch through Mac Host.")
+                remoteStatusMessage = "\(L10n.tr("Paired. Future runs will launch through Mac Host.")) Endpoint: \(pairedEndpoint)"
             } catch {
                 remoteStatusMessage = "\(L10n.tr("Pairing failed")): \(error.localizedDescription)"
             }
@@ -1674,13 +1685,9 @@ struct DevicesView: View {
             remoteStatusMessage = L10n.tr("Pairing QR was not recognized.")
             return
         }
-        var values: [String: String] = [:]
-        components.queryItems?.forEach { item in
-            if let value = item.value {
-                values[item.name] = value
-            }
-        }
-        guard let endpoint = values["endpoint"], let code = values["code"] else {
+        let values = queryValues(from: components)
+        let endpoints = pairingEndpointCandidates(from: components)
+        guard let endpoint = endpoints.first, let code = values["code"] else {
             remoteStatusMessage = L10n.tr("Pairing URL is missing endpoint or code.")
             return
         }
@@ -1688,8 +1695,36 @@ struct DevicesView: View {
         remoteEndpoint = endpoint
         remotePairingCode = code
         pairingURLInput = payload
-        remoteStatusMessage = L10n.tr("QR recognized. Pairing...")
-        pairRemoteHost(pairingSignature: signature)
+        remoteStatusMessage = endpoints.count > 1 ? "\(L10n.tr("QR recognized. Pairing...")) \(endpoints.count) endpoints" : L10n.tr("QR recognized. Pairing...")
+        pairRemoteHost(pairingSignature: signature, endpoints: endpoints, signedEndpoint: endpoint)
+    }
+
+    private func queryValues(from components: URLComponents) -> [String: String] {
+        var values: [String: String] = [:]
+        components.queryItems?.forEach { item in
+            if let value = item.value {
+                values[item.name] = value
+            }
+        }
+        return values
+    }
+
+    private func pairingEndpointCandidates(from components: URLComponents) -> [String] {
+        var endpoints: [String] = []
+        components.queryItems?.forEach { item in
+            guard let value = item.value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+                return
+            }
+            switch item.name {
+            case "endpoint", "fallback", "fallbackEndpoint", "endpointFallback":
+                endpoints.append(value)
+            case "endpoints":
+                endpoints.append(contentsOf: value.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) })
+            default:
+                break
+            }
+        }
+        return endpoints.filter { !$0.isEmpty }.uniqued()
     }
 
     private var remoteOnline: Bool {
