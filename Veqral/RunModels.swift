@@ -107,6 +107,28 @@ struct SavedCommandDraft: Identifiable, Codable, Equatable, Sendable {
     var updatedAt: Date
 }
 
+enum CommandInteractionKind: String, Codable, Equatable, Sendable {
+    case choice
+    case message
+}
+
+struct CommandInteractionChoice: Codable, Equatable, Sendable, Identifiable {
+    var value: String
+    var label: String
+
+    var id: String { value }
+}
+
+struct CommandInteractionPrompt: Codable, Equatable, Sendable {
+    var kind: CommandInteractionKind
+    var prompt: String
+    var choices: [CommandInteractionChoice]
+
+    var isChoicePrompt: Bool {
+        kind == .choice && !choices.isEmpty
+    }
+}
+
 struct CommandRun: Identifiable, Codable, Equatable {
     var id: UUID
     var title: String
@@ -127,6 +149,7 @@ struct CommandRun: Identifiable, Codable, Equatable {
     var provider: String? = nil
     var providerModel: String? = nil
     var usage: CommandRunUsage? = nil
+    var interaction: CommandInteractionPrompt? = nil
 
     var elapsedLabel: String {
         let end = completedAt ?? Date()

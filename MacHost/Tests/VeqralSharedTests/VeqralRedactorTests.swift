@@ -37,4 +37,30 @@ final class VeqralRedactorTests: XCTestCase {
         XCTAssertFalse(redacted.contains("token-should-hide"))
         XCTAssertTrue(redacted.hasSuffix("\n...（省略）"))
     }
+
+    func testInteractionDetectorFindsNumberedChoices() {
+        let text = """
+        Which deployment target?
+        1) staging
+        2) production
+        Enter choice:
+        """
+
+        let interaction = VeqralInteractionDetector.detect(in: text)
+
+        XCTAssertEqual(interaction?.kind, .choice)
+        XCTAssertEqual(interaction?.prompt, "Which deployment target?")
+        XCTAssertEqual(interaction?.choices.map(\.value), ["1", "2"])
+        XCTAssertEqual(interaction?.choices.map(\.label), ["staging", "production"])
+    }
+
+    func testInteractionDetectorFindsFreeformMessagePrompt() {
+        let text = "Need more details before continuing. Please type your answer:"
+
+        let interaction = VeqralInteractionDetector.detect(in: text)
+
+        XCTAssertEqual(interaction?.kind, .message)
+        XCTAssertEqual(interaction?.prompt, "Need more details before continuing. Please type your answer:")
+        XCTAssertEqual(interaction?.choices, [])
+    }
 }

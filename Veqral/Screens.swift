@@ -3266,16 +3266,182 @@ private struct CommandApprovalQueueRow: View {
                 includePatch: false
             )
 
+            ApprovalLiveActivityConsole(approval: approval)
+
+            if let interaction = store.run(for: approval)?.interaction {
+                ApprovalInteractionControls(approval: approval, interaction: interaction)
+            }
+
             HStack {
                 StatusPill(title: approval.riskLabel, tint: approval.tint)
+                if store.run(for: approval)?.interaction != nil {
+                    StatusPill(title: L10n.tr("Input required"), tint: VQTheme.accent)
+                }
                 Spacer()
-                ApprovalActionButtons(approval: approval)
-                    .frame(maxWidth: 260)
+                if store.run(for: approval)?.interaction == nil {
+                    ApprovalActionButtons(approval: approval)
+                        .frame(maxWidth: 260)
+                } else {
+                    Button(role: .destructive) {
+                        store.reject(approval)
+                    } label: {
+                        Label(L10n.tr("Cancel run"), systemImage: "xmark")
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                }
             }
             .font(.footnote.weight(.semibold))
         }
         .padding(.vertical, 4)
         .accessibilityIdentifier("gate2.approval.pending")
+    }
+}
+
+private struct ApprovalLiveActivityConsole: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let approval: CommandApproval
+
+    private var entries: [CommandLogEntry] {
+        store.liveLogEntries(for: approval, limit: 14)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "terminal")
+                    .foregroundStyle(VQTheme.accent)
+                Text(L10n.tr("Live activity"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+                StatusPill(title: entries.isEmpty ? L10n.tr("Waiting") : L10n.tr("Streaming"), tint: entries.isEmpty ? VQTheme.secondaryText : VQTheme.green)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                if entries.isEmpty {
+                    Text(L10n.tr("Waiting for the Mac Host stream to report what the agent is doing."))
+                        .font(.caption2)
+                        .foregroundStyle(VQTheme.secondaryText)
+                } else {
+                    ForEach(entries) { entry in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text(entry.stream.uppercased())
+                                .font(.caption2.monospaced().weight(.bold))
+                                .foregroundStyle(tint(for: entry.stream))
+                                .frame(width: 54, alignment: .leading)
+                            Text(entry.message)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(VQTheme.secondaryText)
+                                .lineLimit(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+            }
+            .padding(10)
+            .background(Color.black.opacity(0.035))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(VQTheme.hairline, lineWidth: 1)
+            }
+        }
+    }
+
+    private func tint(for stream: String) -> Color {
+        switch stream.lowercased() {
+        case "warn", "error", "stderr":
+            VQTheme.amber
+        case "ok", "input":
+            VQTheme.green
+        case "approval":
+            VQTheme.accent
+        default:
+            VQTheme.secondaryText
+        }
+    }
+}
+
+private struct ApprovalInteractionControls: View {
+    @EnvironmentObject private var store: CommandCenterStore
+    let approval: CommandApproval
+    let interaction: CommandInteractionPrompt
+    @State private var messageText = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: interaction.isChoicePrompt ? "list.bullet.rectangle" : "text.bubble")
+                    .foregroundStyle(VQTheme.accent)
+                Text(interaction.isChoicePrompt ? L10n.tr("Choose a response") : L10n.tr("Send a message"))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VQTheme.ink)
+                Spacer()
+            }
+
+            Text(interaction.prompt)
+                .font(.caption)
+                .foregroundStyle(VQTheme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if interaction.isChoicePrompt {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(interaction.choices) { choice in
+                        Button {
+                            store.submitApprovalChoice(approval, choice: choice)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Text(choice.value)
+                                    .font(.caption.monospaced().weight(.bold))
+                                    .foregroundStyle(VQTheme.accent)
+                                    .frame(width: 28, height: 24)
+                                    .background(VQTheme.accent.opacity(0.12))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                Text(choice.label)
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(VQTheme.ink)
+                                    .lineLimit(2)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+                        .background(VQTheme.control.opacity(0.70))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(VQTheme.hairline, lineWidth: 1)
+                        }
+                    }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    TextField(L10n.tr("Type a reply..."), text: $messageText, axis: .vertical)
+                        .textFieldStyle(.roundedBorder)
+                        .lineLimit(1...4)
+                    Button {
+                        store.submitApprovalInput(approval, text: messageText)
+                        messageText = ""
+                    } label: {
+                        Label(L10n.tr("Send"), systemImage: "paperplane.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: 8))
+                    .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .padding(11)
+        .background(VQTheme.accent.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(VQTheme.accent.opacity(0.22), lineWidth: 1)
+        }
+        .accessibilityIdentifier("gate2.approval.interaction")
     }
 }
 

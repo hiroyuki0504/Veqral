@@ -8,6 +8,7 @@ struct RemoteHostLogEvent: Codable, Sendable {
     var createdAt: Date
     var sessionID: String?
     var exitCode: Int32?
+    var interaction: CommandInteractionPrompt? = nil
 }
 
 enum RemoteStreamPhase: String, Equatable {

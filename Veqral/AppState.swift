@@ -1883,6 +1883,7 @@ final class CommandCenterStore: ObservableObject {
         if let runID = approval.runID, let runIndex = runs.firstIndex(where: { $0.id == runID }) {
             runs[runIndex].status = .failed
             runs[runIndex].completedAt = Date()
+            runs[runIndex].interaction = nil
             appendLog(runID: runID, stream: "warn", message: "Rejected. Run stopped.")
             if remoteHost.isEnabled, let remoteRunID = remoteRunIDs[runID.uuidString] {
                 Task {
@@ -1891,6 +1892,45 @@ final class CommandCenterStore: ObservableObject {
             }
         }
         persist()
+    }
+
+    func run(for approval: CommandApproval) -> CommandRun? {
+        guard let runID = approval.runID else { return nil }
+        return runs.first { $0.id == runID }
+    }
+
+    func liveLogEntries(for approval: CommandApproval, limit: Int = 14) -> [CommandLogEntry] {
+        Array(logEntries(for: approval.runID).suffix(limit))
+    }
+
+    func submitApprovalChoice(_ approval: CommandApproval, choice: CommandInteractionChoice) {
+        submitApprovalInput(approval, text: choice.value, displayText: choice.label)
+    }
+
+    func submitApprovalInput(_ approval: CommandApproval, text: String, displayText: String? = nil) {
+        guard let runID = approval.runID else { return }
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        guard let remoteRunID = remoteRunIDs[runID.uuidString] else {
+            appendLog(runID: runID, stream: "warn", message: "No remote run is available for input.")
+            return
+        }
+        appendLog(runID: runID, stream: "input", message: "Sending input to remote run.")
+        Task {
+            do {
+                try await RemoteHostClient(configuration: remoteHost).submitInput(remoteRunID: remoteRunID, text: clean)
+                if let index = approvals.firstIndex(where: { $0.id == approval.id }) {
+                    approvals[index].status = .approved
+                }
+                if let runIndex = runs.firstIndex(where: { $0.id == runID }) {
+                    runs[runIndex].interaction = nil
+                }
+                appendLog(runID: runID, stream: "ok", message: "Input sent to remote run.")
+                persist()
+            } catch {
+                appendLog(runID: runID, stream: "warn", message: "Remote input failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     func pauseOrResumeSelectedRun() {
@@ -2050,12 +2090,15 @@ final class CommandCenterStore: ObservableObject {
                 runs[index].provider = remoteRun.provider
                 runs[index].providerModel = remoteRun.model
                 runs[index].usage = remoteRun.usage
+                runs[index].interaction = remoteRun.interaction
                 if remoteRun.status == "waitingApproval", !approvals.contains(where: { $0.runID == localID && $0.status == .pending }) {
                     insertRemoteApproval(
                         for: runs[index],
                         reason: remoteRun.approvalReason ?? "Remote approval required",
                         severity: remoteRun.approvalSeverity
                     )
+                } else if let interaction = remoteRun.interaction {
+                    ensureInteractiveApproval(for: runs[index], interaction: interaction)
                 }
                 await syncRemoteRunDetails(localRunID: localID, remoteRunID: remoteRun.id, client: client)
                 continue
@@ -2080,7 +2123,8 @@ final class CommandCenterStore: ObservableObject {
                 agentChatID: remoteRun.chatID,
                 provider: remoteRun.provider,
                 providerModel: remoteRun.model,
-                usage: remoteRun.usage
+                usage: remoteRun.usage,
+                interaction: remoteRun.interaction
             )
             runs.append(localRun)
             remoteRunIDs[localRun.id.uuidString] = remoteRun.id
@@ -2090,6 +2134,8 @@ final class CommandCenterStore: ObservableObject {
                     reason: remoteRun.approvalReason ?? "Remote approval required",
                     severity: remoteRun.approvalSeverity
                 )
+            } else if let interaction = remoteRun.interaction {
+                ensureInteractiveApproval(for: localRun, interaction: interaction)
             }
 
             do {
@@ -2176,6 +2222,30 @@ final class CommandCenterStore: ObservableObject {
             at: 0
         )
         notify(title: L10n.tr("Veqral approval required"), body: reason)
+    }
+
+    private func ensureInteractiveApproval(for run: CommandRun, interaction: CommandInteractionPrompt) {
+        if let index = approvals.firstIndex(where: { $0.runID == run.id && $0.status == .pending }) {
+            approvals[index].detail = interaction.prompt
+            approvals[index].risk = "中"
+            approvals[index].tintName = "amber"
+            return
+        }
+        approvals.insert(
+            CommandApproval(
+                id: UUID(),
+                runID: run.id,
+                title: run.title,
+                detail: interaction.prompt,
+                command: run.command,
+                risk: "中",
+                tintName: "amber",
+                status: .pending,
+                createdAt: Date()
+            ),
+            at: 0
+        )
+        notify(title: L10n.tr("Veqral input required"), body: interaction.prompt)
     }
 
     private func executeIfAvailable(_ run: CommandRun, attachments: [CommandAttachment] = []) {
@@ -2452,6 +2522,7 @@ final class CommandCenterStore: ObservableObject {
             runs[index].provider = snapshot.run.provider
             runs[index].providerModel = snapshot.run.model
             runs[index].usage = snapshot.run.usage
+            runs[index].interaction = snapshot.run.interaction
             if snapshot.run.status == "waitingApproval",
                !approvals.contains(where: { $0.runID == localRunID && $0.status == .pending }) {
                 insertRemoteApproval(
@@ -2459,6 +2530,8 @@ final class CommandCenterStore: ObservableObject {
                     reason: snapshot.run.approvalReason ?? "Remote approval required",
                     severity: snapshot.run.approvalSeverity
                 )
+            } else if let interaction = snapshot.run.interaction {
+                ensureInteractiveApproval(for: runs[index], interaction: interaction)
             }
         }
         for event in snapshot.logs {
@@ -2481,6 +2554,12 @@ final class CommandCenterStore: ObservableObject {
         client: RemoteHostClient
     ) async -> Bool {
         appendRemoteLogEvent(event, localRunID: localRunID)
+        if let interaction = event.interaction,
+           let index = runs.firstIndex(where: { $0.id == localRunID }) {
+            runs[index].interaction = interaction
+            ensureInteractiveApproval(for: runs[index], interaction: interaction)
+            persist()
+        }
         let currentRun = runs.first { $0.id == localRunID } ?? fallbackRun
 
         if let sessionID = event.sessionID {
@@ -2510,6 +2589,7 @@ final class CommandCenterStore: ObservableObject {
                     runs[index].status = event.exitCode == 0 ? .complete : .failed
                     runs[index].progress = 1.0
                     runs[index].completedAt = Date()
+                    runs[index].interaction = nil
                 }
                 persist()
                 await syncRemoteRunDetails(localRunID: localRunID, remoteRunID: event.runID, client: client)
