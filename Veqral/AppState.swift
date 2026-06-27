@@ -146,21 +146,20 @@ final class CommandCenterStore: ObservableObject {
     private var isReadyForAutosave = false
 
     var visibleRemoteDevices: [RemoteDeviceRecord] {
-        let currentDeviceID = remoteHost.deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
-        let currentDeviceNames = Self.currentDeviceNameCandidates()
-        return remoteDevices.filter { device in
-            let deviceID = device.id.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !currentDeviceID.isEmpty, deviceID == currentDeviceID {
-                return false
-            }
+        remoteDeviceDisplayGroups.map(\.primary)
+    }
 
-            let deviceName = Self.normalizedDeviceName(device.name)
-            if !deviceName.isEmpty, currentDeviceNames.contains(deviceName) {
-                return false
-            }
+    var remoteDeviceDisplayGroups: [RemoteDeviceDisplayGroup] {
+        Self.groupRemoteDevicesForDisplay(
+            remoteDevices,
+            currentDeviceID: remoteHost.deviceID,
+            currentStableClientID: Self.localClientStableID(createIfNeeded: false),
+            currentDeviceNames: Self.currentDeviceNameCandidates()
+        )
+    }
 
-            return true
-        }
+    var remoteDeviceCleanupCandidates: [RemoteDeviceRecord] {
+        remoteDeviceDisplayGroups.flatMap(\.duplicates)
     }
     private var workspaceRefreshTask: Task<Void, Never>?
     private var remoteStreamTasks: [UUID: Task<Void, Never>] = [:]
@@ -562,7 +561,8 @@ final class CommandCenterStore: ObservableObject {
                     deviceName: deviceName,
                     pairingCode: cleanCode,
                     pairingSignature: cleanSignature,
-                    signedEndpoint: signatureEndpoint
+                    signedEndpoint: signatureEndpoint,
+                    clientStableID: Self.localClientStableID()
                 )
                 configureRemoteHost(endpoint: candidate, deviceID: response.deviceID, token: response.token, name: "Mac Host")
                 refreshRemoteHostTelemetry()
@@ -1314,18 +1314,36 @@ final class CommandCenterStore: ObservableObject {
     }
 
     func revokeRemoteDevice(_ device: RemoteDeviceRecord) {
+        revokeRemoteDevices([device])
+    }
+
+    func revokeRemoteDevices(_ devicesToRevoke: [RemoteDeviceRecord]) {
         guard remoteHost.isEnabled, remoteHost.isPaired else { return }
+        let uniqueDevices = Array(Dictionary(grouping: devicesToRevoke, by: \.id).compactMap { $0.value.first })
+        guard !uniqueDevices.isEmpty else { return }
         let configuration = remoteHost
         Task { @MainActor in
-            do {
-                try await RemoteHostClient(configuration: configuration).revokeDevice(deviceID: device.id)
-                remoteDevices.removeAll { $0.id == device.id }
-                remoteHostMessage = "Revoked \(device.name)."
-                if device.id == configuration.deviceID {
+            var revoked: [RemoteDeviceRecord] = []
+            var failures: [String] = []
+            let client = RemoteHostClient(configuration: configuration)
+            for device in uniqueDevices {
+                do {
+                    try await client.revokeDevice(deviceID: device.id)
+                    revoked.append(device)
+                } catch {
+                    failures.append("\(device.name): \(error.localizedDescription)")
+                }
+            }
+            if !revoked.isEmpty {
+                let revokedIDs = Set(revoked.map(\.id))
+                remoteDevices.removeAll { revokedIDs.contains($0.id) }
+                remoteHostMessage = revoked.count == 1 ? "Revoked \(revoked[0].name)." : "Revoked \(revoked.count) duplicate/stale devices."
+                if revokedIDs.contains(configuration.deviceID) {
                     disableRemoteHost()
                 }
-            } catch {
-                remoteHostMessage = "Revoke failed: \(error.localizedDescription)"
+            }
+            if !failures.isEmpty {
+                remoteHostMessage = "Revoke failed: \(failures.joined(separator: " / "))"
             }
         }
     }
@@ -3162,6 +3180,78 @@ final class CommandCenterStore: ObservableObject {
 
     private static func makePairingToken() -> String {
         UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
+    private static func localClientStableID(createIfNeeded: Bool = true) -> String? {
+        let account = "client-stable-id"
+        if let existing = AppKeychainStore.get(account: account)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank {
+            return existing
+        }
+        guard createIfNeeded else { return nil }
+        let value = UUID().uuidString.lowercased()
+        try? AppKeychainStore.set(value, account: account)
+        return value
+    }
+
+    private static func groupRemoteDevicesForDisplay(
+        _ devices: [RemoteDeviceRecord],
+        currentDeviceID: String,
+        currentStableClientID: String?,
+        currentDeviceNames: Set<String>
+    ) -> [RemoteDeviceDisplayGroup] {
+        let cleanCurrentDeviceID = currentDeviceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanCurrentStableID = normalizedStableClientID(currentStableClientID)
+        let filtered = devices.filter { device in
+            let deviceID = device.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleanCurrentDeviceID.isEmpty, deviceID == cleanCurrentDeviceID {
+                return false
+            }
+            if let cleanCurrentStableID,
+               let stableID = normalizedStableClientID(device.stableClientID),
+               stableID == cleanCurrentStableID {
+                return false
+            }
+            let deviceName = normalizedDeviceName(device.name)
+            if !deviceName.isEmpty, currentDeviceNames.contains(deviceName) {
+                return false
+            }
+            return true
+        }
+        let grouped = Dictionary(grouping: filtered) { device in
+            remoteDeviceGroupKey(device)
+        }
+        return grouped.map { key, values in
+            let sorted = values.sorted { lhs, rhs in
+                remoteDeviceSortDate(lhs) > remoteDeviceSortDate(rhs)
+            }
+            return RemoteDeviceDisplayGroup(
+                id: key,
+                primary: sorted.first ?? values[0],
+                duplicates: Array(sorted.dropFirst())
+            )
+        }
+        .sorted { lhs, rhs in
+            remoteDeviceSortDate(lhs.primary) > remoteDeviceSortDate(rhs.primary)
+        }
+    }
+
+    private static func remoteDeviceGroupKey(_ device: RemoteDeviceRecord) -> String {
+        if let stableID = normalizedStableClientID(device.stableClientID) {
+            return "stable:\(stableID)"
+        }
+        let name = normalizedDeviceName(device.name)
+        if !name.isEmpty {
+            return "name:\(name)"
+        }
+        return "id:\(device.id)"
+    }
+
+    private static func remoteDeviceSortDate(_ device: RemoteDeviceRecord) -> Date {
+        device.lastSeenAt ?? device.pushUpdatedAt ?? device.pairedAt
+    }
+
+    private static func normalizedStableClientID(_ value: String?) -> String? {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank?.lowercased()
     }
 
     private static func currentDeviceNameCandidates() -> Set<String> {
