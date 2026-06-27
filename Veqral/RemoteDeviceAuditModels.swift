@@ -5,6 +5,7 @@ struct RemoteDeviceRecord: Codable, Identifiable, Equatable, Sendable {
     var name: String
     var pairedAt: Date
     var lastSeenAt: Date?
+    var stableClientID: String?
     var pushToken: String?
     var pushEnvironment: String?
     var pushBundleID: String?
@@ -14,6 +15,14 @@ struct RemoteDeviceRecord: Codable, Identifiable, Equatable, Sendable {
 
 struct RemoteDeviceListResponse: Codable, Sendable {
     var devices: [RemoteDeviceRecord]
+}
+
+struct RemoteDeviceDisplayGroup: Identifiable, Equatable, Sendable {
+    var id: String
+    var primary: RemoteDeviceRecord
+    var duplicates: [RemoteDeviceRecord]
+
+    var duplicateCount: Int { duplicates.count }
 }
 
 struct RemoteAuditLogResponse: Codable, Sendable {

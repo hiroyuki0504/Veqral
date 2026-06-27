@@ -1154,6 +1154,8 @@ struct DevicesView: View {
     @State private var scannerStatusMessage = ""
     @State private var remoteStatusMessage = ""
     @State private var isPairing = false
+    @State private var pendingRevokeDevice: RemoteDeviceRecord?
+    @State private var showCleanupConfirmation = false
     private let columns = [GridItem(.adaptive(minimum: 320), spacing: 14)]
 
     var body: some View {
@@ -1238,6 +1240,7 @@ struct DevicesView: View {
                         KeyValueLine(key: "Host", value: store.remoteHostHealth?.host ?? L10n.tr("Not connected"))
                         KeyValueLine(key: "Hermes", value: store.remoteHostHealth?.hermesVersion ?? L10n.tr("Not checked"))
                         KeyValueLine(key: "Push", value: store.pushNotificationMessage.isEmpty ? VeqralFeatureFlags.pushUnavailableMessage : store.pushNotificationMessage)
+                        KeyValueLine(key: "Live Console", value: L10n.tr("Command > Approvals shows live logs, choices, and message input."))
                         KeyValueLine(key: "Execution", value: store.remoteHost.isEnabled ? L10n.tr("iPhone/iPad -> Tailscale -> Mac Host -> Hermes") : L10n.tr("Pair a Mac Host before running on iPhone/iPad"))
 
                         HStack(spacing: 8) {
@@ -1386,27 +1389,61 @@ struct DevicesView: View {
 
                 VQPanel("Paired Devices", systemImage: "iphone.gen3.radiowaves.left.and.right") {
                     VStack(alignment: .leading, spacing: 12) {
-                        let devices = store.visibleRemoteDevices
-                        if devices.isEmpty {
+                        let groups = store.remoteDeviceDisplayGroups
+                        let cleanupCandidates = store.remoteDeviceCleanupCandidates
+                        HStack(spacing: 8) {
+                            StatusPill(title: "\(groups.count) visible", tint: VQTheme.steel)
+                            if !cleanupCandidates.isEmpty {
+                                StatusPill(title: "\(cleanupCandidates.count) cleanup candidates", tint: VQTheme.amber)
+                            }
+                            Spacer()
+                            Button {
+                                showCleanupConfirmation = true
+                            } label: {
+                                Label(L10n.tr("Review Cleanup"), systemImage: "checklist")
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                            .disabled(cleanupCandidates.isEmpty)
+                        }
+                        .font(.footnote.weight(.semibold))
+
+                        Text(L10n.tr("Duplicate records are folded together. Nothing is removed until you confirm cleanup or revoke a device."))
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if groups.isEmpty {
                             Text(store.remoteHost.isPaired ? L10n.tr("No other paired devices yet.") : L10n.tr("Pair a Mac Host to list trusted iPhone/iPad clients."))
                                 .font(.subheadline)
                                 .foregroundStyle(VQTheme.secondaryText)
                         }
 
-                        ForEach(devices) { device in
+                        ForEach(groups) { group in
+                            let device = group.primary
                             HStack(alignment: .center, spacing: 10) {
                                 Image(systemName: "rectangle.connected.to.line.below")
                                     .foregroundStyle(device.lastSeenAt == nil ? VQTheme.unavailable : VQTheme.green)
                                     .frame(width: 28)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(device.name)
-                                        .font(.subheadline.weight(.semibold))
+                                    HStack(spacing: 6) {
+                                        Text(device.name)
+                                            .font(.subheadline.weight(.semibold))
+                                        if group.duplicateCount > 0 {
+                                            StatusPill(title: "+\(group.duplicateCount) folded", tint: VQTheme.amber)
+                                        }
+                                    }
                                     Text("\(L10n.tr("Last seen")) \(dateLabel(device.lastSeenAt))")
                                         .font(.caption)
                                         .foregroundStyle(VQTheme.secondaryText)
                                     Text(device.pushUpdatedAt == nil ? L10n.tr("Push not registered") : "Push \(device.pushEnvironment ?? L10n.tr("unknown")) - \(dateLabel(device.pushUpdatedAt))")
                                         .font(.caption)
                                         .foregroundStyle(device.pushUpdatedAt == nil ? VQTheme.secondaryText : VQTheme.green)
+                                    if group.duplicateCount > 0 {
+                                        Text(L10n.tr("Older duplicate IDs are cleanup candidates; confirm before removing."))
+                                            .font(.caption2)
+                                            .foregroundStyle(VQTheme.amber)
+                                    }
                                     Text(device.id)
                                         .font(.caption2.monospaced())
                                         .foregroundStyle(VQTheme.secondaryText)
@@ -1415,14 +1452,14 @@ struct DevicesView: View {
                                 }
                                 Spacer()
                                 Button(role: .destructive) {
-                                    store.revokeRemoteDevice(device)
+                                    pendingRevokeDevice = device
                                 } label: {
                                     Label(L10n.tr("Revoke"), systemImage: "xmark.circle")
                                 }
                                 .buttonStyle(.bordered)
                                 .buttonBorderShape(.roundedRectangle(radius: 8))
                             }
-                            if device.id != devices.last?.id {
+                            if group.id != groups.last?.id {
                                 EmptyDivider()
                             }
                         }
@@ -1524,6 +1561,41 @@ struct DevicesView: View {
                     remoteStatusMessage = message
                 }
             )
+        }
+        .confirmationDialog(
+            L10n.tr("Revoke this device?"),
+            isPresented: Binding(
+                get: { pendingRevokeDevice != nil },
+                set: { if !$0 { pendingRevokeDevice = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let pendingRevokeDevice {
+                Button("\(L10n.tr("Revoke")) \(pendingRevokeDevice.name)", role: .destructive) {
+                    store.revokeRemoteDevice(pendingRevokeDevice)
+                    self.pendingRevokeDevice = nil
+                }
+            }
+            Button(L10n.tr("Cancel"), role: .cancel) {
+                pendingRevokeDevice = nil
+            }
+        } message: {
+            if let pendingRevokeDevice {
+                Text("\(pendingRevokeDevice.name) will lose access to this Mac Host. This cannot be undone without pairing again.")
+            }
+        }
+        .confirmationDialog(
+            L10n.tr("Remove folded duplicate devices?"),
+            isPresented: $showCleanupConfirmation,
+            titleVisibility: .visible
+        ) {
+            let candidates = store.remoteDeviceCleanupCandidates
+            Button("\(L10n.tr("Remove")) \(candidates.count) \(L10n.tr("duplicates"))", role: .destructive) {
+                store.revokeRemoteDevices(candidates)
+            }
+            Button(L10n.tr("Cancel"), role: .cancel) {}
+        } message: {
+            Text(L10n.tr("Only older folded duplicates are removed. Active visible devices stay paired."))
         }
         .accessibilityIdentifier("gate2.screen.devices")
     }

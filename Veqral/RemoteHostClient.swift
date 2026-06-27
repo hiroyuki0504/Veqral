@@ -28,7 +28,8 @@ struct RemoteHostClient: Sendable {
         deviceName: String,
         pairingCode: String,
         pairingSignature: String? = nil,
-        signedEndpoint: String? = nil
+        signedEndpoint: String? = nil,
+        clientStableID: String? = nil
     ) async throws -> RemotePairResponse {
         guard let url = URL(string: "/v1/pair", relativeTo: URL(string: endpoint)) else {
             throw RemoteHostError.invalidConfiguration
@@ -39,6 +40,7 @@ struct RemoteHostClient: Sendable {
             var pairingCode: String
             var pairingEndpoint: String
             var pairingSignature: String?
+            var clientStableID: String?
         }
         var request = URLRequest(url: url.absoluteURL)
         request.httpMethod = "POST"
@@ -48,7 +50,8 @@ struct RemoteHostClient: Sendable {
             deviceName: deviceName,
             pairingCode: pairingCode,
             pairingEndpoint: pairingEndpoint,
-            pairingSignature: pairingSignature
+            pairingSignature: pairingSignature,
+            clientStableID: clientStableID
         ))
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {

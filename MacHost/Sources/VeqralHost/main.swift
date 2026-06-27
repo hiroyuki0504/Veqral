@@ -336,6 +336,7 @@ struct DeviceRecord: Codable, Sendable, Identifiable {
     var name: String
     var pairedAt: Date
     var lastSeenAt: Date?
+    var stableClientID: String? = nil
     var pushToken: String? = nil
     var pushEnvironment: String? = nil
     var pushBundleID: String? = nil
@@ -2280,7 +2281,7 @@ actor HostState {
         return "veqral://pair?\(queryParts.joined(separator: "&"))"
     }
 
-    func pair(deviceName: String, code: String, pairingEndpoint: String? = nil, pairingSignature: String? = nil) throws -> (deviceID: String, token: String) {
+    func pair(deviceName: String, code: String, pairingEndpoint: String? = nil, pairingSignature: String? = nil, stableClientID: String? = nil) throws -> (deviceID: String, token: String) {
         guard code == pairingCode else {
             throw HostError.unauthorized("Invalid pairing code")
         }
@@ -2294,14 +2295,51 @@ actor HostState {
                 throw HostError.unauthorized("Invalid pairing signature")
             }
         }
-        let deviceID = UUID().uuidString
+        let now = Date()
+        let cleanName = deviceName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank ?? "Unnamed Device"
+        let cleanStableClientID = Self.normalizedStableClientID(stableClientID)
+        let normalizedName = Self.normalizedDeviceName(cleanName)
+        let existingIndex = devices.firstIndex { device in
+            if let cleanStableClientID,
+               let existingStableID = Self.normalizedStableClientID(device.stableClientID),
+               existingStableID == cleanStableClientID {
+                return true
+            }
+            // Backfill one pre-stable-ID record for this named device instead of creating a new duplicate.
+            return cleanStableClientID != nil
+                && Self.normalizedStableClientID(device.stableClientID) == nil
+                && Self.normalizedDeviceName(device.name) == normalizedName
+        }
         let token = randomToken()
+        if let existingIndex {
+            let deviceID = devices[existingIndex].id
+            try KeychainStore.set(token, account: "device:\(deviceID)")
+            devices[existingIndex].name = cleanName
+            devices[existingIndex].lastSeenAt = now
+            if let cleanStableClientID {
+                devices[existingIndex].stableClientID = cleanStableClientID
+            }
+            persistDevices()
+            _ = rotatePairingCode()
+            appendAudit("re-paired device=\(cleanName) id=\(deviceID) reused=true")
+            return (deviceID, token)
+        }
+        let deviceID = UUID().uuidString
         try KeychainStore.set(token, account: "device:\(deviceID)")
-        devices.append(DeviceRecord(id: deviceID, name: deviceName, pairedAt: Date(), lastSeenAt: Date()))
+        devices.append(DeviceRecord(id: deviceID, name: cleanName, pairedAt: now, lastSeenAt: now, stableClientID: cleanStableClientID))
         persistDevices()
         _ = rotatePairingCode()
-        appendAudit("paired device=\(deviceName) id=\(deviceID)")
+        appendAudit("paired device=\(cleanName) id=\(deviceID)")
         return (deviceID, token)
+    }
+
+    private static func normalizedStableClientID(_ value: String?) -> String? {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank?.lowercased()
+    }
+
+    private static func normalizedDeviceName(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 
     private func pairingSignature(endpoint: String, code: String) -> String {
@@ -2952,7 +2990,8 @@ final class HostServer: @unchecked Sendable {
                     deviceName: body.deviceName,
                     code: body.pairingCode,
                     pairingEndpoint: body.pairingEndpoint,
-                    pairingSignature: body.pairingSignature
+                    pairingSignature: body.pairingSignature,
+                    stableClientID: body.clientStableID
                 )
                 sendJSON(PairResponse(deviceID: result.deviceID, token: result.token), connection: connection)
                 return
@@ -8736,6 +8775,7 @@ struct PairRequest: Codable {
     var pairingCode: String
     var pairingEndpoint: String?
     var pairingSignature: String?
+    var clientStableID: String?
 }
 
 struct PairResponse: Codable {
@@ -8822,6 +8862,7 @@ struct DeviceListRecord: Codable {
     var name: String
     var pairedAt: Date
     var lastSeenAt: Date?
+    var stableClientID: String?
     var pushEnvironment: String?
     var pushBundleID: String?
     var pushLocale: String?
@@ -8832,6 +8873,7 @@ struct DeviceListRecord: Codable {
         self.name = device.name
         self.pairedAt = device.pairedAt
         self.lastSeenAt = device.lastSeenAt
+        self.stableClientID = device.stableClientID
         self.pushEnvironment = device.pushEnvironment
         self.pushBundleID = device.pushBundleID
         self.pushLocale = device.pushLocale
