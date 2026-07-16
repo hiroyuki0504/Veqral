@@ -329,7 +329,7 @@ struct CommandCenterPhoneDashboard: View {
                         PhoneRunRow(run: run)
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                store.selectRun(run.id)
+                                store.openRunDetail(run.id)
                             }
                         if run.id != visibleRuns.last?.id {
                             Divider().overlay(VQTheme.hairline)
@@ -978,6 +978,7 @@ private struct RunPhaseTracker: View {
 private struct CommandSubmitPanel: View {
     @EnvironmentObject private var store: CommandCenterStore
     @State private var isVoiceInputPresented = false
+    @FocusState private var isCommandFieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -985,6 +986,7 @@ private struct CommandSubmitPanel: View {
 
             HStack(spacing: 10) {
                 TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft, axis: .vertical)
+                    .focused($isCommandFieldFocused)
                     .textFieldStyle(.plain)
                     .font(.subheadline)
                     .lineLimit(1...3)
@@ -992,7 +994,7 @@ private struct CommandSubmitPanel: View {
                     .background(VQTheme.control.opacity(0.75))
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .onSubmit {
-                        store.submitDraft()
+                        submitAndDismissKeyboard()
                     }
                     .accessibilityIdentifier("gate2.command.input")
 
@@ -1018,7 +1020,7 @@ private struct CommandSubmitPanel: View {
                 .help(L10n.tr("Voice input"))
                 .accessibilityIdentifier("gate2.voice.open")
 
-                Button(action: store.submitDraft) {
+                Button(action: submitAndDismissKeyboard) {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 15, weight: .bold))
                 }
@@ -1058,6 +1060,11 @@ private struct CommandSubmitPanel: View {
             VoiceCommandSheet()
                 .environmentObject(store)
         }
+    }
+
+    private func submitAndDismissKeyboard() {
+        store.submitDraft()
+        isCommandFieldFocused = false
     }
 }
 
@@ -1637,6 +1644,7 @@ private struct PhoneRunRow: View {
 private struct PhoneComposer: View {
     @EnvironmentObject private var store: CommandCenterStore
     @State private var isVoiceInputPresented = false
+    @FocusState private var isCommandFieldFocused: Bool
 
     var body: some View {
         VStack(spacing: 8) {
@@ -1644,10 +1652,11 @@ private struct PhoneComposer: View {
 
             HStack(spacing: 8) {
                 TextField(store.selectedRuntime.commandPlaceholder, text: $store.commandDraft)
+                    .focused($isCommandFieldFocused)
                     .font(.caption)
                     .textFieldStyle(.plain)
                     .onSubmit {
-                        store.submitDraft()
+                        submitAndDismissKeyboard()
                     }
                     .accessibilityIdentifier("gate2.command.input")
                 Button {
@@ -1676,7 +1685,7 @@ private struct PhoneComposer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("gate2.voice.open")
-                Button(action: store.submitDraft) {
+                Button(action: submitAndDismissKeyboard) {
                     Image(systemName: "arrow.up")
                         .font(.caption.weight(.bold))
                         .frame(width: 28, height: 28)
@@ -1709,6 +1718,11 @@ private struct PhoneComposer: View {
             VoiceCommandSheet()
                 .environmentObject(store)
         }
+    }
+
+    private func submitAndDismissKeyboard() {
+        store.submitDraft()
+        isCommandFieldFocused = false
     }
 }
 

@@ -13,8 +13,55 @@ final class Gate2AcceptanceUITests: XCTestCase {
         relaunchPreservingState()
         verifySavedCommandDraft()
         verifyMemoryVisibility()
+        verifyHermesHistory()
         relaunchPreservingState()
         verifyVoiceTranscriptApprovalGate()
+    }
+
+    func testProductionRePairOnly() throws {
+        continueAfterFailure = false
+        app = XCUIApplication()
+        app.launchArguments = [
+            "-veqral-ui-testing",
+            "-AppleLanguages", "(ja)",
+            "-AppleLocale", "ja_JP"
+        ]
+        app.launchEnvironment = [
+            "VEQRAL_UI_TESTING": "1",
+            "VEQRAL_UI_TEST_RESET": "0",
+            "VEQRAL_UI_TEST_PAIRING_URL": gate2Configuration(
+                environment: "VEQRAL_GATE2_PAIRING_URL",
+                infoKey: "VeqralGate2PairingURL",
+                fallback: ""
+            )
+        ]
+        addSystemPromptHandler()
+        app.launch()
+        handlePendingSystemPrompts()
+        pairWithMacHost()
+        verifyTelemetry()
+    }
+
+    func testInteractionRequiresExplicitInput() throws {
+        continueAfterFailure = false
+        app = XCUIApplication()
+        app.launchArguments = ["-veqral-ui-testing"]
+        app.launchEnvironment = [
+            "VEQRAL_UI_TESTING": "1",
+            "VEQRAL_UI_TEST_RESET": "1",
+            "VEQRAL_UI_TEST_INTERACTION_FIXTURE": "1"
+        ]
+        app.launch()
+        openSection(.approvals)
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["gate2.approval.interaction"].waitForExistence(timeout: 15),
+            "Explicit interaction controls were not visible."
+        )
+        XCTAssertTrue(app.buttons["approval.interaction.choice.1"].exists, "The explicit negative choice was missing.")
+        XCTAssertTrue(app.buttons["approval.interaction.choice.2"].exists, "The explicit positive choice was missing.")
+        XCTAssertFalse(app.buttons["approval.action.approve"].exists, "Generic Approve must not appear for an interaction prompt.")
+        XCTAssertFalse(app.buttons["approval.action.reject"].exists, "Generic Reject must not replace an explicit interaction response.")
     }
 
     private func launchApp() {
@@ -24,22 +71,54 @@ final class Gate2AcceptanceUITests: XCTestCase {
             "-AppleLanguages", "(ja)",
             "-AppleLocale", "ja_JP"
         ]
-        let processEnvironment = ProcessInfo.processInfo.environment
         var launchEnvironment = [
             "VEQRAL_UI_TESTING": "1",
             "VEQRAL_UI_TEST_RESET": "1",
             "VEQRAL_UI_TEST_RUNTIME": "localShell",
-            "VEQRAL_UI_TEST_WORKING_DIRECTORY": processEnvironment["VEQRAL_GATE2_WORKING_DIRECTORY"] ?? "/Users/hiroyuki/Documents/Veqral",
-            "VEQRAL_UI_TEST_PROJECT_ID": processEnvironment["VEQRAL_GATE2_PROJECT_ID"] ?? "gate2-xcuitest",
+            "VEQRAL_UI_TEST_WORKING_DIRECTORY": gate2Configuration(
+                environment: "VEQRAL_GATE2_WORKING_DIRECTORY",
+                infoKey: "VeqralGate2WorkingDirectory",
+                fallback: "/Users/hiroyuki/Documents/Veqral"
+            ),
+            "VEQRAL_UI_TEST_PROJECT_ID": gate2Configuration(
+                environment: "VEQRAL_GATE2_PROJECT_ID",
+                infoKey: "VeqralGate2ProjectID",
+                fallback: "gate2-xcuitest"
+            ),
             "VEQRAL_UI_TEST_PROJECT_NAME": "Gate2 XCUITest",
-            "VEQRAL_UI_TEST_VOICE_TRANSCRIPT": processEnvironment["VEQRAL_GATE2_VOICE_TRANSCRIPT"] ?? "えっと 本番に deploy して .env の token を削除して"
+            "VEQRAL_UI_TEST_VOICE_TRANSCRIPT": gate2Configuration(
+                environment: "VEQRAL_GATE2_VOICE_TRANSCRIPT",
+                infoKey: "VeqralGate2VoiceTranscript",
+                fallback: "えっと 本番に deploy して .env の token を削除して"
+            )
         ]
-        if let pairingURL = processEnvironment["VEQRAL_GATE2_PAIRING_URL"], !pairingURL.isEmpty {
+        let pairingURL = gate2Configuration(
+            environment: "VEQRAL_GATE2_PAIRING_URL",
+            infoKey: "VeqralGate2PairingURL",
+            fallback: ""
+        )
+        if !pairingURL.isEmpty {
             launchEnvironment["VEQRAL_UI_TEST_PAIRING_URL"] = pairingURL
         }
         app.launchEnvironment = launchEnvironment
         addSystemPromptHandler()
         app.launch()
+        handlePendingSystemPrompts()
+    }
+
+    private func gate2Configuration(environment: String, infoKey: String, fallback: String) -> String {
+        if let value = ProcessInfo.processInfo.environment[environment]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !value.isEmpty {
+            return value
+        }
+        if let value = Bundle(for: Gate2AcceptanceUITests.self).object(forInfoDictionaryKey: infoKey) as? String {
+            let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !clean.isEmpty {
+                return clean
+            }
+        }
+        return fallback
     }
 
     private func relaunchPreservingState() {
@@ -120,12 +199,40 @@ final class Gate2AcceptanceUITests: XCTestCase {
         XCTAssertTrue(content.waitForText(containing: [expectedFact], timeout: 45), "Hermes project memory did not show the #0 fact.")
     }
 
+    private func verifyHermesHistory() {
+        openSection(.history)
+        XCTAssertTrue(app.descendants(matching: .any)["gate2.screen.history"].waitForExistence(timeout: 15), "History screen was not visible.")
+
+        let toolPicker = app.segmentedControls["gate2.history.tool"]
+        XCTAssertTrue(toolPicker.waitForExistence(timeout: 10), "History tool filter was not visible.")
+        let hermes = toolPicker.buttons["Hermes"]
+        XCTAssertTrue(hermes.waitForExistence(timeout: 5), "Hermes history filter was not visible.")
+        hermes.tap()
+
+        let refresh = app.buttons["gate2.history.refresh"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 10), "History refresh button was not visible.")
+        refresh.tap()
+
+        let hermesSession = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "gate2.history.session.hermes.")).firstMatch
+        XCTAssertTrue(hermesSession.waitForExistenceWithScrolling(in: app, timeout: 45), "No Hermes history session was rendered.")
+        scrollTo(hermesSession)
+        waitUntilHittable(hermesSession, timeout: 10)
+        hermesSession.tap()
+
+        XCTAssertTrue(app.descendants(matching: .any)["gate2.history.detail"].waitForExistence(timeout: 15), "Hermes history detail did not open.")
+        let turn = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "gate2.history.turn.")).firstMatch
+        let historyScroll = app.scrollViews["gate2.screen.history"]
+        XCTAssertTrue(historyScroll.waitForExistence(timeout: 10), "History scroll view was not visible.")
+        XCTAssertTrue(turn.waitForExistenceWithScrolling(in: historyScroll, timeout: 45), "Hermes history turns were not rendered.")
+    }
+
     private func verifyVoiceTranscriptApprovalGate() {
         openSection(.command)
         let voice = app.buttons["gate2.voice.open"]
         XCTAssertTrue(voice.waitForExistenceWithScrolling(in: app, timeout: 20), "Voice button was not visible.")
         scrollTo(voice)
         voice.tap()
+        handlePendingSystemPrompts()
 
         let raw = app.staticTexts["gate2.voice.raw"]
         XCTAssertTrue(raw.waitForText(containing: ["deploy", ".env", "token"], timeout: 15), "Injected voice transcript did not appear as raw dictation.")
@@ -150,13 +257,6 @@ final class Gate2AcceptanceUITests: XCTestCase {
         }
 
         if section == .command {
-            let testNavigator = app.buttons["gate2.nav.command"]
-            if testNavigator.exists {
-                testNavigator.tap()
-                if commandField(timeout: 5).exists || app.buttons["gate2.voice.open"].waitForExistence(timeout: 2) {
-                    return
-                }
-            }
             if app.buttons["gate2.sidebar.home"].exists {
                 app.buttons["gate2.sidebar.home"].tap()
                 return
@@ -170,8 +270,13 @@ final class Gate2AcceptanceUITests: XCTestCase {
             return
         }
 
+        if section == .history {
+            openHistorySection()
+            return
+        }
+
         if let sidebarIdentifier = section.sidebarIdentifier,
-           app.buttons[sidebarIdentifier].exists {
+           app.buttons[sidebarIdentifier].isHittable {
             app.buttons[sidebarIdentifier].tap()
             return
         }
@@ -183,35 +288,55 @@ final class Gate2AcceptanceUITests: XCTestCase {
             tapTab(labels: ["承認", "Approvals"])
         case .memory:
             break
+        case .history:
+            break
         case .command:
             break
         }
     }
 
     private func openMemorySection() {
-        if app.buttons["gate2.sidebar.memory"].exists {
-            let directMemory = app.buttons["gate2.nav.memory"]
-            if directMemory.exists {
-                directMemory.tap()
-                return
-            }
+        if app.buttons["gate2.sidebar.memory"].isHittable {
             app.buttons["gate2.sidebar.memory"].tap()
             return
         }
 
-        if app.buttons["gate2.nav.more"].exists {
-            app.buttons["gate2.nav.more"].tap()
-            XCTAssertTrue(app.descendants(matching: .any)["gate2.screen.more"].waitForExistence(timeout: 10), "More screen was not visible.")
-            tapMemoryLinkFromMore()
-        } else if app.tabBars.buttons["その他"].exists || app.tabBars.buttons["More"].exists {
-            tapTab(labels: ["その他", "More"])
-            XCTAssertTrue(app.descendants(matching: .any)["gate2.screen.more"].waitForExistence(timeout: 10), "More screen was not visible.")
-            tapMemoryLinkFromMore()
-        } else if app.buttons["gate2.command.memory"].exists {
-            app.buttons["gate2.command.memory"].tap()
-        } else {
-            tapTab(labels: ["その他", "More"])
+        openMoreRoot()
+        tapMemoryLinkFromMore()
+    }
+
+    private func openHistorySection() {
+        if app.buttons["gate2.sidebar.history"].isHittable {
+            app.buttons["gate2.sidebar.history"].tap()
+            return
         }
+        openMoreRoot()
+        let history = app.buttons["gate2.more.history"]
+        XCTAssertTrue(history.waitForExistenceWithScrolling(in: app, timeout: 15), "History link was not visible inside More.")
+        scrollTo(history)
+        history.tap()
+    }
+
+    private func openMoreRoot() {
+        let moreScreen = app.descendants(matching: .any)["gate2.screen.more"]
+        XCTAssertTrue(
+            app.tabBars.buttons["その他"].exists || app.tabBars.buttons["More"].exists,
+            "More tab was not available."
+        )
+        tapTab(labels: ["その他", "More"])
+        if moreScreen.waitForExistence(timeout: 3) {
+            return
+        }
+
+        for _ in 0..<3 {
+            let back = app.navigationBars.buttons.firstMatch
+            guard back.waitForExistence(timeout: 2), back.isHittable else { break }
+            back.tap()
+            if moreScreen.waitForExistence(timeout: 3) {
+                return
+            }
+        }
+        XCTFail("More screen was not visible.")
     }
 
     private func tapMemoryLinkFromMore() {
@@ -224,6 +349,16 @@ final class Gate2AcceptanceUITests: XCTestCase {
             app.cells.containing(.staticText, identifier: "Memory").firstMatch.tap()
         } else {
             XCTFail("Memory link was not visible inside More.")
+        }
+    }
+
+    private func handlePendingSystemPrompts() {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        for _ in 0..<3 {
+            let alert = springboard.alerts.firstMatch
+            guard alert.waitForExistence(timeout: 2) else { return }
+            // UI interruption monitors are evaluated when an interaction targets the app.
+            app.tap()
         }
     }
 
@@ -263,11 +398,11 @@ final class Gate2AcceptanceUITests: XCTestCase {
     private func dismissKeyboardIfPresent() {
         guard app.keyboards.firstMatch.exists else { return }
         let sidebarHome = app.buttons["gate2.sidebar.home"]
-        if sidebarHome.exists {
+        if sidebarHome.isHittable {
             sidebarHome.tap()
         } else {
             let commandNavigator = app.buttons["gate2.nav.command"]
-            if commandNavigator.exists {
+            if commandNavigator.isHittable {
                 commandNavigator.tap()
             }
         }
@@ -325,6 +460,7 @@ private enum Gate2Section {
     case devices
     case approvals
     case memory
+    case history
 
     var sidebarIdentifier: String? {
         switch self {
@@ -332,6 +468,7 @@ private enum Gate2Section {
         case .devices: "gate2.sidebar.devices"
         case .approvals: "gate2.sidebar.approvals"
         case .memory: "gate2.sidebar.memory"
+        case .history: "gate2.sidebar.history"
         }
     }
 }
@@ -367,6 +504,18 @@ private extension XCUIElement {
         }
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: self)
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    func waitForExistenceWithScrolling(in scrollView: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if exists { return true }
+            if scrollView.exists {
+                scrollView.swipeUp()
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        }
+        return exists
     }
 
     func waitForExistenceWithScrolling(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
