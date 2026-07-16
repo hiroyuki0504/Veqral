@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pick_free_port() {
@@ -14,6 +15,8 @@ PY
 HOST_PORT="${VEQRAL_GATE2_HOST_PORT:-18778}"
 WEBHOOK_PORT="${VEQRAL_GATE2_WEBHOOK_PORT:-$(pick_free_port)}"
 PROJECT_ID="${VEQRAL_GATE2_PROJECT_ID:-gate2-xcuitest}"
+GATE2_APP_BUNDLE_IDENTIFIER="${VEQRAL_GATE2_APP_BUNDLE_IDENTIFIER:-dev.hiroyuki.veqral.gate2}"
+VOICE_TRANSCRIPT="${VEQRAL_GATE2_VOICE_TRANSCRIPT:-えっと 本番に deploy して .env の token を削除して}"
 SOURCE="veqral-${PROJECT_ID}"
 IPHONE_SIM_DEST="${VEQRAL_GATE2_IPHONE_SIM_DEST:-platform=iOS Simulator,id=45599AC5-0234-4E5A-936D-1EEF229459CD}"
 IPAD_SIM_DEST="${VEQRAL_GATE2_IPAD_SIM_DEST:-platform=iOS Simulator,id=0412878A-E27B-4782-979F-30D66449CF4E}"
@@ -24,12 +27,20 @@ WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/veqral-gate2.XXXXXX")"
 MEM_TMP="$(mktemp -d "${TMPDIR:-/tmp}/veqral-gate2-memory.XXXXXX")"
 WEBHOOK_LOG="${WORK_ROOT}/webhook.log"
 REPORT="${WORK_ROOT}/memory-inheritance.md"
+HOST_LOG="${WORK_ROOT}/host.log"
+PAIRING_STATUS="${WORK_ROOT}/pairing-ready.json"
+HOST_HOME="${WORK_ROOT}/host"
+SECRET_STORE="${HOST_HOME}/test-secrets.json"
 HOST_PID=""
 WEBHOOK_PID=""
 
 cleanup() {
-  if [[ -n "${HOST_PID}" ]]; then kill "${HOST_PID}" >/dev/null 2>&1 || true; fi
+  if [[ -n "${HOST_PID}" ]]; then
+    kill "${HOST_PID}" >/dev/null 2>&1 || true
+    wait "${HOST_PID}" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${WEBHOOK_PID}" ]]; then kill "${WEBHOOK_PID}" >/dev/null 2>&1 || true; fi
+  rm -rf "${WORK_ROOT}" "${MEM_TMP}"
 }
 trap cleanup EXIT
 
@@ -100,23 +111,26 @@ if lsof -nP -iTCP:"${HOST_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 
 echo "[gate2] Starting isolated Mac Host on ${HOST_PORT}"
-VEQRAL_HOST_HOME="${WORK_ROOT}/host" \
+mkdir -p "${HOST_HOME}"
+VEQRAL_HOST_HOME="${HOST_HOME}" \
 VEQRAL_HOST_PORT="${HOST_PORT}" \
 VEQRAL_HOST_WORKING_DIRECTORY="${ROOT}" \
+VEQRAL_TEST_MODE=1 \
+VEQRAL_TEST_SECRET_STORE_PATH="${SECRET_STORE}" \
 HERMES_HOME="${HERMES_HOME}" \
 VEQRAL_DISCORD_WEBHOOK="http://127.0.0.1:${WEBHOOK_PORT}/discord" \
-swift run --package-path "${ROOT}/MacHost" VeqralHost >/tmp/veqral-gate2-host.log 2>&1 &
+swift run --package-path "${ROOT}/MacHost" VeqralHost >"${HOST_LOG}" 2>&1 &
 HOST_PID=$!
 
 for _ in {1..80}; do
-  if curl -fsS "http://127.0.0.1:${HOST_PORT}/v1/pairing" >/tmp/veqral-gate2-pairing.json 2>/dev/null; then
+  if curl -fsS "http://127.0.0.1:${HOST_PORT}/v1/pairing" >"${PAIRING_STATUS}" 2>/dev/null; then
     break
   fi
   sleep 0.5
 done
-if [[ ! -s /tmp/veqral-gate2-pairing.json ]]; then
+if [[ ! -s "${PAIRING_STATUS}" ]]; then
   echo "[gate2] Mac Host did not expose /v1/pairing" >&2
-  tail -80 /tmp/veqral-gate2-host.log >&2 || true
+  tail -80 "${HOST_LOG}" >&2 || true
   exit 1
 fi
 
@@ -126,15 +140,9 @@ pairing_url_for_label() {
   local label="$1"
   curl -fsS "http://127.0.0.1:${HOST_PORT}/v1/pairing" >"${WORK_ROOT}/pairing-${label}.json"
   python3 - "${WORK_ROOT}/pairing-${label}.json" "${HOST_PORT}" "${label}" <<'PY'
-import json, sys, urllib.parse
+import json, sys
 data = json.load(open(sys.argv[1]))
-port = sys.argv[2]
-label = sys.argv[3]
-if "simulator" in label:
-    endpoint = f"http://127.0.0.1:{port}"
-    print("veqral://pair?" + urllib.parse.urlencode({"endpoint": endpoint, "code": data["pairingCode"]}))
-else:
-    print(data["pairingURL"])
+print(data["pairingURL"])
 PY
 }
 
@@ -158,6 +166,12 @@ run_xcuitest() {
       -destination "${destination}" \
       -derivedDataPath "${derived}" \
       -allowProvisioningUpdates \
+      -allowProvisioningDeviceRegistration \
+      VEQRAL_APP_BUNDLE_IDENTIFIER="${GATE2_APP_BUNDLE_IDENTIFIER}" \
+      VEQRAL_GATE2_PAIRING_URL="${pairing_url}" \
+      VEQRAL_GATE2_WORKING_DIRECTORY="${ROOT}" \
+      VEQRAL_GATE2_PROJECT_ID="${PROJECT_ID}" \
+      VEQRAL_GATE2_VOICE_TRANSCRIPT="${VOICE_TRANSCRIPT}" \
       -only-testing:VeqralUITests/Gate2AcceptanceUITests/testGate2Acceptance \
       test
   else
@@ -171,24 +185,29 @@ run_xcuitest() {
       -configuration Debug \
       -destination "${destination}" \
       -derivedDataPath "${derived}" \
+      VEQRAL_APP_BUNDLE_IDENTIFIER="${GATE2_APP_BUNDLE_IDENTIFIER}" \
+      VEQRAL_GATE2_PAIRING_URL="${pairing_url}" \
+      VEQRAL_GATE2_WORKING_DIRECTORY="${ROOT}" \
+      VEQRAL_GATE2_PROJECT_ID="${PROJECT_ID}" \
+      VEQRAL_GATE2_VOICE_TRANSCRIPT="${VOICE_TRANSCRIPT}" \
       -only-testing:VeqralUITests/Gate2AcceptanceUITests/testGate2Acceptance \
       test
   fi
 }
 
 ONLY_TARGET="${VEQRAL_GATE2_ONLY:-all}"
-if [[ "${ONLY_TARGET}" == "all" || "${ONLY_TARGET}" == "iphone-simulator" ]]; then
+if [[ "${ONLY_TARGET}" == "all" || "${ONLY_TARGET}" == "simulators" || "${ONLY_TARGET}" == "iphone-simulator" ]]; then
   run_xcuitest "iphone-simulator" "${IPHONE_SIM_DEST}"
 fi
-if [[ "${ONLY_TARGET}" == "all" || "${ONLY_TARGET}" == "ipad-simulator" ]]; then
+if [[ "${ONLY_TARGET}" == "all" || "${ONLY_TARGET}" == "simulators" || "${ONLY_TARGET}" == "ipad-simulator" ]]; then
   run_xcuitest "ipad-simulator" "${IPAD_SIM_DEST}"
 fi
 
 if [[ "${VEQRAL_GATE2_SKIP_DEVICES:-0}" != "1" ]]; then
-  if [[ "${ONLY_TARGET}" == "all" || "${ONLY_TARGET}" == "iphone-device" ]]; then
+  if [[ "${ONLY_TARGET}" == "all" || "${ONLY_TARGET}" == "devices" || "${ONLY_TARGET}" == "iphone-device" ]]; then
     run_xcuitest "iphone-device" "${IPHONE_DEVICE_DEST}"
   fi
-  if [[ "${ONLY_TARGET}" == "all" || "${ONLY_TARGET}" == "ipad-device" ]]; then
+  if [[ "${ONLY_TARGET}" == "all" || "${ONLY_TARGET}" == "devices" || "${ONLY_TARGET}" == "ipad-device" ]]; then
     run_xcuitest "ipad-device" "${IPAD_DEVICE_DEST}"
   fi
 fi
