@@ -1,6 +1,7 @@
 import Foundation
 
 enum RemoteHistoryTool: String, Codable, CaseIterable, Identifiable, Sendable {
+    case hermes
     case claude
     case codex
 
@@ -8,6 +9,8 @@ enum RemoteHistoryTool: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
+        case .hermes:
+            "Hermes"
         case .claude:
             "Claude"
         case .codex:
@@ -29,6 +32,10 @@ struct RemoteHistorySession: Codable, Identifiable, Equatable, Sendable {
     var summary: String
     var filePath: String
     var bytes: Int
+    var provider: String?
+    var billingMode: String?
+    var canContinue: Bool?
+    var continueBlockedReason: String?
 }
 
 struct RemoteHistoryListResponse: Codable, Sendable {
@@ -54,4 +61,6 @@ struct RemoteHistoryDetailResponse: Codable, Sendable {
     var session: RemoteHistorySession
     var turns: [RemoteHistoryTurn]
     var truncated: Bool
+    var returnedBytes: Int?
+    var truncationReason: String?
 }

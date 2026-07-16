@@ -111,6 +111,7 @@ final class CommandCenterStore: ObservableObject {
     @Published var attachmentMessage: String = ""
     @Published var pushNotificationMessage: String = ""
     @Published var requestedSection: AppSection?
+    @Published var requestedRunDetailID: UUID?
     @Published var appLanguage: AppLanguage {
         didSet {
             UserDefaults.standard.set(appLanguage.rawValue, forKey: "appLanguage")
@@ -312,13 +313,15 @@ final class CommandCenterStore: ObservableObject {
             return
         }
 
-        runs = []
-        approvals = []
-        logs = []
-        diffs = []
-        selectedRunID = nil
-        remoteRunIDs = [:]
-        savedCommandDrafts = []
+        if Self.uiTestingResetRequested {
+            runs = []
+            approvals = []
+            logs = []
+            diffs = []
+            selectedRunID = nil
+            remoteRunIDs = [:]
+            savedCommandDrafts = []
+        }
         if let directory = env["VEQRAL_UI_TEST_WORKING_DIRECTORY"]?.nilIfBlank {
             workingDirectory = NSString(string: directory).expandingTildeInPath
         }
@@ -349,11 +352,60 @@ final class CommandCenterStore: ObservableObject {
             selectedAgentProjectID = projectID
             selectedAgentChatID = chat.id
         }
+        #if DEBUG
+        if env["VEQRAL_UI_TEST_INTERACTION_FIXTURE"] == "1" {
+            let run = CommandRun(
+                id: UUID(),
+                title: "Explicit interaction fixture",
+                command: "fixture",
+                runtime: .localShell,
+                phase: .implementation,
+                status: .approval,
+                agent: "Fixture",
+                device: ProcessInfo.processInfo.hostName,
+                model: "Fixture",
+                progress: 0,
+                startedAt: Date(),
+                completedAt: nil,
+                workingDirectory: workingDirectory,
+                interaction: CommandInteractionPrompt(
+                    kind: .choice,
+                    prompt: "Choose explicitly. No generic approval is allowed.",
+                    choices: [
+                        CommandInteractionChoice(value: "1", label: "Do not run"),
+                        CommandInteractionChoice(value: "2", label: "Run once")
+                    ]
+                )
+            )
+            runs = [run]
+            approvals = [
+                CommandApproval(
+                    id: UUID(),
+                    runID: run.id,
+                    title: run.title,
+                    detail: "Explicit input required",
+                    command: run.command,
+                    risk: "中",
+                    tintName: "amber",
+                    status: .pending,
+                    createdAt: Date()
+                )
+            ]
+            remoteRunIDs[run.id.uuidString] = "interaction-fixture"
+            selectedRunID = run.id
+        }
+        #endif
     }
 
     func selectRun(_ id: UUID) {
         selectedRunID = id
         persist()
+    }
+
+    func openRunDetail(_ id: UUID) {
+        selectRun(id)
+        requestedRunDetailID = id
+        requestedSection = .home
     }
 
     func submitDraft() {
@@ -514,7 +566,7 @@ final class CommandCenterStore: ObservableObject {
         pairingToken = Self.makePairingToken()
     }
 
-    func configureRemoteHost(endpoint: String, deviceID: String, token: String, name: String = "Mac Host") {
+    func configureRemoteHost(endpoint: String, deviceID: String, token: String, name: String = "Mac Host", minimumAuthVersion: Int? = nil) {
         let cleanDeviceID = deviceID.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleanDeviceID.isEmpty, !cleanToken.isEmpty {
@@ -525,7 +577,8 @@ final class CommandCenterStore: ObservableObject {
             endpoint: endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
             deviceID: cleanDeviceID,
             token: cleanToken,
-            name: name
+            name: name,
+            minimumAuthVersion: minimumAuthVersion
         )
         persist()
         syncPushTokenWithRemoteHost()
@@ -542,8 +595,8 @@ final class CommandCenterStore: ObservableObject {
     }
 
     @discardableResult
-    func pairRemoteHost(endpoints: [String], signedEndpoint: String? = nil, pairingCode: String, pairingSignature: String? = nil, deviceName: String) async throws -> String {
-        let cleanEndpoints = endpoints
+    func pairRemoteHost(endpoints: [String], signedEndpoint: String? = nil, pairingCode: String, pairingSignature: String? = nil, deviceName: String, pairingLink: RemotePairingLink? = nil) async throws -> String {
+        let cleanEndpoints = (pairingLink?.endpoints ?? endpoints)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .uniqued()
@@ -562,9 +615,10 @@ final class CommandCenterStore: ObservableObject {
                     pairingCode: cleanCode,
                     pairingSignature: cleanSignature,
                     signedEndpoint: signatureEndpoint,
-                    clientStableID: Self.localClientStableID()
+                    clientStableID: Self.localClientStableID(),
+                    pairingLink: pairingLink
                 )
-                configureRemoteHost(endpoint: candidate, deviceID: response.deviceID, token: response.token, name: "Mac Host")
+                configureRemoteHost(endpoint: candidate, deviceID: response.deviceID, token: response.token, name: "Mac Host", minimumAuthVersion: response.minimumAuthVersion)
                 refreshRemoteHostTelemetry()
                 refreshRemoteHostStatus()
                 return candidate
@@ -573,6 +627,18 @@ final class CommandCenterStore: ObservableObject {
             }
         }
         throw RemoteHostError.server("All pairing endpoints failed. \(failures.joined(separator: " / "))")
+    }
+
+    @discardableResult
+    func pairRemoteHost(link: RemotePairingLink, deviceName: String) async throws -> String {
+        try await pairRemoteHost(
+            endpoints: link.endpoints,
+            signedEndpoint: link.signedEndpoint,
+            pairingCode: link.pairingCode,
+            pairingSignature: link.legacySignature,
+            deviceName: deviceName,
+            pairingLink: link
+        )
     }
 
     func pairRemoteHost(endpoint: String, pairingCode: String, pairingSignature: String? = nil, deviceName: String, signedEndpoint: String?) async throws {
@@ -604,28 +670,17 @@ final class CommandCenterStore: ObservableObject {
     }
 
     func handlePairingURL(_ url: URL) {
-        guard url.scheme == "veqral",
-              url.host == "pair",
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        let link: RemotePairingLink
+        do {
+            link = try RemotePairingLink(url: url)
+        } catch {
+            remoteHostMessage = error.localizedDescription
             return
         }
-        let values = Self.queryValues(from: components)
-        let endpoints = Self.pairingEndpointCandidates(from: components)
-        guard let endpoint = endpoints.first, let code = values["code"] else {
-            remoteHostMessage = "Pairing URL is missing endpoint or code."
-            return
-        }
-        let signature = values["signature"] ?? values["sig"]
-        remoteHostMessage = endpoints.count > 1 ? "Pairing from QR link across \(endpoints.count) endpoints..." : "Pairing from QR link..."
+        remoteHostMessage = link.endpoints.count > 1 ? "Pairing from QR link across \(link.endpoints.count) authenticated endpoints..." : "Pairing from QR link..."
         Task { @MainActor in
             do {
-                let pairedEndpoint = try await pairRemoteHost(
-                    endpoints: endpoints,
-                    signedEndpoint: endpoint,
-                    pairingCode: code,
-                    pairingSignature: signature,
-                    deviceName: ProcessInfo.processInfo.hostName
-                )
+                let pairedEndpoint = try await pairRemoteHost(link: link, deviceName: ProcessInfo.processInfo.hostName)
                 remoteHostMessage = "Paired from QR link via \(pairedEndpoint)."
             } catch {
                 remoteHostMessage = "QR pairing failed: \(error.localizedDescription)"
@@ -1473,7 +1528,7 @@ final class CommandCenterStore: ObservableObject {
         page: Int = 0
     ) {
         guard remoteHost.isEnabled, remoteHost.isPaired else {
-            remoteHistoryMessage = "Mac Host pairing is required to load Claude/Codex history."
+            remoteHistoryMessage = "Mac Host pairing is required to load Hermes/Claude/Codex history."
             return
         }
         isLoadingRemoteHistory = true
@@ -1508,7 +1563,7 @@ final class CommandCenterStore: ObservableObject {
                     sessionToLoad = selectedHistorySession
                 }
                 let warningText = (response.warnings ?? []).joined(separator: "\n")
-                let loadMessage = response.sessions.isEmpty ? "No Claude/Codex history found on Mac Host." : "\(response.total) sessions loaded."
+                let loadMessage = response.sessions.isEmpty ? "No Hermes/Claude/Codex history found on Mac Host." : "\(response.total) sessions loaded."
                 remoteHistoryMessage = warningText.isEmpty ? loadMessage : "\(loadMessage)\n\(warningText)"
                 isLoadingRemoteHistory = false
                 if let sessionToLoad {
@@ -1680,20 +1735,32 @@ final class CommandCenterStore: ObservableObject {
     }
 
     func continueHistorySession(_ session: RemoteHistorySession, command: String? = nil) {
+        guard session.canContinue == true else {
+            remoteHistoryMessage = session.continueBlockedReason ?? "This session cannot be continued safely."
+            return
+        }
         let text = (command ?? commandDraft).trimmingCharacters(in: .whitespacesAndNewlines)
         let prompt = text.isEmpty ? "Continue this session from Veqral. Briefly orient me to the current state and wait for the next instruction." : text
         if command == nil {
             commandDraft = ""
         }
-        let runtime: CommandRuntime = session.tool == .codex ? .codexDirect : .claudeDirect
+        let runtime: CommandRuntime
+        switch session.tool {
+        case .hermes:
+            runtime = .hermesAgent
+        case .codex:
+            runtime = .codexDirect
+        case .claude:
+            runtime = .claudeDirect
+        }
         submitCommand(
             prompt,
             runtime: runtime,
-            workingDirectory: session.projectPath.nilIfBlank ?? workingDirectory,
+            workingDirectory: session.projectPath,
             resumeSessionID: session.resumeID ?? session.id,
             agentProjectID: nil,
             agentChatID: nil,
-            provider: nil,
+            provider: session.provider,
             providerModel: session.model
         )
     }
@@ -1870,6 +1937,17 @@ final class CommandCenterStore: ObservableObject {
 
     func approve(_ approval: CommandApproval) {
         guard let index = approvals.firstIndex(where: { $0.id == approval.id }) else { return }
+        if let runID = approval.runID,
+           let run = runs.first(where: { $0.id == runID }),
+           run.interaction != nil,
+           remoteRunIDs[runID.uuidString] != nil {
+            appendLog(
+                runID: runID,
+                stream: "warn",
+                message: "Explicit interaction input is required. Generic approval cannot answer an agent prompt."
+            )
+            return
+        }
         approvals[index].status = .approved
         if let runID = approval.runID, let runIndex = runs.firstIndex(where: { $0.id == runID }) {
             runs[runIndex].status = .running
@@ -1933,7 +2011,8 @@ final class CommandCenterStore: ObservableObject {
             appendLog(runID: runID, stream: "warn", message: "No remote run is available for input.")
             return
         }
-        appendLog(runID: runID, stream: "input", message: "Sending input to remote run.")
+        appendLog(runID: runID, stream: "input", message: displayText.map { "Sending input to remote run: \($0)" } ?? "Sending input to remote run.")
+        selectedRunID = runID
         Task {
             do {
                 try await RemoteHostClient(configuration: remoteHost).submitInput(remoteRunID: remoteRunID, text: clean)
@@ -1943,9 +2022,12 @@ final class CommandCenterStore: ObservableObject {
                 if let runIndex = runs.firstIndex(where: { $0.id == runID }) {
                     runs[runIndex].interaction = nil
                 }
-                appendLog(runID: runID, stream: "ok", message: "Input sent to remote run.")
+                openRunDetail(runID)
+                appendLog(runID: runID, stream: "ok", message: "Input sent to remote run. Opened Command detail so the conversation and live log stay visible.")
                 persist()
             } catch {
+                selectedRunID = runID
+                requestedSection = .approvals
                 appendLog(runID: runID, stream: "warn", message: "Remote input failed: \(error.localizedDescription)")
             }
         }
@@ -2062,7 +2144,15 @@ final class CommandCenterStore: ObservableObject {
     }
 
     func startNewDirectSession(_ tool: RemoteHistoryTool) {
-        let runtime: CommandRuntime = tool == .codex ? .codexDirect : .claudeDirect
+        let runtime: CommandRuntime
+        switch tool {
+        case .hermes:
+            runtime = .hermesAgent
+        case .codex:
+            runtime = .codexDirect
+        case .claude:
+            runtime = .claudeDirect
+        }
         selectedRuntime = runtime
         submitCommand(
             "Start a new \(tool.title) session from Veqral. Briefly confirm the current workspace and wait for my next instruction.",
@@ -2436,7 +2526,7 @@ final class CommandCenterStore: ObservableObject {
                         phase: reconnectAttempt == 0 ? .connecting : .reconnecting,
                         runID: run.id,
                         runTitle: run.title,
-                        detail: reconnectAttempt == 0 ? L10n.tr("Opening log stream.") : L10n.tr("Resuming remote run before reconnect."),
+                        detail: reconnectAttempt == 0 ? L10n.tr("Opening log stream.") : L10n.tr("Refreshing remote run before reconnect."),
                         attempt: reconnectAttempt,
                         nextRetrySeconds: nil
                     )
@@ -2514,7 +2604,7 @@ final class CommandCenterStore: ObservableObject {
         let didFinish = await applyRemoteRunSnapshot(snapshot, localRunID: run.id, remoteRunID: remoteRunID, client: client)
         guard !didFinish else { return false }
 
-        if ["running", "queued", "needsAttention"].contains(snapshot.run.status) {
+        if snapshot.run.status == "needsAttention" {
             try await client.resume(remoteRunID: remoteRunID)
             if attempt == 1 {
                 appendLog(runID: run.id, stream: "info", message: "Remote resume requested before reconnecting the log stream.")

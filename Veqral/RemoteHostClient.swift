@@ -29,18 +29,26 @@ struct RemoteHostClient: Sendable {
         pairingCode: String,
         pairingSignature: String? = nil,
         signedEndpoint: String? = nil,
-        clientStableID: String? = nil
+        clientStableID: String? = nil,
+        pairingLink: RemotePairingLink? = nil
     ) async throws -> RemotePairResponse {
         guard let url = URL(string: "/v1/pair", relativeTo: URL(string: endpoint)) else {
             throw RemoteHostError.invalidConfiguration
         }
-        let pairingEndpoint = signedEndpoint?.nilIfBlank ?? endpoint
+        let pairingEndpoint = pairingLink?.signedEndpoint ?? signedEndpoint?.nilIfBlank ?? endpoint
         struct PairBody: Codable {
             var deviceName: String
             var pairingCode: String
             var pairingEndpoint: String
             var pairingSignature: String?
             var clientStableID: String?
+            var pairingProtocolVersion: Int?
+            var apiProtocolVersion: Int?
+            var requestAuthVersions: [Int]?
+            var capabilities: [String]?
+            var pairingEndpoints: [String]?
+            var pairingProof: String?
+            var selectedEndpoint: String?
         }
         var request = URLRequest(url: url.absoluteURL)
         request.httpMethod = "POST"
@@ -50,14 +58,21 @@ struct RemoteHostClient: Sendable {
             deviceName: deviceName,
             pairingCode: pairingCode,
             pairingEndpoint: pairingEndpoint,
-            pairingSignature: pairingSignature,
-            clientStableID: clientStableID
+            pairingSignature: pairingLink?.legacySignature ?? pairingSignature,
+            clientStableID: clientStableID,
+            pairingProtocolVersion: pairingLink?.pairingProtocolVersion,
+            apiProtocolVersion: pairingLink?.apiProtocolVersion,
+            requestAuthVersions: pairingLink?.requestAuthVersions,
+            capabilities: pairingLink?.capabilities,
+            pairingEndpoints: pairingLink?.endpoints,
+            pairingProof: pairingLink?.pairingProof,
+            selectedEndpoint: pairingLink == nil ? nil : endpoint
         ))
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw RemoteHostError.server("Invalid response")
         }
-        if [401, 403].contains(http.statusCode) {
+        if [401, 403, 426].contains(http.statusCode) {
             let message = (try? JSONDecoder.commandCenter.decode([String: String].self, from: data)["error"]) ?? "Unauthorized"
             throw RemoteHostError.authentication(message)
         }
@@ -542,7 +557,7 @@ struct RemoteHostClient: Sendable {
             let message = (try? JSONDecoder.commandCenter.decode([String: String].self, from: data)["error"]) ?? "Remote approval required"
             throw RemoteHostError.approvalRequired(message)
         }
-        if [401, 403].contains(http.statusCode) {
+        if [401, 403, 426].contains(http.statusCode) {
             let message = (try? JSONDecoder.commandCenter.decode([String: String].self, from: data)["error"]) ?? "Unauthorized"
             throw RemoteHostError.authentication(message)
         }
@@ -555,14 +570,23 @@ struct RemoteHostClient: Sendable {
 
     private func sign(_ request: inout URLRequest, method: String, path: String, body: Data) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
+        let authVersion = min(2, max(1, configuration.minimumAuthVersion ?? 1))
+        let nonce = authVersion == 2 ? UUID().uuidString.lowercased() : nil
         request.setValue(configuration.deviceID, forHTTPHeaderField: "X-Veqral-Device")
         request.setValue(timestamp, forHTTPHeaderField: "X-Veqral-Timestamp")
+        request.setValue(String(authVersion), forHTTPHeaderField: "X-Veqral-Auth-Version")
+        if let nonce {
+            request.setValue(nonce, forHTTPHeaderField: "X-Veqral-Nonce")
+        }
         request.setValue(
             RemoteHostSigner.signature(
                 token: configuration.token,
+                deviceID: configuration.deviceID,
+                authVersion: authVersion,
                 method: method,
                 path: path,
                 timestamp: timestamp,
+                nonce: nonce,
                 body: body
             ),
             forHTTPHeaderField: "X-Veqral-Signature"

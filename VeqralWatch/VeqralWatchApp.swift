@@ -79,6 +79,9 @@ final class WatchCommandStore: ObservableObject {
     @Published var token: String {
         didSet { try? WatchKeychainStore.set(token, account: "host-token") }
     }
+    @Published var authVersion: Int {
+        didSet { UserDefaults.standard.set(authVersion, forKey: "watch.authVersion") }
+    }
     @Published var runs: [WatchRun] = []
     @Published var commandDraft = ""
     @Published var message = "Host 未接続"
@@ -92,6 +95,7 @@ final class WatchCommandStore: ObservableObject {
         endpoint = UserDefaults.standard.string(forKey: "watch.endpoint") ?? ""
         deviceID = UserDefaults.standard.string(forKey: "watch.deviceID") ?? ""
         token = WatchKeychainStore.get(account: "host-token") ?? ""
+        authVersion = max(1, UserDefaults.standard.integer(forKey: "watch.authVersion"))
     }
 
     var pendingApprovals: [WatchRun] {
@@ -216,7 +220,7 @@ final class WatchCommandStore: ObservableObject {
 
     private func makeClient() -> WatchHostClient? {
         guard !endpoint.isEmpty, !deviceID.isEmpty, !token.isEmpty else { return nil }
-        return WatchHostClient(endpoint: endpoint, deviceID: deviceID, token: token)
+        return WatchHostClient(endpoint: endpoint, deviceID: deviceID, token: token, authVersion: min(2, max(1, authVersion)))
     }
 }
 
@@ -423,6 +427,7 @@ struct WatchHostClient {
     var endpoint: String
     var deviceID: String
     var token: String
+    var authVersion: Int
 
     func runs() async throws -> WatchRunListResponse {
         let data = try await request(path: "/v1/runs", method: "GET", body: Data())
@@ -478,9 +483,12 @@ struct WatchHostClient {
         request.httpBody = body.isEmpty ? nil : body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let timestamp = ISO8601DateFormatter().string(from: Date())
+        let nonce = authVersion == 2 ? UUID().uuidString.lowercased() : nil
         request.setValue(deviceID, forHTTPHeaderField: "X-Veqral-Device")
         request.setValue(timestamp, forHTTPHeaderField: "X-Veqral-Timestamp")
-        request.setValue(signature(method: method, path: path, timestamp: timestamp, body: body), forHTTPHeaderField: "X-Veqral-Signature")
+        request.setValue(String(authVersion), forHTTPHeaderField: "X-Veqral-Auth-Version")
+        if let nonce { request.setValue(nonce, forHTTPHeaderField: "X-Veqral-Nonce") }
+        request.setValue(signature(method: method, path: path, timestamp: timestamp, nonce: nonce, body: body), forHTTPHeaderField: "X-Veqral-Signature")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw WatchHostError.server("Invalid response") }
         guard (200..<300).contains(http.statusCode) else {
@@ -489,9 +497,17 @@ struct WatchHostClient {
         return data
     }
 
-    private func signature(method: String, path: String, timestamp: String, body: Data) -> String {
+    private func signature(method: String, path: String, timestamp: String, nonce: String? = nil, body: Data) -> String {
         let bodyHash = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
-        let canonical = "\(method)\n\(path)\n\(timestamp)\n\(bodyHash)"
+        let canonical: String
+        if authVersion == 2 {
+            canonical = [
+                "VEQRAL-REQUEST-AUTH", "2", deviceID, method.uppercased(), path,
+                timestamp, nonce?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "", bodyHash
+            ].joined(separator: "\n")
+        } else {
+            canonical = "\(method)\n\(path)\n\(timestamp)\n\(bodyHash)"
+        }
         let key = SymmetricKey(data: Data(token.utf8))
         let signature = HMAC<SHA256>.authenticationCode(for: Data(canonical.utf8), using: key)
         return Data(signature).base64EncodedString()
