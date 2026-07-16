@@ -587,3 +587,4 @@
 "turns" = "ターン";
 "~/.claude sessions, resumable from History" = "~/.claude セッション。履歴から再開できます";
 "~/.codex sessions, resumable from History" = "~/.codex セッション。履歴から再開できます";
+"For security, pairing requires the signed QR or full link copied from the Mac menu bar." = "安全のため、Macのメニューバーから表示した署名付きQRまたはコピーした完全なリンクでペアリングしてください。";

@@ -21,64 +21,8 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .environment(\.locale, store.appLanguage.locale)
-        .overlay(alignment: .topTrailing) {
-            if Self.isUITesting {
-                Gate2AcceptanceStatus()
-                    .environmentObject(store)
-            }
-        }
         .onAppear {
             CatalystWindowConfigurator.applyMinimumSize()
-        }
-    }
-
-    private static var isUITesting: Bool {
-        CommandLine.arguments.contains("-veqral-ui-testing")
-            || ProcessInfo.processInfo.environment["VEQRAL_UI_TESTING"] == "1"
-    }
-}
-
-private struct Gate2AcceptanceStatus: View {
-    @EnvironmentObject private var store: CommandCenterStore
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Button {
-                store.requestedSection = nil
-                DispatchQueue.main.async {
-                    store.requestedSection = .home
-                }
-            } label: {
-                Text("Command")
-                    .font(.caption2)
-                    .foregroundStyle(.clear)
-                    .frame(width: 44, height: 44)
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("gate2.nav.command")
-            .accessibilityLabel("gate2.nav.command")
-
-            Button {
-                store.requestedSection = nil
-                DispatchQueue.main.async {
-                    store.requestedSection = .github
-                }
-            } label: {
-                Text("More")
-                    .font(.caption2)
-                    .foregroundStyle(.clear)
-                    .frame(width: 44, height: 44)
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("gate2.nav.more")
-            .accessibilityLabel("gate2.nav.more")
-
-            Text("pendingApprovals:\(store.pendingApprovals().count)")
-                .font(.caption2)
-                .foregroundStyle(.clear)
-                .frame(width: 1, height: 1)
-                .accessibilityIdentifier("gate2.approval.pendingCount")
-                .accessibilityLabel("pendingApprovals:\(store.pendingApprovals().count)")
         }
     }
 }
@@ -135,27 +79,8 @@ private struct MacRootView: View {
         .onChange(of: store.requestedSection) { _, section in
             guard let section else { return }
             selectedSection = section
+            store.requestedRunDetailID = nil
             store.requestedSection = nil
-        }
-        .overlay(alignment: .topTrailing) {
-            if CommandLine.arguments.contains("-veqral-ui-testing")
-                || ProcessInfo.processInfo.environment["VEQRAL_UI_TESTING"] == "1" {
-                Button {
-                    selectedSection = .memory
-                    store.requestedSection = .memory
-                } label: {
-                    Text("Memory")
-                        .font(.caption2)
-                        .foregroundStyle(.clear)
-                        .frame(width: 44, height: 44)
-                        .background(Color.black.opacity(0.001))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("gate2.nav.memory")
-                .accessibilityLabel("gate2.nav.memory")
-                .padding(.top, 96)
-            }
         }
     }
 }
@@ -163,13 +88,20 @@ private struct MacRootView: View {
 private struct CompactRootView: View {
     @EnvironmentObject private var store: CommandCenterStore
     @State private var selectedTab: AppSection = .home
+    @State private var homePath: [UUID] = []
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            NavigationStack {
+            NavigationStack(path: $homePath) {
                 CommandCenterPhoneDashboard()
                     .navigationDestination(for: AppSection.self) { section in
                         sectionDestination(section)
+                    }
+                    .navigationDestination(for: UUID.self) { runID in
+                        CommandCenterRunView()
+                            .onAppear {
+                                store.selectRun(runID)
+                            }
                     }
             }
             .tabItem { Label(AppSection.home.title, systemImage: AppSection.home.symbol) }
@@ -215,6 +147,14 @@ private struct CompactRootView: View {
                 selectedTab = AppSection.primaryTabs.contains(section) ? section : .home
             }
             store.requestedSection = nil
+        }
+        .onChange(of: store.requestedRunDetailID) { _, runID in
+            guard let runID else { return }
+            selectedTab = .home
+            if homePath.last != runID {
+                homePath.append(runID)
+            }
+            store.requestedRunDetailID = nil
         }
     }
 }
@@ -310,27 +250,8 @@ private struct RegularRootView: View {
         .onChange(of: store.requestedSection) { _, section in
             guard let section else { return }
             selectedSection = section
+            store.requestedRunDetailID = nil
             store.requestedSection = nil
-        }
-        .overlay(alignment: .topTrailing) {
-            if CommandLine.arguments.contains("-veqral-ui-testing")
-                || ProcessInfo.processInfo.environment["VEQRAL_UI_TESTING"] == "1" {
-                Button {
-                    selectedSection = .memory
-                    store.requestedSection = .memory
-                } label: {
-                    Text("Memory")
-                        .font(.caption2)
-                        .foregroundStyle(.clear)
-                        .frame(width: 44, height: 44)
-                        .background(Color.black.opacity(0.001))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("gate2.nav.memory")
-                .accessibilityLabel("gate2.nav.memory")
-                .padding(.top, 96)
-            }
         }
     }
 }

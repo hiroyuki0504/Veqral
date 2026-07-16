@@ -1229,10 +1229,13 @@ struct DevicesView: View {
                         }
                         .font(.footnote.weight(.semibold))
 
-                        RemoteConnectionField(title: L10n.tr("Pairing URL"), placeholder: "veqral://pair?endpoint=http://100.x.x.x:7878&code=ABCD1234", text: $pairingURLInput, identifier: "gate2.pairing.url")
+                        RemoteConnectionField(title: L10n.tr("Pairing URL"), placeholder: "veqral://pair?endpoint=http://100.x.x.x:7878&code=ABCD1234&signature=...", text: $pairingURLInput, identifier: "gate2.pairing.url")
                         RemoteConnectionField(title: L10n.tr("Saved endpoint"), placeholder: store.workspace.macHostEndpoint, text: $remoteEndpoint, identifier: "gate2.pairing.endpoint")
-                        RemoteConnectionField(title: L10n.tr("Pairing code"), placeholder: L10n.tr("8-character code from menu bar QR"), text: $remotePairingCode, identifier: "gate2.pairing.code")
                         RemoteConnectionField(title: L10n.tr("This device name"), placeholder: "iPhone・iPad", text: $remoteDeviceName, identifier: "gate2.pairing.deviceName")
+                        Text(L10n.tr("For security, pairing requires the signed QR or full link copied from the Mac menu bar."))
+                            .font(.caption)
+                            .foregroundStyle(VQTheme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
 
                         KeyValueLine(key: "Saved endpoint", value: VQDisplay.endpoint(store.remoteHost))
                         KeyValueLine(key: "Device ID", value: store.remoteHost.deviceID.isEmpty ? L10n.tr("Not Paired") : "\(store.remoteHost.deviceID.prefix(8))...")
@@ -1244,16 +1247,6 @@ struct DevicesView: View {
                         KeyValueLine(key: "Execution", value: store.remoteHost.isEnabled ? L10n.tr("iPhone/iPad -> Tailscale -> Mac Host -> Hermes") : L10n.tr("Pair a Mac Host before running on iPhone/iPad"))
 
                         HStack(spacing: 8) {
-                            Button {
-                                pairRemoteHost()
-                            } label: {
-                                Label(L10n.tr(isPairing ? "Pairing" : "Pair"), systemImage: "link.badge.plus")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .buttonBorderShape(.roundedRectangle(radius: 8))
-                            .disabled(isPairing || remoteEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || remotePairingCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            .accessibilityIdentifier("gate2.pairing.pair")
-
                             Button {
                                 store.disableRemoteHost()
                                 remoteStatusMessage = L10n.tr("Remote Host disabled. Pairing data remains in Keychain.")
@@ -1630,7 +1623,7 @@ struct DevicesView: View {
     private func fetchUITestPairingURL() async {
         struct PairingStatus: Decodable {
             var pairingURL: String
-            var pairingCode: String?
+            var simulatorPairingURL: String?
         }
         #if targetEnvironment(simulator)
         let pairingStatusURLs = ["http://127.0.0.1:18778/v1/pairing", "http://100.96.40.99:18778/v1/pairing"]
@@ -1647,16 +1640,10 @@ struct DevicesView: View {
                 continue
             }
             #if targetEnvironment(simulator)
-            let code = status.pairingCode?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if value.contains("127.0.0.1"), !code.isEmpty {
-                var components = URLComponents()
-                components.scheme = "veqral"
-                components.host = "pair"
-                components.queryItems = [
-                    URLQueryItem(name: "endpoint", value: "http://127.0.0.1:18778"),
-                    URLQueryItem(name: "code", value: code)
-                ]
-                pairingURLInput = components.string ?? status.pairingURL
+            if value.contains("127.0.0.1"),
+               let simulatorPairingURL = status.simulatorPairingURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !simulatorPairingURL.isEmpty {
+                pairingURLInput = simulatorPairingURL
                 return
             }
             #endif
@@ -1681,25 +1668,26 @@ struct DevicesView: View {
         }
     }
 
-    private func pairRemoteHost(pairingSignature: String? = nil, endpoints: [String]? = nil, signedEndpoint: String? = nil) {
+    private func pairRemoteHost(link: RemotePairingLink? = nil) {
         isPairing = true
         remoteStatusMessage = L10n.tr("Pairing with Mac Host...")
         let endpoint = remoteEndpoint
-        let endpointCandidates = (endpoints ?? [endpoint])
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .uniqued()
         let code = remotePairingCode
         let deviceName = remoteDeviceName.isEmpty ? ProcessInfo.processInfo.hostName : remoteDeviceName
         Task { @MainActor in
             do {
-                let pairedEndpoint = try await store.pairRemoteHost(
-                    endpoints: endpointCandidates,
-                    signedEndpoint: signedEndpoint ?? endpointCandidates.first ?? endpoint,
-                    pairingCode: code,
-                    pairingSignature: pairingSignature,
-                    deviceName: deviceName
-                )
+                let pairedEndpoint: String
+                if let link {
+                    pairedEndpoint = try await store.pairRemoteHost(link: link, deviceName: deviceName)
+                } else {
+                    pairedEndpoint = try await store.pairRemoteHost(
+                        endpoints: [endpoint],
+                        signedEndpoint: endpoint,
+                        pairingCode: code,
+                        pairingSignature: nil,
+                        deviceName: deviceName
+                    )
+                }
                 remoteEndpoint = pairedEndpoint
                 remotePairingCode = ""
                 remoteStatusMessage = "\(L10n.tr("Paired. Future runs will launch through Mac Host.")) Endpoint: \(pairedEndpoint)"
@@ -1750,25 +1738,26 @@ struct DevicesView: View {
     }
 
     private func handleScannedPairingPayload(_ payload: String) {
-        guard let url = URL(string: payload),
-              url.scheme == "veqral",
-              url.host == "pair",
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        guard let url = URL(string: payload) else {
             remoteStatusMessage = L10n.tr("Pairing QR was not recognized.")
             return
         }
-        let values = queryValues(from: components)
-        let endpoints = pairingEndpointCandidates(from: components)
-        guard let endpoint = endpoints.first, let code = values["code"] else {
+        let link: RemotePairingLink
+        do {
+            link = try RemotePairingLink(url: url)
+        } catch {
+            remoteStatusMessage = error.localizedDescription
+            return
+        }
+        guard let endpoint = link.endpoints.first else {
             remoteStatusMessage = L10n.tr("Pairing URL is missing endpoint or code.")
             return
         }
-        let signature = values["signature"] ?? values["sig"]
         remoteEndpoint = endpoint
-        remotePairingCode = code
+        remotePairingCode = link.pairingCode
         pairingURLInput = payload
-        remoteStatusMessage = endpoints.count > 1 ? "\(L10n.tr("QR recognized. Pairing...")) \(endpoints.count) endpoints" : L10n.tr("QR recognized. Pairing...")
-        pairRemoteHost(pairingSignature: signature, endpoints: endpoints, signedEndpoint: endpoint)
+        remoteStatusMessage = link.endpoints.count > 1 ? "\(L10n.tr("QR recognized. Pairing...")) \(link.endpoints.count) authenticated endpoints" : L10n.tr("QR recognized. Pairing...")
+        pairRemoteHost(link: link)
     }
 
     private func queryValues(from components: URLComponents) -> [String: String] {
@@ -2972,35 +2961,51 @@ struct HistoryView: View {
         ScreenScaffold(title: "History", systemImage: "clock.arrow.circlepath") {
             VQPanel("Filters", systemImage: "line.3.horizontal.decrease.circle") {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 10) {
-                        Picker("Tool", selection: $toolFilter) {
-                            Text(L10n.tr("All")).tag("all")
-                            Text("Claude").tag(RemoteHistoryTool.claude.rawValue)
-                            Text("Codex").tag(RemoteHistoryTool.codex.rawValue)
-                        }
-                        .pickerStyle(.segmented)
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                            Picker("Tool", selection: $toolFilter) {
+                                Text(L10n.tr("All")).tag("all")
+                                ForEach(RemoteHistoryTool.allCases) { tool in
+                                    Text(tool.title).tag(tool.rawValue)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .accessibilityIdentifier("gate2.history.tool")
 
-                        Button(action: refresh) {
-                            Label(L10n.tr("Refresh"), systemImage: "arrow.clockwise")
+                            Button(action: refresh) {
+                                Label(L10n.tr("Refresh"), systemImage: "arrow.clockwise")
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+                            .accessibilityIdentifier("gate2.history.refresh")
                         }
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.roundedRectangle(radius: 8))
 
-                        Button {
-                            store.startNewDirectSession(.codex)
-                        } label: {
-                            Label(L10n.tr("New Codex"), systemImage: "curlybraces.square")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                        HStack(spacing: 10) {
+                            Button {
+                                store.startNewDirectSession(.hermes)
+                            } label: {
+                                Label(L10n.tr("New Hermes"), systemImage: "sparkles")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
 
-                        Button {
-                            store.startNewDirectSession(.claude)
-                        } label: {
-                            Label(L10n.tr("New Claude"), systemImage: "text.bubble")
+                            Button {
+                                store.startNewDirectSession(.codex)
+                            } label: {
+                                Label(L10n.tr("New Codex"), systemImage: "curlybraces.square")
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
+
+                            Button {
+                                store.startNewDirectSession(.claude)
+                            } label: {
+                                Label(L10n.tr("New Claude"), systemImage: "text.bubble")
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: 8))
                         }
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.roundedRectangle(radius: 8))
+                        .font(.caption.weight(.semibold))
                     }
 
                     HStack(spacing: 10) {
@@ -3043,7 +3048,7 @@ struct HistoryView: View {
                         ProgressView()
                             .padding(.vertical, 18)
                     } else if displayedSessions.isEmpty {
-                        Text(store.remoteHost.isPaired ? L10n.tr("No Claude or Codex sessions matched this filter.") : L10n.tr("Pair with Mac Host to read Claude/Codex history."))
+                        Text(store.remoteHost.isPaired ? L10n.tr("No Hermes, Claude, or Codex sessions matched this filter.") : L10n.tr("Pair with Mac Host to read Hermes/Claude/Codex history."))
                             .font(.subheadline)
                             .foregroundStyle(VQTheme.secondaryText)
                             .padding(.vertical, 16)
@@ -3056,6 +3061,7 @@ struct HistoryView: View {
                                 HistorySessionRow(session: session, displayTitle: store.historyTitle(for: session), isSelected: store.selectedHistorySession?.id == session.id)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("gate2.history.session.\(session.tool.rawValue).\(session.id)")
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 Button {
                                     store.continueHistorySession(session)
@@ -3063,6 +3069,7 @@ struct HistoryView: View {
                                     Label(L10n.tr("Continue"), systemImage: "arrowshape.turn.up.right")
                                 }
                                 .tint(.accentColor)
+                                .disabled(session.canContinue != true)
                             }
                             EmptyDivider()
                         }
@@ -3093,7 +3100,15 @@ struct HistoryView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .buttonBorderShape(.roundedRectangle(radius: 8))
+                            .disabled(session.canContinue != true)
                             StatusPill(title: "\(store.remoteHistoryTurns.count) \(L10n.tr("turns"))", tint: VQTheme.accent)
+                        }
+
+                        if let reason = session.continueBlockedReason, session.canContinue != true {
+                            Label(reason, systemImage: "exclamationmark.shield")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .accessibilityIdentifier("history.continue.blocked-reason")
                         }
 
                         HStack(spacing: 8) {
@@ -3123,11 +3138,12 @@ struct HistoryView: View {
                         }
                     }
                 } else {
-                    Text(L10n.tr("Select a Claude or Codex session from the table."))
+                    Text(L10n.tr("Select a Hermes, Claude, or Codex session from the table."))
                         .font(.subheadline)
                         .foregroundStyle(VQTheme.secondaryText)
                 }
             }
+            .accessibilityIdentifier("gate2.history.detail")
         }
         .onAppear {
             if store.remoteHistorySessions.isEmpty {
@@ -3140,6 +3156,7 @@ struct HistoryView: View {
         .onChange(of: store.selectedHistorySession) { _, session in
             sessionNameDraft = session.map(store.historyTitle(for:)) ?? ""
         }
+        .accessibilityIdentifier("gate2.screen.history")
     }
 
     private func refresh() {
@@ -3175,7 +3192,7 @@ private struct HistorySessionRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            StatusPill(title: session.tool.title, tint: session.tool == .claude ? VQTheme.violet : VQTheme.green)
+            StatusPill(title: session.tool.title, tint: tint(for: session.tool))
                 .frame(width: 72, alignment: .leading)
             Text(session.project)
                 .frame(width: 140, alignment: .leading)
@@ -3203,6 +3220,17 @@ private struct HistorySessionRow: View {
         .padding(.horizontal, 6)
         .background(isSelected ? VQTheme.accent.opacity(0.10) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
+    private func tint(for tool: RemoteHistoryTool) -> Color {
+        switch tool {
+        case .hermes:
+            return VQTheme.accent
+        case .claude:
+            return VQTheme.violet
+        case .codex:
+            return VQTheme.green
+        }
     }
 
     private static let dateFormatter: DateFormatter = {
@@ -3252,6 +3280,7 @@ private struct HistoryTurnView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(VQTheme.hairline, lineWidth: 1)
         }
+        .accessibilityIdentifier("gate2.history.turn.\(turn.id)")
     }
 
     private var displayText: String {
@@ -3289,6 +3318,12 @@ struct ApprovalsView: View {
             HermesApprovalsSection()
 
             let pending = store.pendingApprovals()
+            Text("pendingApprovals:\(pending.count)")
+                .font(.caption2)
+                .foregroundStyle(.clear)
+                .frame(width: 1, height: 1)
+                .accessibilityIdentifier("gate2.approval.pendingCount")
+                .accessibilityLabel("pendingApprovals:\(pending.count)")
             if pending.isEmpty {
                 VQPanel("Queue", systemImage: "checkmark.shield") {
                     Text(L10n.tr("No pending approvals. Risky commands stop here and run from the Mac build after approval."))
@@ -3350,17 +3385,18 @@ private struct CommandApprovalQueueRow: View {
                     StatusPill(title: L10n.tr("Input required"), tint: VQTheme.accent)
                 }
                 Spacer()
-                if store.run(for: approval)?.interaction == nil {
-                    ApprovalActionButtons(approval: approval)
-                        .frame(maxWidth: 260)
-                } else {
-                    Button(role: .destructive) {
-                        store.reject(approval)
+                if let runID = approval.runID {
+                    Button {
+                        store.openRunDetail(runID)
                     } label: {
-                        Label(L10n.tr("Cancel run"), systemImage: "xmark")
+                        Label(L10n.tr("View Run"), systemImage: "doc.text.magnifyingglass")
                     }
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.roundedRectangle(radius: 8))
+                }
+                if store.run(for: approval)?.interaction == nil {
+                    ApprovalActionButtons(approval: approval)
+                        .frame(maxWidth: 260)
                 }
             }
             .font(.footnote.weight(.semibold))
@@ -3405,7 +3441,8 @@ private struct ApprovalLiveActivityConsole: View {
                             Text(entry.message)
                                 .font(.caption2.monospaced())
                                 .foregroundStyle(VQTheme.secondaryText)
-                                .lineLimit(3)
+                                .lineLimit(12)
+                                .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 0)
                         }
@@ -3481,6 +3518,7 @@ private struct ApprovalInteractionControls: View {
                             .padding(.vertical, 8)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("approval.interaction.choice.\(choice.value)")
                         .background(VQTheme.control.opacity(0.70))
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         .overlay {
@@ -3494,6 +3532,7 @@ private struct ApprovalInteractionControls: View {
                     TextField(L10n.tr("Type a reply..."), text: $messageText, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .lineLimit(1...4)
+                        .accessibilityIdentifier("approval.interaction.message")
                     Button {
                         store.submitApprovalInput(approval, text: messageText)
                         messageText = ""
@@ -3502,6 +3541,7 @@ private struct ApprovalInteractionControls: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .buttonBorderShape(.roundedRectangle(radius: 8))
+                    .accessibilityIdentifier("approval.interaction.send")
                     .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }

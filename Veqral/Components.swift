@@ -466,6 +466,7 @@ struct ApprovalActionButtons: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
+            .accessibilityIdentifier("approval.action.reject")
 
             Button {
                 if approval.requiresPreApprovalReview {
@@ -478,6 +479,7 @@ struct ApprovalActionButtons: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("approval.action.approve")
         }
         .buttonBorderShape(.roundedRectangle(radius: 8))
         .controlSize(compact ? .small : .regular)
