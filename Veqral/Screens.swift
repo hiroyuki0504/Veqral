@@ -3402,7 +3402,6 @@ private struct CommandApprovalQueueRow: View {
             .font(.footnote.weight(.semibold))
         }
         .padding(.vertical, 4)
-        .accessibilityIdentifier("gate2.approval.pending")
     }
 }
 
@@ -3481,6 +3480,13 @@ private struct ApprovalInteractionControls: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("explicitInteraction")
+                .font(.caption2)
+                .foregroundStyle(.clear)
+                .frame(width: 1, height: 1)
+                .accessibilityIdentifier("gate2.approval.interaction")
+                .accessibilityLabel("Explicit interaction controls")
+
             HStack(spacing: 8) {
                 Image(systemName: interaction.isChoicePrompt ? "list.bullet.rectangle" : "text.bubble")
                     .foregroundStyle(VQTheme.accent)
@@ -3553,7 +3559,6 @@ private struct ApprovalInteractionControls: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(VQTheme.accent.opacity(0.22), lineWidth: 1)
         }
-        .accessibilityIdentifier("gate2.approval.interaction")
     }
 }
 
