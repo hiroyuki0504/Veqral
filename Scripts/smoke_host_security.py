@@ -67,8 +67,30 @@ def auth_headers(device, token, method, path, payload, nonce=None):
     return headers
 
 
+def auth_headers_v1(device, token, method, path, payload):
+    timestamp = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    body = b"" if payload is None else json.dumps(payload, separators=(",", ":")).encode()
+    body_hash = hashlib.sha256(body).hexdigest()
+    canonical = f"{method.upper()}\n{path}\n{timestamp}\n{body_hash}"
+    signature = base64.b64encode(hmac.new(token.encode(), canonical.encode(), hashlib.sha256).digest()).decode()
+    return {
+        "X-Veqral-Auth-Version": "1",
+        "X-Veqral-Device": device,
+        "X-Veqral-Timestamp": timestamp,
+        "X-Veqral-Signature": signature,
+    }
+
+
 def unique_nonce(label):
     return f"security-smoke-{label}-{uuid.uuid4()}"
+
+
+def pid_is_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
 
 
 def main():
@@ -79,6 +101,7 @@ def main():
     device = None
     token = None
     base = None
+    child_pid = None
     try:
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
@@ -154,6 +177,12 @@ def main():
             status, error = request(base + missing_path, "POST", missing_body, replay_headers)
             assert status == 401 and error.get("error") == "Replayed request", (status, error)
 
+            devices_path = Path(home) / "devices.json"
+            legacy_devices = json.loads(devices_path.read_text())
+            for legacy_device in legacy_devices:
+                legacy_device.pop("minimumAuthVersion", None)
+            devices_path.write_text(json.dumps(legacy_devices))
+
             host.terminate()
             host.wait(timeout=5)
             host = subprocess.Popen([str(BINARY)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -167,6 +196,9 @@ def main():
                 time.sleep(0.1)
             else:
                 raise AssertionError("isolated Host did not restart")
+            status, error = request(base + "/v1/runs", "GET", None,
+                                    auth_headers_v1(device, token, "GET", "/v1/runs", None))
+            assert status == 426 and "version 2" in error.get("error", "").lower(), (status, error)
             status, error = request(base + missing_path, "POST", missing_body, replay_headers)
             assert status == 401 and error.get("error") == "Replayed request", (status, error)
 
@@ -225,6 +257,45 @@ def main():
             assert provenance.get("grantedByDeviceID") == device, provenance
             assert provenance.get("grantedAt"), provenance
 
+            safe_body = {
+                "prompt": "exec /bin/sleep 30",
+                "workingDirectory": str(ROOT),
+                "engine": "shell",
+            }
+            status, safe_created = request(base + create_path, "POST", safe_body,
+                                           auth_headers(device, token, "POST", create_path, safe_body, unique_nonce("cancel-persistence-create")))
+            assert status == 200 and safe_created.get("approvalRequired") is False, (status, safe_created)
+            safe_run_id = safe_created["runID"]
+            safe_snapshot_path = f"/v1/runs/{safe_run_id}"
+            safe_snapshot = {}
+            for _ in range(100):
+                status, safe_snapshot = request(base + safe_snapshot_path, "GET", None,
+                                                auth_headers(device, token, "GET", safe_snapshot_path, None))
+                child_pid = (safe_snapshot.get("run") or {}).get("pid")
+                if status == 200 and safe_snapshot["run"]["status"] == "running" and child_pid:
+                    break
+                time.sleep(0.1)
+            assert child_pid and pid_is_alive(child_pid), safe_snapshot
+
+            runs_path = Path(home) / "runs.json"
+            runs_backup = Path(home) / "runs-security-smoke-backup.json"
+            runs_path.replace(runs_backup)
+            runs_path.mkdir()
+            try:
+                safe_cancel_path = f"/v1/runs/{safe_run_id}/cancel"
+                status, error = request(base + safe_cancel_path, "POST", None,
+                                        auth_headers(device, token, "POST", safe_cancel_path, None, unique_nonce("cancel-persistence")))
+                assert status == 503 and "persist" in error.get("error", "").lower(), (status, error)
+                for _ in range(30):
+                    if not pid_is_alive(child_pid):
+                        break
+                    time.sleep(0.1)
+                assert not pid_is_alive(child_pid), "cancel left the process running after persistence failure"
+                child_pid = None
+            finally:
+                runs_path.rmdir()
+                runs_backup.replace(runs_path)
+
             revoke_path = f"/v1/devices/{device}/revoke"
             status, result = request(base + revoke_path, "POST", None,
                                      auth_headers(device, token, "POST", revoke_path, None, unique_nonce("revoke")))
@@ -236,7 +307,7 @@ def main():
             assert stat.S_IMODE(secret_store.stat().st_mode) == 0o600, oct(stat.S_IMODE(secret_store.stat().st_mode))
             assert secret_store.resolve().is_relative_to(Path(home).resolve()), secret_store
 
-            print("PASS: security guards signed-pair=1 nonce=1 replay=1 restart-replay=1 approval-resume-bypass=0 cancel-resume-bypass=0 isolated-secret-store=1 cleanup=1")
+            print("PASS: security guards signed-pair=1 auth-v1-downgrade=0 nonce=1 replay=1 restart-replay=1 approval-resume-bypass=0 cancel-resume-bypass=0 cancel-persistence-process=0 isolated-secret-store=1 cleanup=1")
     finally:
         if base is not None and device is not None and token is not None:
             revoke_path = f"/v1/devices/{device}/revoke"
@@ -251,6 +322,8 @@ def main():
                 host.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 host.kill()
+        if child_pid is not None and pid_is_alive(child_pid):
+            os.kill(child_pid, 9)
 
 
 

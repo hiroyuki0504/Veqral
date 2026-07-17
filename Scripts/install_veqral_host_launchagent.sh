@@ -10,7 +10,7 @@ Usage:
 
 The installer refuses to touch the real user environment unless --apply is
 provided after explicit approval. Pass --restart only after a separate explicit
-approval to migrate credentials and restart the running LaunchAgent.
+approval to restart the running LaunchAgent. Credential migration is never automated.
 
 Environment overrides:
   VEQRAL_HOST_INSTALL_DIR   Default: ~/.veqral-host/bin
@@ -50,7 +50,6 @@ INSTALL_DIR="${VEQRAL_HOST_INSTALL_DIR:-${HOME}/.veqral-host/bin}"
 BINARY="${INSTALL_DIR}/VeqralHost"
 BACKUP_DIR="${INSTALL_DIR}/backups"
 LABEL="dev.hiroyuki.veqral.host"
-LEGACY_KEYCHAIN_SERVICE="${LABEL}"
 KEYCHAIN_SERVICE="${VEQRAL_KEYCHAIN_SERVICE:-${LABEL}.tokens.v2}"
 PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 HERMES_CONFIG="${VEQRAL_HERMES_CONFIG:-${HOME}/.hermes/config.yaml}"
@@ -140,65 +139,7 @@ if [[ "${RESTART}" -eq 1 ]]; then
   UID_VALUE=$(id -u)
   launchctl bootout "gui/${UID_VALUE}" "${PLIST}" >/dev/null 2>&1 || true
 
-  BINARY_PATH="${BINARY}" \
-  DEVICES_PATH="${HOME}/.veqral-host/devices.json" \
-  LEGACY_SERVICE_VALUE="${LEGACY_KEYCHAIN_SERVICE}" \
-  TARGET_SERVICE_VALUE="${KEYCHAIN_SERVICE}" \
-  /usr/bin/python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-import subprocess
-
-binary = os.environ["BINARY_PATH"]
-devices_path = Path(os.environ["DEVICES_PATH"])
-legacy = os.environ["LEGACY_SERVICE_VALUE"]
-target = os.environ["TARGET_SERVICE_VALUE"]
-devices = json.loads(devices_path.read_text()) if devices_path.exists() else []
-migrated = 0
-missing = []
-
-def read_token(service, account):
-    try:
-        result = subprocess.run(
-            ["/usr/bin/security", "find-generic-password", "-s", service, "-a", account, "-w"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except subprocess.TimeoutExpired:
-        return None
-    return result.stdout.strip() if result.returncode == 0 else None
-
-for device in devices:
-    account = "device:" + device["id"]
-    token = read_token(target, account) or read_token(legacy, account)
-    if not token:
-        missing.append(device["id"])
-        continue
-    try:
-        result = subprocess.run(
-            [
-                "/usr/bin/security", "add-generic-password", "-U",
-                "-s", target, "-a", account, "-w", token,
-                "-T", binary, "-T", "/usr/bin/security",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=5,
-        )
-    except subprocess.TimeoutExpired:
-        missing.append(device["id"])
-        continue
-    if result.returncode != 0:
-        raise SystemExit(f"Keychain migration failed for {account}: {result.stderr.strip()}")
-    migrated += 1
-
-print(f"Migrated Keychain ACLs: {migrated} device token(s) -> {target}")
-if missing:
-    print(f"WARNING: {len(missing)} legacy device token(s) need re-pairing; legacy Keychain items were left untouched.")
-PY
+  echo "Keychain token migration is intentionally not automated. Re-pair devices if the Host signing identity or Keychain ACL changes."
 
   launchctl bootstrap "gui/${UID_VALUE}" "${PLIST}"
   launchctl kickstart -k "gui/${UID_VALUE}/${LABEL}"

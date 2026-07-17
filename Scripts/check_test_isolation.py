@@ -54,6 +54,9 @@ def main() -> None:
     for marker in ("--apply", "Refusing to mutate the real Veqral Host"):
         if marker not in installer_text:
             errors.append(f"{INSTALLER.relative_to(ROOT)} is missing production mutation guard: {marker}")
+    for marker in ("find-generic-password", "add-generic-password", '"-w", token', '"-T", binary'):
+        if marker in installer_text:
+            errors.append(f"{INSTALLER.relative_to(ROOT)} must not automate Keychain token migration: {marker}")
 
     if errors:
         raise SystemExit("FAIL: Veqral test isolation guard\n- " + "\n- ".join(errors))

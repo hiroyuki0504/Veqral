@@ -64,6 +64,11 @@ final class VeqralRedactorTests: XCTestCase {
         XCTAssertEqual(interaction?.choices, [])
     }
 
+    func testGenericApprovalPolicyRejectsExplicitInteractionWithoutRemoteMapping() {
+        XCTAssertTrue(VeqralRunControlPolicy.canUseGenericApproval(hasInteraction: false))
+        XCTAssertFalse(VeqralRunControlPolicy.canUseGenericApproval(hasInteraction: true))
+    }
+
     func testRunControlPolicyBlocksApprovalBypassAndDuplicateStarts() {
         for status in ["queued", "running", "waitingApproval"] {
             XCTAssertFalse(VeqralRunControlPolicy.canResume(status: status), "resume must reject \(status)")
@@ -125,6 +130,14 @@ final class VeqralRedactorTests: XCTestCase {
             "http://192.168.100.34:18778",
             "http://169.254.240.44:18778"
         ])
+    }
+
+    func testRequestAuthPolicyRequiresV2ForEveryAuthenticatedRequest() {
+        XCTAssertEqual(VeqralRequestAuthPolicy.minimumVersion(method: "GET", deviceMinimum: 1), 2)
+        XCTAssertEqual(VeqralRequestAuthPolicy.minimumVersion(method: "GET", deviceMinimum: 2), 2)
+        for method in ["POST", "PUT", "PATCH", "DELETE"] {
+            XCTAssertEqual(VeqralRequestAuthPolicy.minimumVersion(method: method, deviceMinimum: 1), 2)
+        }
     }
 
     func testReplayPolicyRequiresNonceForMutationsAndRejectsReuseWithinWindow() {
