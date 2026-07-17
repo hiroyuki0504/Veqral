@@ -1038,12 +1038,38 @@ enum HermesHistorySmoke {
               2, 'history-smoke-session', 'assistant', 'hidden answer token=token-should-hide', NULL,
               1700000002, NULL, NULL, 1
             );
+            INSERT INTO messages VALUES (
+              3, 'history-smoke-session', 'assistant', printf('%.*c', 13996, 'a') || 'sk-' || 'boundarysecret1234567890', NULL,
+              1700000003, NULL, NULL, 1
+            );
             """
             let setup = ProcessRunner.run("/usr/bin/sqlite3", [database.path, schema], timeout: 10)
             guard setup.exitCode == 0 else {
                 throw SmokeError("Hermes history fixture DB を作れませんでした: \(Redactor.redact(setup.combinedTrimmed))")
             }
+            let codexHome = root.appendingPathComponent("codex", isDirectory: true)
+            let codexSessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
+            try FileManager.default.createDirectory(at: codexSessions, withIntermediateDirectories: true)
+            try """
+            {"type":"response_item","timestamp":"2026-07-17T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Codex direct continuation fixture"}]}}
+            """.write(
+                to: codexSessions.appendingPathComponent("rollout-2026-07-17T00-00-00-12345678-1234-1234-1234-123456789abc.jsonl"),
+                atomically: true,
+                encoding: .utf8
+            )
+            let claudeHome = root.appendingPathComponent("claude", isDirectory: true)
+            let claudeProject = claudeHome.appendingPathComponent("projects/-fixture", isDirectory: true)
+            try FileManager.default.createDirectory(at: claudeProject, withIntermediateDirectories: true)
+            try """
+            {"type":"user","uuid":"claude-direct-fixture","timestamp":"2026-07-17T00:00:00Z","cwd":"\(workspace.path)","message":{"content":"Claude direct continuation fixture"}}
+            """.write(
+                to: claudeProject.appendingPathComponent("claude-direct-fixture.jsonl"),
+                atomically: true,
+                encoding: .utf8
+            )
             setenv("HERMES_HOME", root.path, 1)
+            setenv("CODEX_HOME", codexHome.path, 1)
+            setenv("CLAUDE_CONFIG_DIR", claudeHome.path, 1)
 
             let store = AgentHistoryStore()
             let listed = try store.list(HistorySessionListRequest(tool: .hermes, project: nil, query: nil, date: nil, page: 0, limit: 10))
@@ -1059,10 +1085,23 @@ enum HermesHistorySmoke {
                 throw SmokeError("Hermes history本文検索がfixture sessionを見つけませんでした。")
             }
 
+            let secretSearch = try store.list(HistorySessionListRequest(tool: .hermes, project: nil, query: "boundarysecret", date: nil, page: 0, limit: 10))
+            guard secretSearch.total == 0 else {
+                throw SmokeError("redaction前のHermes本文が検索oracleとして露出しています。")
+            }
+
+            let codex = try store.list(HistorySessionListRequest(tool: .codex, project: nil, query: nil, date: nil, page: 0, limit: 10))
+            let claude = try store.list(HistorySessionListRequest(tool: .claude, project: nil, query: nil, date: nil, page: 0, limit: 10))
+            guard codex.sessions.first?.canContinue == true,
+                  claude.sessions.first?.canContinue == true else {
+                throw SmokeError("Claude/Codex direct history continuationが有効ではありません。")
+            }
+
             let detail = try store.detail(HistorySessionDetailRequest(id: "history-smoke-session", tool: .hermes))
-            guard detail.turns.count == 2,
+            guard detail.turns.count >= 2,
                   detail.turns.contains(where: { $0.text.contains("hidden answer") }),
-                  !detail.turns.contains(where: { $0.text.contains("token-should-hide") }) else {
+                  !detail.turns.contains(where: { $0.text.contains("token-should-hide") }),
+                  !detail.turns.contains(where: { $0.text.contains("sk-b") }) else {
                 throw SmokeError("Hermes history detailまたはredactionが想定と違います。")
             }
 
@@ -1073,7 +1112,7 @@ enum HermesHistorySmoke {
                 throw SmokeError("Hermes usageがHERMES_HOMEのfixture DBを読んでいません。")
             }
 
-            print("PASS: Hermes history smoke sessions=\(listed.total) turns=\(detail.turns.count) search=1 redacted=1 usage=1")
+            print("PASS: Hermes history smoke sessions=\(listed.total) turns=\(detail.turns.count) search=1 secret-oracle=0 boundary-prefix=0 redacted=1 direct-continuation=2 usage=1")
             Foundation.exit(0)
         } catch {
             print("FAIL: Hermes history smoke failed: \(error.localizedDescription)")
@@ -2636,8 +2675,12 @@ actor HostState {
         guard let device = devices.first(where: { $0.id == deviceID }) else {
             throw HostError.unauthorized("Unknown device")
         }
-        guard version >= (device.minimumAuthVersion ?? 1) else {
-            throw HostError.unsupportedProtocol("Auth version \(device.minimumAuthVersion ?? 1) is required")
+        let requiredVersion = VeqralRequestAuthPolicy.minimumVersion(
+            method: method,
+            deviceMinimum: device.minimumAuthVersion ?? 1
+        )
+        guard version >= requiredVersion else {
+            throw HostError.unsupportedProtocol("Auth version \(requiredVersion) is required")
         }
         guard let token = KeychainStore.get(account: "device:\(deviceID)") else {
             throw HostError.unauthorized("Unknown device")
@@ -2989,7 +3032,15 @@ actor HostState {
         run.completedAt = Date()
         run.pid = nil
         run.interaction = nil
-        try commitRun(run)
+
+        var persistenceError: Error?
+        do {
+            try commitRun(run)
+        } catch {
+            persistenceError = error
+            runs[runID] = run
+        }
+
         if let pid = processes[runID] {
             kill(pid, SIGTERM)
             usleep(200_000)
@@ -2997,6 +3048,11 @@ actor HostState {
         }
         processes[runID] = nil
         ptyMasters[runID] = nil
+
+        if let persistenceError {
+            appendAudit("cancelled process after persistence failure run id=\(runID)")
+            throw persistenceError
+        }
         appendAudit("cancelled run id=\(runID)")
         publish(HostLogEvent(runID: runID, kind: .status, stream: "host", message: "Run cancelled", createdAt: Date()))
     }
@@ -8014,12 +8070,8 @@ struct AgentHistoryStore {
         if let query, !query.isEmpty {
             let folded = query.lowercased()
             sessions = sessions.filter { session in
-                let visible = "\(session.tool.rawValue) \(session.project) \(session.projectPath) \(session.summary) \(session.model ?? "")".lowercased()
+                let visible = Redactor.redact("\(session.tool.rawValue) \(session.project) \(session.projectPath) \(session.summary) \(session.model ?? "")").lowercased()
                 if visible.contains(folded) { return true }
-                // Hermes body search is already applied in hermesSessions(request:)
-                // with a bounded SQLite EXISTS query. Preserve those matches instead
-                // of attempting the JSONL scan used by Claude and Codex histories.
-                if session.tool == .hermes { return true }
                 return sessionContains(session, query: folded)
             }
         }
@@ -8119,19 +8171,6 @@ struct AgentHistoryStore {
             let end = Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86_400)
             clauses.append("COALESCE(started_at, ended_at) >= \(start.timeIntervalSince1970) AND COALESCE(started_at, ended_at) < \(end.timeIntervalSince1970)")
         }
-        if let search = request.query?.nilIfBlank {
-            let literal = Self.sqliteLiteral(search.lowercased())
-            clauses.append("""
-            (
-              instr(lower(COALESCE(title, '') || ' ' || COALESCE(source, '') || ' ' || COALESCE(model, '') || ' ' || COALESCE(cwd, '') || ' ' || COALESCE(git_repo_root, '') || ' ' || COALESCE(billing_provider, '')), \(literal)) > 0
-              OR EXISTS (
-                SELECT 1 FROM messages
-                WHERE messages.session_id = sessions.id AND messages.active = 1
-                  AND instr(lower(COALESCE(messages.content, '') || ' ' || COALESCE(messages.reasoning, '') || ' ' || COALESCE(messages.reasoning_content, '') || ' ' || COALESCE(messages.tool_name, '')), \(literal)) > 0
-              )
-            )
-            """)
-        }
         let whereSQL = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
         let query = """
         SELECT
@@ -8190,11 +8229,15 @@ struct AgentHistoryStore {
           FROM messages
           WHERE session_id = \(Self.sqliteLiteral(sessionID))
             AND active = 1
-        ), clipped AS (
+        ), safe_content AS (
           SELECT
             id,
             role,
-            substr(primary_text, 1, CASE WHEN role = 'tool' THEN 8001 ELSE 14001 END) AS content,
+            CASE
+              WHEN COALESCE(length(CAST(primary_text AS BLOB)), 0) <= CASE WHEN role = 'tool' THEN 8000 ELSE 14000 END
+              THEN primary_text
+              ELSE NULL
+            END AS content,
             tool_name,
             timestamp,
             total_rows,
@@ -8205,7 +8248,7 @@ struct AgentHistoryStore {
             *,
             COALESCE(length(CAST(content AS BLOB)), 0) AS content_bytes,
             SUM(COALESCE(length(CAST(content AS BLOB)), 0)) OVER (ORDER BY id) AS cumulative_bytes
-          FROM clipped
+          FROM safe_content
         )
         SELECT id, role, content, tool_name, timestamp, total_rows, source_bytes, content_bytes, cumulative_bytes
         FROM budgeted
@@ -8411,6 +8454,17 @@ struct AgentHistoryStore {
         }
     }
 
+    private struct HermesHistorySearchRow: Decodable {
+        var role: String
+        var content: String?
+        var toolName: String?
+
+        enum CodingKeys: String, CodingKey {
+            case role, content
+            case toolName = "tool_name"
+        }
+    }
+
     private func claudeSessions() -> [HistorySessionSummary] {
         let roots = claudeProjectRoots()
         let perRootLimit = max(1, listMaxFiles / max(1, roots.count))
@@ -8561,7 +8615,8 @@ struct AgentHistoryStore {
             model: model,
             summary: clipped(Redactor.redact(summary), limit: 240),
             filePath: url.path,
-            bytes: values?.fileSize ?? 0
+            bytes: values?.fileSize ?? 0,
+            canContinue: true
         )
     }
 
@@ -8679,28 +8734,68 @@ struct AgentHistoryStore {
         case .hermes:
             return hermesSessionContains(session.id, query: query)
         case .claude, .codex:
-            return fileContains(session.filePath, query: query)
+            return fileContains(session, query: query)
         }
     }
 
     private func hermesSessionContains(_ sessionID: String, query: String) -> Bool {
         guard fileManager.fileExists(atPath: hermesStateDBURL.path), !query.isEmpty else { return false }
         let sql = """
-        SELECT 1
-        FROM messages
-        WHERE session_id = \(Self.sqliteLiteral(sessionID))
-          AND lower(COALESCE(content, '') || ' ' || COALESCE(tool_name, '') || ' ' || COALESCE(reasoning_content, '') || ' ' || COALESCE(reasoning, '')) LIKE '%' || \(Self.sqliteLiteral(query)) || '%'
-        LIMIT 1;
+        WITH source AS (
+          SELECT
+            role,
+            COALESCE(NULLIF(content, ''), NULLIF(reasoning_content, ''), reasoning) AS primary_text,
+            tool_name
+          FROM messages
+          WHERE session_id = \(Self.sqliteLiteral(sessionID))
+            AND active = 1
+        ), safe_content AS (
+          SELECT
+            role,
+            CASE
+              WHEN COALESCE(length(CAST(primary_text AS BLOB)), 0) <= CASE WHEN role = 'tool' THEN 8000 ELSE 14000 END
+              THEN primary_text
+              ELSE NULL
+            END AS content,
+            tool_name
+          FROM source
+        ), budgeted AS (
+          SELECT
+            *,
+            SUM(COALESCE(length(CAST(content AS BLOB)), 0)) OVER (ROWS UNBOUNDED PRECEDING) AS cumulative_bytes
+          FROM safe_content
+        )
+        SELECT role, content, tool_name
+        FROM budgeted
+        WHERE cumulative_bytes <= \(detailScanBytes)
+        LIMIT \(detailScanLines);
         """
-        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", hermesStateDBURL.path, sql], timeout: 10)
-        return output.exitCode == 0 && output.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank != nil
+        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", "-json", hermesStateDBURL.path, sql], timeout: 10)
+        guard output.exitCode == 0,
+              let data = output.stdout.data(using: .utf8),
+              data.count <= detailScanBytes * 2,
+              let rows = try? JSONDecoder().decode([HermesHistorySearchRow].self, from: data) else {
+            return false
+        }
+        return rows.contains { row in
+            let visible = Redactor.redact("\(row.content ?? "") \(row.toolName ?? "")").lowercased()
+            return visible.contains(query)
+        }
     }
 
-    private func fileContains(_ path: String, query: String) -> Bool {
-        let url = URL(fileURLWithPath: path)
+    private func fileContains(_ session: HistorySessionSummary, query: String) -> Bool {
+        let url = URL(fileURLWithPath: session.filePath)
         var found = false
         try? HistoryLineReader.forEachLine(url: url, maxLines: 5_000, maxBytes: 5_000_000) { line in
-            if line.lowercased().contains(query) {
+            guard !found else { return }
+            let visible: String
+            if let object = HistoryJSON.object(from: line),
+               let turn = turn(from: object, tool: session.tool, fallbackID: "") {
+                visible = turn.text
+            } else {
+                visible = Redactor.redact(line)
+            }
+            if visible.lowercased().contains(query) {
                 found = true
             }
         }

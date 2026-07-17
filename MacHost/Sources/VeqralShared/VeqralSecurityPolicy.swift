@@ -47,6 +47,10 @@ public enum VeqralRunControlPolicy {
     public static func canApprove(status: String) -> Bool {
         status == "waitingApproval"
     }
+
+    public static func canUseGenericApproval(hasInteraction: Bool) -> Bool {
+        !hasInteraction
+    }
 }
 
 public enum VeqralPairingAccessPolicy {
@@ -110,6 +114,10 @@ public enum VeqralPairingEndpointPolicy {
 
 public enum VeqralRequestAuthPolicy {
     private static let mutatingMethods: Set<String> = ["POST", "PUT", "PATCH", "DELETE"]
+
+    public static func minimumVersion(method _: String, deviceMinimum: Int) -> Int {
+        max(deviceMinimum, 2)
+    }
 
     public static func requiresNonce(method: String) -> Bool {
         mutatingMethods.contains(method.uppercased())

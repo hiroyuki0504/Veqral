@@ -95,7 +95,7 @@ final class WatchCommandStore: ObservableObject {
         endpoint = UserDefaults.standard.string(forKey: "watch.endpoint") ?? ""
         deviceID = UserDefaults.standard.string(forKey: "watch.deviceID") ?? ""
         token = WatchKeychainStore.get(account: "host-token") ?? ""
-        authVersion = max(1, UserDefaults.standard.integer(forKey: "watch.authVersion"))
+        authVersion = 2
     }
 
     var pendingApprovals: [WatchRun] {
@@ -220,7 +220,7 @@ final class WatchCommandStore: ObservableObject {
 
     private func makeClient() -> WatchHostClient? {
         guard !endpoint.isEmpty, !deviceID.isEmpty, !token.isEmpty else { return nil }
-        return WatchHostClient(endpoint: endpoint, deviceID: deviceID, token: token, authVersion: min(2, max(1, authVersion)))
+        return WatchHostClient(endpoint: endpoint, deviceID: deviceID, token: token, authVersion: 2)
     }
 }
 

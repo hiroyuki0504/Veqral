@@ -1937,16 +1937,23 @@ final class CommandCenterStore: ObservableObject {
 
     func approve(_ approval: CommandApproval) {
         guard let index = approvals.firstIndex(where: { $0.id == approval.id }) else { return }
-        if let runID = approval.runID,
-           let run = runs.first(where: { $0.id == runID }),
-           run.interaction != nil,
-           remoteRunIDs[runID.uuidString] != nil {
-            appendLog(
-                runID: runID,
-                stream: "warn",
-                message: "Explicit interaction input is required. Generic approval cannot answer an agent prompt."
-            )
-            return
+        if let runID = approval.runID {
+            guard let run = runs.first(where: { $0.id == runID }) else {
+                appendLog(
+                    runID: runID,
+                    stream: "warn",
+                    message: "Approval blocked because the linked run context is unavailable. Refresh before approving."
+                )
+                return
+            }
+            guard VeqralRunControlPolicy.canUseGenericApproval(hasInteraction: run.interaction != nil) else {
+                appendLog(
+                    runID: runID,
+                    stream: "warn",
+                    message: "Generic approval is disabled while explicit interaction input is required."
+                )
+                return
+            }
         }
         approvals[index].status = .approved
         if let runID = approval.runID, let runIndex = runs.firstIndex(where: { $0.id == runID }) {

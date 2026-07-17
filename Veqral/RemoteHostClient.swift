@@ -570,7 +570,7 @@ struct RemoteHostClient: Sendable {
 
     private func sign(_ request: inout URLRequest, method: String, path: String, body: Data) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
-        let authVersion = min(2, max(1, configuration.minimumAuthVersion ?? 1))
+        let authVersion = 2
         let nonce = authVersion == 2 ? UUID().uuidString.lowercased() : nil
         request.setValue(configuration.deviceID, forHTTPHeaderField: "X-Veqral-Device")
         request.setValue(timestamp, forHTTPHeaderField: "X-Veqral-Timestamp")
