@@ -3,10 +3,15 @@ import CryptoKit
 import Foundation
 import Network
 import Security
+import LocalAuthentication
 import Darwin
 import VeqralShared
 
-private let serviceName = "dev.hiroyuki.veqral.host"
+private let serviceName: String = {
+    let configured = ProcessInfo.processInfo.environment["VEQRAL_KEYCHAIN_SERVICE"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return configured.isEmpty ? "dev.hiroyuki.veqral.host" : configured
+}()
 private let serverGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 @main
@@ -20,11 +25,18 @@ final class VeqralHostApp: NSObject, NSApplicationDelegate {
         if HostCommandLineHelp.runIfRequested(arguments: arguments) {
             Foundation.exit(0)
         }
+        if let error = KeychainStore.configurationError {
+            FileHandle.standardError.write(Data("VeqralHost secret-store isolation error: \(error)\n".utf8))
+            Foundation.exit(78)
+        }
         if arguments.first == "smoke-discord-notifications" {
             DiscordNotificationSmoke.runAndExit()
         }
         if arguments.first == "smoke-project-memory" {
             ProjectMemorySmoke.runAndExit()
+        }
+        if arguments.first == "smoke-hermes-history" {
+            HermesHistorySmoke.runAndExit()
         }
         if arguments.first == "smoke-run-usage" {
             RunUsageSmoke.runAndExit()
@@ -95,6 +107,7 @@ enum HostCommandLineHelp {
 
         Smoke commands:
           smoke-project-memory               Verify Hermes memory/project snapshot is readable.
+          smoke-hermes-history               Verify Hermes state.db history list/search/detail/redaction.
           smoke-hermes-control               Verify Hermes config/vault presets and approvals bridge.
           smoke-local-llm                    Verify AI-Hub local policy resolves and Ollama generates content.
           smoke-aihub-digest-bridge          Verify completed runs are written to AI-Hub/Obsidian session notes.
@@ -336,11 +349,13 @@ struct DeviceRecord: Codable, Sendable, Identifiable {
     var name: String
     var pairedAt: Date
     var lastSeenAt: Date?
+    var stableClientID: String? = nil
     var pushToken: String? = nil
     var pushEnvironment: String? = nil
     var pushBundleID: String? = nil
     var pushLocale: String? = nil
     var pushUpdatedAt: Date? = nil
+    var minimumAuthVersion: Int? = nil
 }
 
 enum PushEventType: String, Codable, Sendable {
@@ -403,10 +418,64 @@ struct HostRun: Codable, Sendable, Identifiable {
     var provider: String?
     var model: String?
     var approvalSeverity: ApprovalSeverity? = nil
+    // Deprecated migration input produced by the interim security implementation.
+    var approvalRequired: Bool? = nil
+    var approvalProvenance: VeqralRunApprovalProvenance? = nil
     var usage: RunUsage? = nil
+    var interaction: VeqralDetectedInteraction? = nil
+    var taskID: String? = nil
+    var statusUpdatedAt: Date? = nil
 
     var engineOrDefault: AgentEngine {
         engine ?? .hermes
+    }
+
+    var approvalState: VeqralRunApprovalState {
+        approvalProvenance?.state ?? inferredLegacyApprovalState
+    }
+
+    var forgeTaskID: String {
+        taskID?.nilIfBlank
+            ?? chatID?.nilIfBlank.map { "chat:\($0)" }
+            ?? "legacy-run:\(id)"
+    }
+
+    @discardableResult
+    mutating func normalizeForgeIdentity() -> Bool {
+        var changed = false
+        if taskID?.nilIfBlank == nil {
+            taskID = forgeTaskID
+            changed = true
+        }
+        if statusUpdatedAt == nil {
+            statusUpdatedAt = completedAt ?? startedAt
+            changed = true
+        }
+        return changed
+    }
+
+    private var inferredLegacyApprovalState: VeqralRunApprovalState {
+        if status == .waitingApproval || approvalRequired == true || approvalReason?.nilIfBlank != nil {
+            return .pending
+        }
+        if approvalSeverity != nil {
+            return .legacyGranted
+        }
+        return .notRequired
+    }
+
+    @discardableResult
+    mutating func normalizeApprovalProvenance() -> Bool {
+        guard approvalProvenance == nil else { return false }
+        approvalProvenance = VeqralRunApprovalProvenance(state: inferredLegacyApprovalState)
+        approvalRequired = nil
+        if approvalProvenance?.state == .pending,
+           status == .queued || status == .running {
+            status = .waitingApproval
+            pid = nil
+            completedAt = nil
+        }
+        return true
     }
 }
 
@@ -892,6 +961,18 @@ struct SmokeError: LocalizedError {
     }
 }
 
+struct SmokeSkip: LocalizedError {
+    var message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var errorDescription: String? {
+        message
+    }
+}
+
 enum ProjectMemorySmoke {
     static func runAndExit() -> Never {
         do {
@@ -911,6 +992,157 @@ enum ProjectMemorySmoke {
     }
 }
 
+enum HermesHistorySmoke {
+    static func runAndExit() -> Never {
+        do {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("veqral-hermes-history-smoke-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let workspace = root.appendingPathComponent("workspace", isDirectory: true)
+            try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+            try "fixture\n".write(to: workspace.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+            let gitInit = ProcessRunner.run("/usr/bin/git", ["-C", workspace.path, "init"], timeout: 10)
+            let gitAdd = ProcessRunner.run("/usr/bin/git", ["-C", workspace.path, "add", "README.md"], timeout: 10)
+            let gitCommit = ProcessRunner.run(
+                "/usr/bin/git",
+                ["-C", workspace.path, "-c", "user.name=Veqral Fixture", "-c", "user.email=fixture@invalid.local", "commit", "-m", "fixture"],
+                timeout: 10
+            )
+            guard gitInit.exitCode == 0, gitAdd.exitCode == 0, gitCommit.exitCode == 0 else {
+                throw SmokeError("Hermes history fixture Git workspace を作れませんでした。")
+            }
+            let database = root.appendingPathComponent("state.db")
+            let schema = """
+            CREATE TABLE sessions (
+              id TEXT PRIMARY KEY,
+              source TEXT,
+              model TEXT,
+              billing_provider TEXT,
+              billing_mode TEXT,
+              title TEXT,
+              cwd TEXT,
+              git_repo_root TEXT,
+              started_at REAL,
+              ended_at REAL,
+              message_count INTEGER,
+              tool_call_count INTEGER,
+              input_tokens INTEGER,
+              output_tokens INTEGER,
+              cache_read_tokens INTEGER,
+              cache_write_tokens INTEGER,
+              reasoning_tokens INTEGER,
+              estimated_cost_usd REAL,
+              actual_cost_usd REAL
+            );
+            CREATE TABLE messages (
+              id INTEGER PRIMARY KEY,
+              session_id TEXT,
+              role TEXT,
+              content TEXT,
+              tool_name TEXT,
+              timestamp REAL,
+              reasoning TEXT,
+              reasoning_content TEXT,
+              active INTEGER
+            );
+            INSERT INTO sessions VALUES (
+              'history-smoke-session', 'veqral-history-smoke', 'fixture-model',
+              'openai-codex', 'subscription_included',
+              'Hermes history fixture', '\(workspace.path)', '\(workspace.path)',
+              1700000000, 1700000010, 2, 0, 11, 22, 3, 4, 5, 0.012, 0.01
+            );
+            INSERT INTO messages VALUES (
+              1, 'history-smoke-session', 'user', 'find the hidden answer', NULL,
+              1700000001, NULL, NULL, 1
+            );
+            INSERT INTO messages VALUES (
+              2, 'history-smoke-session', 'assistant', 'hidden answer token=token-should-hide', NULL,
+              1700000002, NULL, NULL, 1
+            );
+            INSERT INTO messages VALUES (
+              3, 'history-smoke-session', 'assistant', printf('%.*c', 13996, 'a') || 'sk-' || 'boundarysecret1234567890', NULL,
+              1700000003, NULL, NULL, 1
+            );
+            """
+            let setup = ProcessRunner.run("/usr/bin/sqlite3", [database.path, schema], timeout: 10)
+            guard setup.exitCode == 0 else {
+                throw SmokeError("Hermes history fixture DB を作れませんでした: \(Redactor.redact(setup.combinedTrimmed))")
+            }
+            let codexHome = root.appendingPathComponent("codex", isDirectory: true)
+            let codexSessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
+            try FileManager.default.createDirectory(at: codexSessions, withIntermediateDirectories: true)
+            try """
+            {"type":"response_item","timestamp":"2026-07-17T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Codex direct continuation fixture"}]}}
+            """.write(
+                to: codexSessions.appendingPathComponent("rollout-2026-07-17T00-00-00-12345678-1234-1234-1234-123456789abc.jsonl"),
+                atomically: true,
+                encoding: .utf8
+            )
+            let claudeHome = root.appendingPathComponent("claude", isDirectory: true)
+            let claudeProject = claudeHome.appendingPathComponent("projects/-fixture", isDirectory: true)
+            try FileManager.default.createDirectory(at: claudeProject, withIntermediateDirectories: true)
+            try """
+            {"type":"user","uuid":"claude-direct-fixture","timestamp":"2026-07-17T00:00:00Z","cwd":"\(workspace.path)","message":{"content":"Claude direct continuation fixture"}}
+            """.write(
+                to: claudeProject.appendingPathComponent("claude-direct-fixture.jsonl"),
+                atomically: true,
+                encoding: .utf8
+            )
+            setenv("HERMES_HOME", root.path, 1)
+            setenv("CODEX_HOME", codexHome.path, 1)
+            setenv("CLAUDE_CONFIG_DIR", claudeHome.path, 1)
+
+            let store = AgentHistoryStore()
+            let listed = try store.list(HistorySessionListRequest(tool: .hermes, project: nil, query: nil, date: nil, page: 0, limit: 10))
+            guard listed.total == 1,
+                  listed.sessions.first?.id == "history-smoke-session",
+                  listed.sessions.first?.tool == .hermes,
+                  listed.sessions.first?.resumeID == "history-smoke-session" else {
+                throw SmokeError("Hermes history list がfixture sessionを返しませんでした。")
+            }
+
+            let searched = try store.list(HistorySessionListRequest(tool: .hermes, project: nil, query: "hidden answer", date: nil, page: 0, limit: 10))
+            guard searched.total == 1 else {
+                throw SmokeError("Hermes history本文検索がfixture sessionを見つけませんでした。")
+            }
+
+            let secretSearch = try store.list(HistorySessionListRequest(tool: .hermes, project: nil, query: "boundarysecret", date: nil, page: 0, limit: 10))
+            guard secretSearch.total == 0 else {
+                throw SmokeError("redaction前のHermes本文が検索oracleとして露出しています。")
+            }
+
+            let codex = try store.list(HistorySessionListRequest(tool: .codex, project: nil, query: nil, date: nil, page: 0, limit: 10))
+            let claude = try store.list(HistorySessionListRequest(tool: .claude, project: nil, query: nil, date: nil, page: 0, limit: 10))
+            guard codex.sessions.first?.canContinue == true,
+                  claude.sessions.first?.canContinue == true else {
+                throw SmokeError("Claude/Codex direct history continuationが有効ではありません。")
+            }
+
+            let detail = try store.detail(HistorySessionDetailRequest(id: "history-smoke-session", tool: .hermes))
+            guard detail.turns.count >= 2,
+                  detail.turns.contains(where: { $0.text.contains("hidden answer") }),
+                  !detail.turns.contains(where: { $0.text.contains("token-should-hide") }),
+                  !detail.turns.contains(where: { $0.text.contains("sk-b") }) else {
+                throw SmokeError("Hermes history detailまたはredactionが想定と違います。")
+            }
+
+            let usage = HermesUsageStore().usage(sessionID: "history-smoke-session")
+            guard usage?.inputTokens == 11,
+                  usage?.outputTokens == 22,
+                  usage?.reasoningTokens == 5 else {
+                throw SmokeError("Hermes usageがHERMES_HOMEのfixture DBを読んでいません。")
+            }
+
+            print("PASS: Hermes history smoke sessions=\(listed.total) turns=\(detail.turns.count) search=1 secret-oracle=0 boundary-prefix=0 redacted=1 direct-continuation=2 usage=1")
+            Foundation.exit(0)
+        } catch {
+            print("FAIL: Hermes history smoke failed: \(error.localizedDescription)")
+            Foundation.exit(1)
+        }
+    }
+}
+
 enum HermesControlSmoke {
     static func runAndExit() -> Never {
         do {
@@ -924,12 +1156,13 @@ enum HermesControlSmoke {
             try FileManager.default.createDirectory(at: approvals, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: aiHubRoot.appendingPathComponent("scripts", isDirectory: true), withIntermediateDirectories: true)
             let resolver = aiHubRoot.appendingPathComponent("scripts/hermes-monthly-switch")
+            let fixtureLocalModel = "fixture-local-model"
             try """
             import json
             print(json.dumps({
                 "policy": "local-fast",
                 "provider": "custom",
-                "model": "qwen3:8b",
+                "model": "\(fixtureLocalModel)",
                 "base_url": "http://127.0.0.1:11434/v1",
                 "context_length": "4096",
                 "reasoning": "low"
@@ -938,7 +1171,7 @@ enum HermesControlSmoke {
             try """
             | ラベル | Policy | Provider | Model | Base URL | Context Length | 思考深度 | 用途 |
             | --- | --- | --- | --- | --- | --- | --- | --- |
-            | local-fast |  | custom | qwen3:8b | http://127.0.0.1:11434/v1 | 65536 | low | local |
+            | local-fast |  | custom | \(fixtureLocalModel) | http://127.0.0.1:11434/v1 | 65536 | low | local |
             | 標準 |  | openai-codex | gpt-5.5 |  |  | medium | cloud |
             | 方針local | local-fast |  | policy:local-fast |  |  | medium | policy |
             """.write(to: presets, atomically: true, encoding: .utf8)
@@ -970,7 +1203,7 @@ enum HermesControlSmoke {
 
             _ = try store.update(HermesControlUpdateRequest(presetID: "preset-1", provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil))
             let local = try store.status()
-            guard local.provider == "custom", local.model == "qwen3:8b", local.baseURL == "http://127.0.0.1:11434/v1", local.contextLength == "65536", local.reasoning == "low" else {
+            guard local.provider == "custom", local.model == fixtureLocalModel, local.baseURL == "http://127.0.0.1:11434/v1", local.contextLength == "65536", local.reasoning == "low" else {
                 throw SmokeError("Local preset did not apply provider/model/baseURL/contextLength/reasoning")
             }
 
@@ -982,7 +1215,7 @@ enum HermesControlSmoke {
 
             _ = try store.update(HermesControlUpdateRequest(presetID: "preset-3", provider: nil, model: nil, baseURL: nil, contextLength: nil, reasoning: nil))
             let policy = try store.status()
-            guard policy.provider == "custom", policy.model == "qwen3:8b", policy.baseURL == "http://127.0.0.1:11434/v1", policy.contextLength == "4096", policy.reasoning == "low" else {
+            guard policy.provider == "custom", policy.model == fixtureLocalModel, policy.baseURL == "http://127.0.0.1:11434/v1", policy.contextLength == "4096", policy.reasoning == "low" else {
                 throw SmokeError("Policy preset did not resolve through AI-Hub resolver")
             }
 
@@ -1042,11 +1275,23 @@ enum LocalLLMSmoke {
         }
     }
 
+    private struct OllamaTagsResponse: Decodable {
+        var models: [OllamaModelTag]
+    }
+
+    private struct OllamaModelTag: Decodable {
+        var name: String
+        var size: Int64?
+    }
+
     static func runAndExit() -> Never {
         Task {
             do {
                 let result = try await run()
                 print("PASS: Local LLM smoke policy=\(result.policy) provider=\(result.provider) model=\(result.model) baseURL=\(result.baseURL) response=\(result.response)")
+                Foundation.exit(0)
+            } catch let skip as SmokeSkip {
+                print("SKIP: Local LLM smoke skipped: \(skip.localizedDescription)")
                 Foundation.exit(0)
             } catch {
                 print("FAIL: Local LLM smoke failed: \(error.localizedDescription)")
@@ -1074,10 +1319,17 @@ enum LocalLLMSmoke {
             timeout: 15
         )
         guard output.exitCode == 0 else {
-            throw SmokeError("Policy \(policy) did not resolve: \(Redactor.redact(output.combinedTrimmed))")
+            let message = Redactor.redact(output.combinedTrimmed)
+            if message.contains("no lightweight installed")
+                || message.contains("no Ollama models are installed")
+                || message.contains("none of the configured local candidates are installed")
+                || message.contains("heavy local model lane is scheduled") {
+                throw SmokeSkip("Policy \(policy) is not runnable as a lightweight local smoke right now: \(message)")
+            }
+            throw SmokeError("Policy \(policy) did not resolve: \(message)")
         }
         guard let data = output.stdout.data(using: .utf8),
-              let resolved = try? JSONDecoder().decode(ResolvedPolicy.self, from: data) else {
+              var resolved = try? JSONDecoder().decode(ResolvedPolicy.self, from: data) else {
             throw SmokeError("Policy \(policy) resolver output was not valid JSON.")
         }
         guard resolved.provider == "custom" else {
@@ -1087,8 +1339,70 @@ enum LocalLLMSmoke {
             throw SmokeError("Policy \(policy) resolved non-local baseURL=\(resolved.baseURL)")
         }
 
+        resolved.model = try await runnableLocalModel(for: resolved)
         let response = try await generate(resolved: resolved)
         return (resolved.policy, resolved.provider, resolved.model, resolved.baseURL, response)
+    }
+
+    private static func runnableLocalModel(for resolved: ResolvedPolicy) async throws -> String {
+        let models = try await ollamaModels(baseURL: resolved.baseURL)
+        let installed = models.map(\.name)
+        guard !installed.isEmpty else {
+            throw SmokeSkip("Ollama is reachable but no local models are installed.")
+        }
+        let allowHeavy = ProcessInfo.processInfo.environment["VEQRAL_LOCAL_LLM_SMOKE_ALLOW_HEAVY"] == "1"
+        if installed.contains(resolved.model), isRunnableChatModel(resolved.model, in: models, allowHeavy: allowHeavy) {
+            return resolved.model
+        }
+        let candidates = models
+            .filter { isRunnableChatModel($0.name, in: models, allowHeavy: allowHeavy) }
+            .map(\.name)
+        if let candidate = candidates.first {
+            return candidate
+        }
+        let heavyHint = models.contains { isHeavyModel($0.name, size: $0.size) }
+            ? " Installed generation models are heavy; set VEQRAL_LOCAL_LLM_SMOKE_ALLOW_HEAVY=1 for an explicit opt-in smoke, or run them from the scheduled heavy lane."
+            : ""
+        throw SmokeSkip("No lightweight installed chat model is available for local smoke.\(heavyHint)")
+    }
+
+    private static func ollamaModels(baseURL: String) async throws -> [OllamaModelTag] {
+        var root = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if root.hasSuffix("/v1") {
+            root = String(root.dropLast(3))
+        }
+        guard let url = URL(string: "\(root)/api/tags") else {
+            throw SmokeError("Invalid Ollama base URL: \(baseURL)")
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw SmokeSkip("Ollama tags endpoint is not available: \(Redactor.redact(body))")
+        }
+        return (try? JSONDecoder().decode(OllamaTagsResponse.self, from: data).models) ?? []
+    }
+
+    private static func isRunnableChatModel(_ name: String, in models: [OllamaModelTag], allowHeavy: Bool) -> Bool {
+        let tag = models.first { $0.name == name }
+        return !isEmbeddingModel(name) && (allowHeavy || !isHeavyModel(name, size: tag?.size))
+    }
+
+    private static func isEmbeddingModel(_ name: String) -> Bool {
+        let lowered = name.lowercased()
+        return lowered.contains("embed") || lowered.contains("embedding") || lowered.contains("nomic-embed")
+    }
+
+    private static func isHeavyModel(_ name: String, size: Int64?) -> Bool {
+        let lowered = name.lowercased()
+        if lowered.contains("35b") || lowered.contains("70b") || lowered.contains("120b") || lowered.contains("gpt-oss:20b") {
+            return true
+        }
+        if let size, size >= 12_000_000_000 {
+            return true
+        }
+        return false
     }
 
     private static func generate(resolved: ResolvedPolicy) async throws -> String {
@@ -1788,7 +2102,7 @@ enum PortfolioRealDataSmoke {
               waiting.approvalReason?.contains("Portfolio restart requires approval") == true else {
             throw SmokeError("portfolio control approval metadata is missing")
         }
-        let approved = try await state.approve(runID: control.runID)
+        let approved = try await state.approve(runID: control.runID, approvedByDeviceID: "security-smoke-local")
         guard approved.status == .queued else {
             throw SmokeError("approved portfolio control did not return to queued")
         }
@@ -2116,23 +2430,60 @@ struct HostLogEvent: Codable, Sendable {
     var createdAt: Date
     var sessionID: String?
     var exitCode: Int32?
+    var interaction: VeqralDetectedInteraction? = nil
+    var eventID: String? = nil
+    var runStatus: String? = nil
 }
 
 actor HostState {
     private var config: HostConfig
     private var runs: [String: HostRun] = [:]
+    private var handoffs: [String: HostHandoff] = [:]
     private var logs: [String: [HostLogEvent]] = [:]
     private var subscribers: [String: [UUID: @Sendable (HostLogEvent) -> Void]] = [:]
     private var processes: [String: pid_t] = [:]
+    private var ptyMasters: [String: Int32] = [:]
     private var devices: [DeviceRecord] = []
     private var pairingCode: String = String(UUID().uuidString.prefix(8)).uppercased()
     private var pairingSecret: String = randomToken()
+    private var replayWindow: VeqralReplayWindow
+    private var runPersistenceAvailable: Bool
+    private var replayPersistenceAvailable: Bool
+    private var handoffPersistenceAvailable: Bool
 
     init(config: HostConfig = HostConfig.load()) {
+        let loadedRuns = Self.loadRuns()
+        let loadedLogs = Self.loadLogs(for: Array(loadedRuns.runs.keys))
+        var migratedRuns = loadedRuns.runs
+        var runPersistenceAvailable = loadedRuns.available
+        var changed = false
+        for runID in migratedRuns.keys {
+            guard var run = migratedRuns[runID],
+                  let latestLogAt = loadedLogs[runID]?.map(\.createdAt).max(),
+                  latestLogAt > (run.statusUpdatedAt ?? .distantPast) else { continue }
+            run.statusUpdatedAt = latestLogAt
+            migratedRuns[runID] = run
+            changed = true
+        }
+        if changed {
+            do {
+                try Self.writeRuns(migratedRuns)
+            } catch {
+                runPersistenceAvailable = false
+            }
+        }
+        let loadedReplay = Self.loadReplayWindow()
+        let loadedHandoffs = Self.loadHandoffs()
+
         self.config = config
-        self.runs = Self.loadRuns()
-        self.logs = Self.loadLogs(for: Array(self.runs.keys))
+        self.runs = migratedRuns
+        self.handoffs = loadedHandoffs.handoffs
+        self.runPersistenceAvailable = runPersistenceAvailable
+        self.logs = loadedLogs
         self.devices = Self.loadDevices()
+        self.replayWindow = loadedReplay.window
+        self.replayPersistenceAvailable = loadedReplay.available
+        self.handoffPersistenceAvailable = loadedHandoffs.available
     }
 
     nonisolated static var devicesURL: URL {
@@ -2145,6 +2496,14 @@ actor HostState {
 
     nonisolated static var runsURL: URL {
         HostConfig.folder.appendingPathComponent("runs.json")
+    }
+
+    nonisolated static var replayWindowURL: URL {
+        HostConfig.folder.appendingPathComponent("replay-window.json")
+    }
+
+    nonisolated static var handoffsURL: URL {
+        HostConfig.folder.appendingPathComponent("handoffs.json")
     }
 
     nonisolated static var logsFolder: URL {
@@ -2162,56 +2521,220 @@ actor HostState {
     }
 
     func pairingEndpoints() -> [String] {
-        var endpoints: [String] = []
-        endpoints.append("http://\(localHostName()):\(config.port)")
-        if let tailscaleIP = tailscaleIP() {
-            endpoints.append("http://\(tailscaleIP):\(config.port)")
-        }
-        return endpoints.uniqued()
+        VeqralPairingEndpointPolicy.endpoints(
+            hostname: localHostName(),
+            tailscaleIP: tailscaleIP(),
+            interfaceIPv4: interfaceIPv4Addresses(),
+            port: Int(config.port)
+        )
     }
 
-    func pairingURL() -> String {
-        let endpoints = pairingEndpoints()
+    private static let pairingAPIVersion = 2
+    private static let pairingAuthVersions = [1, 2]
+    private static let pairingCapabilities = [
+        "pairing.ordered-endpoints.v2",
+        "protocol.negotiate.v1",
+        "request-auth.hmac-sha256.v2",
+        "request-auth.nonce-replay.v1"
+    ].sorted()
+
+    func pairingURL(endpoints suppliedEndpoints: [String]? = nil) -> String {
+        let endpoints = suppliedEndpoints ?? pairingEndpoints()
         let signedEndpoint = endpoints.first ?? "http://\(localHostName()):\(config.port)"
-        let signature = pairingSignature(endpoint: signedEndpoint, code: pairingCode)
+        let legacySignature = pairingSignature(endpoint: signedEndpoint, code: pairingCode)
+        let proof = pairingV2Signature(
+            code: pairingCode,
+            apiVersion: Self.pairingAPIVersion,
+            authVersions: Self.pairingAuthVersions,
+            capabilities: Self.pairingCapabilities,
+            endpoints: endpoints
+        )
         var queryParts = [
             "endpoint=\(signedEndpoint.urlQueryEscaped)",
             "code=\(pairingCode.urlQueryEscaped)",
-            "signature=\(signature.urlQueryEscaped)"
+            "signature=\(legacySignature.urlQueryEscaped)",
+            "pv=2",
+            "api=\(Self.pairingAPIVersion)"
         ]
-        queryParts.append(contentsOf: endpoints.dropFirst().map { "fallback=\($0.urlQueryEscaped)" })
+        queryParts.append(contentsOf: Self.pairingAuthVersions.map { "auth=\($0)" })
+        queryParts.append(contentsOf: Self.pairingCapabilities.map { "cap=\($0.urlQueryEscaped)" })
+        queryParts.append(contentsOf: endpoints.map { "candidate=\($0.urlQueryEscaped)" })
+        queryParts.append("proof=\(proof.urlQueryEscaped)")
         return "veqral://pair?\(queryParts.joined(separator: "&"))"
     }
 
-    func pair(deviceName: String, code: String, pairingEndpoint: String? = nil, pairingSignature: String? = nil) throws -> (deviceID: String, token: String) {
+    func simulatorPairingURL() -> String {
+        pairingURL(endpoints: ["http://127.0.0.1:\(config.port)"])
+    }
+
+    func pair(
+        deviceName: String,
+        code: String,
+        pairingEndpoint: String? = nil,
+        pairingSignature: String? = nil,
+        stableClientID: String? = nil,
+        pairingProtocolVersion: Int? = nil,
+        apiProtocolVersion: Int? = nil,
+        requestAuthVersions: [Int]? = nil,
+        capabilities: [String]? = nil,
+        pairingEndpoints: [String]? = nil,
+        pairingProof: String? = nil,
+        selectedEndpoint: String? = nil
+    ) throws -> (deviceID: String, token: String) {
         guard code == pairingCode else {
             throw HostError.unauthorized("Invalid pairing code")
         }
-        if let signature = pairingSignature?.nilIfBlank {
-            let endpoint = pairingEndpoint?.nilIfBlank ?? ""
-            guard !endpoint.isEmpty else {
-                throw HostError.unauthorized("Missing pairing endpoint")
+        if pairingProtocolVersion == 2 {
+            guard apiProtocolVersion == Self.pairingAPIVersion,
+                  let authVersions = requestAuthVersions,
+                  authVersions == Self.pairingAuthVersions,
+                  let suppliedCapabilities = capabilities,
+                  suppliedCapabilities == Self.pairingCapabilities,
+                  let endpoints = pairingEndpoints,
+                  !endpoints.isEmpty,
+                  endpoints.count <= 8,
+                  Set(endpoints).count == endpoints.count,
+                  endpoints.allSatisfy(Self.isValidPairingEndpoint),
+                  let selected = selectedEndpoint?.nilIfBlank,
+                  endpoints.contains(selected),
+                  let proof = pairingProof?.nilIfBlank else {
+                throw HostError.unauthorized("Invalid pairing v2 metadata")
+            }
+            let expected = pairingV2Signature(
+                code: code,
+                apiVersion: Self.pairingAPIVersion,
+                authVersions: authVersions,
+                capabilities: suppliedCapabilities,
+                endpoints: endpoints
+            )
+            guard secureCompare(proof, expected) else {
+                throw HostError.unauthorized("Invalid pairing candidate proof")
+            }
+        } else {
+            guard pairingProtocolVersion == nil,
+                  VeqralPairingAccessPolicy.hasSignedProof(endpoint: pairingEndpoint, signature: pairingSignature),
+                  let endpoint = pairingEndpoint?.nilIfBlank,
+                  let signature = pairingSignature?.nilIfBlank else {
+                throw HostError.unauthorized("Signed pairing URL is required")
             }
             let expected = self.pairingSignature(endpoint: endpoint, code: code)
             guard secureCompare(signature, expected) else {
                 throw HostError.unauthorized("Invalid pairing signature")
             }
         }
-        let deviceID = UUID().uuidString
+        let now = Date()
+        let cleanName = deviceName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank ?? "Unnamed Device"
+        let cleanStableClientID = Self.normalizedStableClientID(stableClientID)
+        let normalizedName = Self.normalizedDeviceName(cleanName)
+        let existingIndex = devices.firstIndex { device in
+            if let cleanStableClientID,
+               let existingStableID = Self.normalizedStableClientID(device.stableClientID),
+               existingStableID == cleanStableClientID {
+                return true
+            }
+            // Backfill one pre-stable-ID record for this named device instead of creating a new duplicate.
+            return cleanStableClientID != nil
+                && Self.normalizedStableClientID(device.stableClientID) == nil
+                && Self.normalizedDeviceName(device.name) == normalizedName
+        }
         let token = randomToken()
+        let negotiatedMinimumAuthVersion = pairingProtocolVersion == 2 ? 2 : 1
+        if let existingIndex {
+            let deviceID = devices[existingIndex].id
+            try KeychainStore.set(token, account: "device:\(deviceID)")
+            devices[existingIndex].name = cleanName
+            devices[existingIndex].lastSeenAt = now
+            if let cleanStableClientID {
+                devices[existingIndex].stableClientID = cleanStableClientID
+            }
+            devices[existingIndex].minimumAuthVersion = max(devices[existingIndex].minimumAuthVersion ?? 1, negotiatedMinimumAuthVersion)
+            persistDevices()
+            _ = rotatePairingCode()
+            appendAudit("re-paired device=\(cleanName) id=\(deviceID) reused=true")
+            return (deviceID, token)
+        }
+        let deviceID = UUID().uuidString
         try KeychainStore.set(token, account: "device:\(deviceID)")
-        devices.append(DeviceRecord(id: deviceID, name: deviceName, pairedAt: Date(), lastSeenAt: Date()))
+        devices.append(DeviceRecord(id: deviceID, name: cleanName, pairedAt: now, lastSeenAt: now, stableClientID: cleanStableClientID, minimumAuthVersion: negotiatedMinimumAuthVersion))
         persistDevices()
         _ = rotatePairingCode()
-        appendAudit("paired device=\(deviceName) id=\(deviceID)")
+        appendAudit("paired device=\(cleanName) id=\(deviceID)")
         return (deviceID, token)
+    }
+
+    private static func normalizedStableClientID(_ value: String?) -> String? {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank?.lowercased()
+    }
+
+    private static func normalizedDeviceName(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 
     private func pairingSignature(endpoint: String, code: String) -> String {
         HMACSigner.signature(token: pairingSecret, method: "PAIR", path: "/v1/pair", timestamp: code, body: Data(endpoint.utf8))
     }
 
-    func validate(deviceID: String, method: String, path: String, timestamp: String, signature: String, body: Data) throws {
+    private func pairingV2Signature(
+        code: String,
+        apiVersion: Int,
+        authVersions: [Int],
+        capabilities: [String],
+        endpoints: [String]
+    ) -> String {
+        var lines = [
+            "VEQRAL-PAIRING-PROOF",
+            "2",
+            "code=\(code)",
+            "api=\(apiVersion)",
+            "auth-count=\(authVersions.count)"
+        ]
+        lines.append(contentsOf: authVersions.enumerated().map { "auth[\($0.offset)]=\($0.element)" })
+        lines.append("cap-count=\(capabilities.count)")
+        lines.append(contentsOf: capabilities.enumerated().map { "cap[\($0.offset)]=\($0.element)" })
+        lines.append("endpoint-count=\(endpoints.count)")
+        lines.append(contentsOf: endpoints.enumerated().map { "endpoint[\($0.offset)]=\($0.element)" })
+        return HMACSigner.signature(
+            token: pairingSecret,
+            method: "PAIR-V2",
+            path: "/v1/pair",
+            timestamp: code,
+            body: Data(lines.joined(separator: "\n").utf8)
+        )
+    }
+
+    private static func isValidPairingEndpoint(_ value: String) -> Bool {
+        guard !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }),
+              let components = URLComponents(string: value),
+              components.scheme?.lowercased() == "http",
+              components.host?.nilIfBlank != nil,
+              let port = components.port,
+              (1...65_535).contains(port),
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil,
+              components.path.isEmpty || components.path == "/" else {
+            return false
+        }
+        return true
+    }
+
+    func validate(deviceID: String, method: String, path: String, timestamp: String, nonce: String?, signature: String, authVersion: String?, body: Data) throws {
+        let version = Int(authVersion ?? "1")
+        guard let version, version == 1 || version == 2 else {
+            throw HostError.unsupportedProtocol("Unsupported request auth version")
+        }
+        guard let device = devices.first(where: { $0.id == deviceID }) else {
+            throw HostError.unauthorized("Unknown device")
+        }
+        let requiredVersion = VeqralRequestAuthPolicy.minimumVersion(
+            method: method,
+            deviceMinimum: device.minimumAuthVersion ?? 1
+        )
+        guard version >= requiredVersion else {
+            throw HostError.unsupportedProtocol("Auth version \(requiredVersion) is required")
+        }
         guard let token = KeychainStore.get(account: "device:\(deviceID)") else {
             throw HostError.unauthorized("Unknown device")
         }
@@ -2219,9 +2742,35 @@ actor HostState {
               abs(signedAt.timeIntervalSinceNow) < 300 else {
             throw HostError.unauthorized("Expired signature")
         }
-        let expected = HMACSigner.signature(token: token, method: method, path: path, timestamp: timestamp, body: body)
+        let cleanNonce = nonce?.nilIfBlank
+        if version == 2, VeqralRequestAuthPolicy.requiresNonce(method: method), cleanNonce == nil {
+            throw HostError.unauthorized("Missing request nonce")
+        }
+        let expected = HMACSigner.requestSignature(token: token, deviceID: deviceID, authVersion: version, method: method, path: path, timestamp: timestamp, nonce: cleanNonce, body: body)
         guard secureCompare(signature, expected) else {
             throw HostError.unauthorized("Invalid signature")
+        }
+        if version == 2, VeqralRequestAuthPolicy.requiresNonce(method: method), let cleanNonce {
+            guard replayPersistenceAvailable else {
+                throw HostError.serviceUnavailable("Replay protection persistence is unavailable")
+            }
+            var candidate = replayWindow
+            switch candidate.consume(deviceID: deviceID, nonce: cleanNonce, signedAt: signedAt) {
+            case .accepted:
+                do {
+                    try Self.writeReplayWindow(candidate)
+                } catch {
+                    replayPersistenceAvailable = false
+                    throw HostError.serviceUnavailable("Replay protection could not be persisted")
+                }
+                replayWindow = candidate
+            case .replayed:
+                throw HostError.unauthorized("Replayed request")
+            case .invalidNonce:
+                throw HostError.unauthorized("Invalid request nonce")
+            case .capacityUnavailable:
+                throw HostError.serviceUnavailable("Replay protection capacity is unavailable")
+            }
         }
         if let index = devices.firstIndex(where: { $0.id == deviceID }) {
             devices[index].lastSeenAt = Date()
@@ -2261,6 +2810,77 @@ actor HostState {
         runs.values.sorted { $0.startedAt > $1.startedAt }
     }
 
+    func forgeRunListResponse() throws -> RunListResponse {
+        let orderedRuns = runsList()
+        let currentRuns = Dictionary(grouping: orderedRuns, by: \.forgeTaskID)
+            .values
+            .compactMap { attempts in
+                attempts.sorted {
+                    if $0.startedAt != $1.startedAt { return $0.startedAt > $1.startedAt }
+                    return $0.id < $1.id
+                }.first
+            }
+        try refreshHandoffs(scanning: currentRuns)
+        let taskIDs = Set(orderedRuns.map(\.forgeTaskID))
+        return RunListResponse(
+            runs: orderedRuns,
+            handoffs: handoffs.values
+                .filter { taskIDs.contains($0.taskID) }
+                .sorted { $0.id < $1.id }
+        )
+    }
+
+    func handoffs(runID: String) throws -> [HostHandoff] {
+        guard let target = runs[runID] else {
+            throw HostError.notFound("Run not found")
+        }
+        let current = runs.values
+            .filter { $0.forgeTaskID == target.forgeTaskID }
+            .sorted {
+                if $0.startedAt != $1.startedAt { return $0.startedAt > $1.startedAt }
+                return $0.id < $1.id
+            }
+            .first
+        if current?.id == runID {
+            try refreshHandoffs(scanning: [target])
+        } else if !handoffPersistenceAvailable {
+            throw HostError.serviceUnavailable("Handoff state persistence is unavailable")
+        }
+        return handoffs.values
+            .filter { $0.taskID == target.forgeTaskID }
+            .sorted { $0.id < $1.id }
+    }
+
+    private func refreshHandoffs(scanning currentRuns: [HostRun]) throws {
+        guard handoffPersistenceAvailable else {
+            throw HostError.serviceUnavailable("Handoff state persistence is unavailable")
+        }
+        var candidate = handoffs
+        for run in currentRuns {
+            let discovered = try HandoffScanner.handoffs(for: run)
+            let discoveredIDs = Set(discovered.map(\.id))
+            for id in Array(candidate.keys) {
+                guard var record = candidate[id],
+                      record.runID == run.id,
+                      record.state == "readyForReview",
+                      !discoveredIDs.contains(id) else { continue }
+                record.state = "blocked"
+                candidate[id] = record
+            }
+            for record in discovered {
+                candidate[record.id] = record
+            }
+        }
+        guard candidate != handoffs else { return }
+        do {
+            try Self.writeHandoffs(candidate)
+        } catch {
+            handoffPersistenceAvailable = false
+            throw HostError.serviceUnavailable("Handoff state could not be persisted")
+        }
+        handoffs = candidate
+    }
+
     func recordAudit(_ line: String) {
         appendAudit(line)
     }
@@ -2274,9 +2894,24 @@ actor HostState {
 
     func recoverableRunIDs() -> [String] {
         runs.values
-            .filter { $0.status == .queued }
+            .filter { VeqralRunControlPolicy.canStart(status: $0.status.rawValue, approvalState: $0.approvalState) }
             .sorted { $0.startedAt < $1.startedAt }
             .map(\.id)
+    }
+
+    func claimStartableRun(runID: String) -> HostRun? {
+        guard runPersistenceAvailable,
+              var run = runs[runID],
+              VeqralRunControlPolicy.canStart(status: run.status.rawValue, approvalState: run.approvalState) else {
+            return nil
+        }
+        run.status = .running
+        do {
+            try commitRun(run)
+            return run
+        } catch {
+            return nil
+        }
     }
 
     func budgetAllows(project: String) -> Bool {
@@ -2328,6 +2963,7 @@ actor HostState {
         engine: AgentEngine = .hermes,
         resumeSessionID: String? = nil,
         projectID: String? = nil,
+        taskID: String? = nil,
         chatID: String? = nil,
         provider: String? = nil,
         model: String? = nil,
@@ -2338,6 +2974,21 @@ actor HostState {
         let directory = (workingDirectory.isEmpty ? config.defaultWorkingDirectory : workingDirectory).expandingTilde
         guard FileManager.default.fileExists(atPath: directory) else {
             throw HostError.badRequest("Working directory does not exist")
+        }
+        if engine == .hermes, let resumeID = resumeSessionID?.nilIfBlank {
+            guard let historical = AgentHistoryStore().hermesContinuationSession(id: resumeID) else {
+                throw HostError.badRequest("Hermes continuation session was not found")
+            }
+            guard historical.canContinue == true else {
+                throw HostError.badRequest(historical.continueBlockedReason ?? "Hermes continuation is unavailable")
+            }
+            guard provider?.nilIfBlank == historical.provider?.nilIfBlank,
+                  model?.nilIfBlank == historical.model?.nilIfBlank else {
+                throw HostError.badRequest("Hermes continuation provider/model does not match the recorded session route")
+            }
+            guard GitWorkspacePolicy.sameWorkspace(directory, historical.projectPath) else {
+                throw HostError.badRequest("Hermes continuation workspace does not match the recorded Git checkout")
+            }
         }
         let risk = RiskClassifier.classify(prompt)
         let projectKey = RunBudgetCalculator.projectKey(projectID: projectID?.nilIfBlank, workingDirectory: directory)
@@ -2368,13 +3019,15 @@ actor HostState {
         } else {
             risk.severity
         }
+        let createdAt = Date()
+        let resolvedTaskID = taskID?.nilIfBlank ?? "task:\(UUID().uuidString.lowercased())"
         var run = HostRun(
             id: UUID().uuidString,
             prompt: prompt,
             workingDirectory: directory,
             sessionID: nil,
             status: approvalReason == nil ? .queued : .waitingApproval,
-            startedAt: Date(),
+            startedAt: createdAt,
             completedAt: nil,
             exitCode: nil,
             pid: nil,
@@ -2385,7 +3038,13 @@ actor HostState {
             chatID: chatID?.nilIfBlank,
             provider: provider?.nilIfBlank,
             model: model?.nilIfBlank,
-            approvalSeverity: approvalSeverity
+            approvalSeverity: approvalSeverity,
+            approvalRequired: nil,
+            approvalProvenance: VeqralRunApprovalProvenance(
+                state: approvalReason == nil ? .notRequired : .pending
+            ),
+            taskID: resolvedTaskID,
+            statusUpdatedAt: createdAt
         )
         let savedAttachments = try AttachmentStore.save(attachments, runID: run.id)
         if !savedAttachments.isEmpty {
@@ -2393,8 +3052,7 @@ actor HostState {
             run.prompt += savedAttachments.map { "- \($0.title): \($0.path)" }.joined(separator: "\n")
             appendAudit("saved attachments run id=\(run.id) count=\(savedAttachments.count)")
         }
-        runs[run.id] = run
-        persistRuns()
+        try commitRun(run)
         if let approvalReason {
             appendAudit("created approval run id=\(run.id) engine=\(engine.rawValue) dir=\(directory) reason=\(approvalReason)")
             publish(HostLogEvent(runID: run.id, kind: .approval, stream: "approval", message: approvalReason, createdAt: Date()))
@@ -2405,18 +3063,26 @@ actor HostState {
         return run
     }
 
-    func markStarted(runID: String, pid: pid_t) {
+    func markStarted(runID: String, pid: pid_t, ptyMaster: Int32? = nil) {
         guard var run = runs[runID] else { return }
+        let changedAt = Date()
         run.status = .running
         run.pid = pid
+        run.statusUpdatedAt = changedAt
         runs[runID] = run
         processes[runID] = pid
+        if let ptyMaster {
+            ptyMasters[runID] = ptyMaster
+        }
         persistRuns()
-        publish(HostLogEvent(runID: runID, kind: .status, stream: "host", message: "Run started pid=\(pid)", createdAt: Date()))
+        publish(HostLogEvent(runID: runID, kind: .status, stream: "host", message: "Run started pid=\(pid)", createdAt: changedAt))
     }
 
     func appendLog(runID: String, stream: String, message: String) {
+        let eventAt = Date()
         let redacted = Redactor.redact(message)
+        let detectionContext = ((logs[runID] ?? []).suffix(12).map(\.message) + [redacted]).joined(separator: "\n")
+        let detectedInteraction = VeqralInteractionDetector.detect(in: detectionContext)
         if var run = runs[runID] {
             var didUpdate = false
             if let sessionID = SessionParser.sessionID(from: redacted), run.sessionID != sessionID {
@@ -2427,12 +3093,25 @@ actor HostState {
                 applyUsage(usage, to: &run)
                 didUpdate = true
             }
+            if let detectedInteraction {
+                run.interaction = detectedInteraction
+                didUpdate = true
+            }
             if didUpdate {
+                run.statusUpdatedAt = eventAt
                 runs[runID] = run
                 persistRuns()
             }
         }
-        publish(HostLogEvent(runID: runID, kind: .log, stream: stream, message: redacted, createdAt: Date(), sessionID: runs[runID]?.sessionID))
+        publish(HostLogEvent(
+            runID: runID,
+            kind: detectedInteraction == nil ? .log : .approval,
+            stream: stream,
+            message: redacted,
+            createdAt: eventAt,
+            sessionID: runs[runID]?.sessionID,
+            interaction: detectedInteraction
+        ))
     }
 
     private func applyUsage(_ usage: RunUsage, to run: inout HostRun) {
@@ -2451,15 +3130,20 @@ actor HostState {
         if run.engineOrDefault == .hermes {
             refreshHermesUsageIfAvailable(for: &run)
         }
+        let changedAt = Date()
         run.status = exitCode == 0 ? .complete : .failed
         run.exitCode = exitCode
-        run.completedAt = Date()
+        run.completedAt = changedAt
         run.pid = nil
+        run.interaction = nil
+        run.statusUpdatedAt = changedAt
         runs[runID] = run
         processes[runID] = nil
+        ptyMasters[runID] = nil
         persistRuns()
         pauseBudgetIfNeeded(after: run)
         appendAudit("finished run id=\(runID) exit=\(exitCode)")
+        publish(HostLogEvent(runID: runID, kind: .complete, stream: "host", message: "Exit code: \(exitCode)", createdAt: changedAt, sessionID: run.sessionID, exitCode: exitCode))
         let digest = AIHubSessionDigestBridge.record(run: run, logs: logs[runID] ?? [], config: config)
         if digest.ok {
             appendAudit("aihub digest run id=\(runID) path=\(digest.path ?? "none")")
@@ -2468,7 +3152,6 @@ actor HostState {
             appendAudit("aihub digest failed run id=\(runID) error=\(digest.message)")
             publish(HostLogEvent(runID: runID, kind: .log, stream: "aihub", message: "AI-Hub digest failed: \(digest.message)", createdAt: Date(), sessionID: run.sessionID))
         }
-        publish(HostLogEvent(runID: runID, kind: .complete, stream: "host", message: "Exit code: \(exitCode)", createdAt: Date(), sessionID: run.sessionID, exitCode: exitCode))
         notifyDevices(
             run: run,
             event: exitCode == 0 ? .complete : .failed,
@@ -2477,36 +3160,89 @@ actor HostState {
         )
     }
 
-    func cancel(runID: String) {
+    private func requireCurrentAttempt(runID: String, expectedTaskID: String?) throws {
+        guard let target = runs[runID] else {
+            throw HostError.notFound("Run not found")
+        }
+        let taskID = expectedTaskID?.nilIfBlank ?? target.forgeTaskID
+        guard target.forgeTaskID == taskID else {
+            throw HostError.badRequest("Run does not belong to the expected Task")
+        }
+        let current = runs.values
+            .filter { $0.forgeTaskID == taskID }
+            .sorted {
+                if $0.startedAt != $1.startedAt { return $0.startedAt > $1.startedAt }
+                return $0.id < $1.id
+            }
+            .first
+        guard current?.id == runID else {
+            throw HostError.badRequest("Run attempt changed; refresh before acting")
+        }
+    }
+
+    func cancel(runID: String, expectedTaskID: String? = nil) throws {
+        try requireCurrentAttempt(runID: runID, expectedTaskID: expectedTaskID)
         guard var run = runs[runID] else { return }
         guard ![RunStatusWire.complete, .failed, .cancelled].contains(run.status) else { return }
+        let changedAt = Date()
+        run.status = .cancelled
+        run.completedAt = changedAt
+        run.pid = nil
+        run.interaction = nil
+        run.statusUpdatedAt = changedAt
+
+        var persistenceError: Error?
+        do {
+            try commitRun(run)
+        } catch {
+            persistenceError = error
+            runs[runID] = run
+        }
+
         if let pid = processes[runID] {
             kill(pid, SIGTERM)
             usleep(200_000)
             kill(pid, SIGKILL)
         }
-        run.status = .cancelled
-        run.completedAt = Date()
-        run.pid = nil
-        runs[runID] = run
         processes[runID] = nil
-        persistRuns()
+        ptyMasters[runID] = nil
+
+        if let persistenceError {
+            appendAudit("cancelled process after persistence failure run id=\(runID)")
+            throw persistenceError
+        }
         appendAudit("cancelled run id=\(runID)")
-        publish(HostLogEvent(runID: runID, kind: .status, stream: "host", message: "Run cancelled", createdAt: Date()))
+        publish(HostLogEvent(runID: runID, kind: .status, stream: "host", message: "Run cancelled", createdAt: changedAt))
     }
 
-    func resume(runID: String) throws -> HostRun {
+    func resume(runID: String, expectedTaskID: String? = nil) throws -> HostRun {
+        try requireCurrentAttempt(runID: runID, expectedTaskID: expectedTaskID)
         guard var run = runs[runID] else {
             throw HostError.notFound("Run not found")
         }
-        guard run.status != .running else {
-            return run
+        let approvalState = run.approvalState
+        guard VeqralRunControlPolicy.canResume(
+            status: run.status.rawValue,
+            approvalState: approvalState
+        ) else {
+            if approvalState == .pending {
+                run.status = .waitingApproval
+                run.completedAt = nil
+                run.exitCode = nil
+                run.pid = nil
+                run.statusUpdatedAt = Date()
+                try commitRun(run)
+                appendAudit("resume blocked pending approval run id=\(runID)")
+                throw HostError.approvalRequired("Run still requires explicit approval")
+            }
+            throw HostError.badRequest("Run cannot be resumed from status \(run.status.rawValue)")
         }
         run.status = .queued
         run.completedAt = nil
         run.exitCode = nil
-        runs[runID] = run
-        persistRuns()
+        run.interaction = nil
+        run.statusUpdatedAt = Date()
+        try commitRun(run)
         appendAudit("resume requested run id=\(runID)")
         return run
     }
@@ -2530,19 +3266,91 @@ actor HostState {
         notifyDevices(run: run, event: .question, message: "Cost budget paused for \(summary.displayName)", severity: .high)
     }
 
-    func approve(runID: String) throws -> HostRun {
+    func approve(runID: String, expectedTaskID: String? = nil, approvedByDeviceID: String) throws -> HostRun {
+        try requireCurrentAttempt(runID: runID, expectedTaskID: expectedTaskID)
         guard var run = runs[runID] else {
             throw HostError.notFound("Run not found")
         }
-        guard run.status == .waitingApproval else {
-            return run
+        guard VeqralRunControlPolicy.canApprove(status: run.status.rawValue) else {
+            throw HostError.badRequest("Run is not waiting for approval")
         }
+        guard VeqralRunControlPolicy.canUseGenericApproval(
+            hasInteraction: run.interaction != nil
+        ) else {
+            throw HostError.approvalRequired("Run requires explicit input and cannot be approved")
+        }
+        let changedAt = Date()
         run.status = .queued
-        run.approvalReason = nil
+        run.approvalRequired = nil
+        run.approvalProvenance = VeqralRunApprovalProvenance(
+            state: .granted,
+            grantedAt: changedAt,
+            grantedByDeviceID: approvedByDeviceID
+        )
+        run.interaction = nil
+        run.statusUpdatedAt = changedAt
+        try commitRun(run)
+        appendAudit("approved run id=\(runID) device=\(approvedByDeviceID)")
+        publish(HostLogEvent(runID: runID, kind: .status, stream: "host", message: "Approval accepted", createdAt: changedAt, sessionID: run.sessionID))
+        return run
+    }
+
+    func reject(runID: String, expectedTaskID: String? = nil, rejectedByDeviceID: String) throws {
+        try requireCurrentAttempt(runID: runID, expectedTaskID: expectedTaskID)
+        guard let run = runs[runID] else {
+            throw HostError.notFound("Run not found")
+        }
+        guard VeqralRunControlPolicy.canApprove(status: run.status.rawValue) else {
+            throw HostError.badRequest("Run is not waiting for approval")
+        }
+        guard VeqralRunControlPolicy.canUseGenericApproval(
+            hasInteraction: run.interaction != nil
+        ) else {
+            throw HostError.approvalRequired("Run requires explicit input and cannot be rejected")
+        }
+        try cancel(runID: runID, expectedTaskID: expectedTaskID)
+        appendAudit("rejected run id=\(runID) device=\(rejectedByDeviceID)")
+    }
+
+    func submitInput(runID: String, expectedTaskID: String? = nil, text: String, submit: Bool = true) throws -> HostRun {
+        try requireCurrentAttempt(runID: runID, expectedTaskID: expectedTaskID)
+        guard var run = runs[runID] else {
+            throw HostError.notFound("Run not found")
+        }
+        guard ![RunStatusWire.complete, .failed, .cancelled].contains(run.status) else {
+            throw HostError.badRequest("Run is no longer accepting input")
+        }
+        guard let interaction = run.interaction else {
+            throw HostError.badRequest("Run is not requesting input")
+        }
+        guard let master = ptyMasters[runID] else {
+            throw HostError.badRequest("Run is not accepting terminal input yet")
+        }
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else {
+            throw HostError.badRequest("Input is empty")
+        }
+        if !interaction.choices.isEmpty,
+           !interaction.choices.contains(where: { $0.value == clean }) {
+            throw HostError.badRequest("Input is not one of the current choices")
+        }
+        let payload = submit ? clean + "\n" : clean
+        let data = Data(payload.utf8)
+        let written = data.withUnsafeBytes { buffer -> Int in
+            guard let base = buffer.baseAddress else { return 0 }
+            return Darwin.write(master, base, buffer.count)
+        }
+        guard written == data.count else {
+            let reason = written < 0 ? String(cString: strerror(errno)) : "short write \(written)/\(data.count)"
+            throw HostError.badRequest("Failed to send input: \(reason)")
+        }
+        let changedAt = Date()
+        run.interaction = nil
+        run.statusUpdatedAt = changedAt
         runs[runID] = run
         persistRuns()
-        appendAudit("approved run id=\(runID)")
-        publish(HostLogEvent(runID: runID, kind: .status, stream: "host", message: "Approval accepted", createdAt: Date(), sessionID: run.sessionID))
+        appendAudit("submitted input run id=\(runID) bytes=\(data.count)")
+        publish(HostLogEvent(runID: runID, kind: .status, stream: "input", message: "Input sent from Veqral", createdAt: changedAt, sessionID: run.sessionID))
         return run
     }
 
@@ -2567,7 +3375,14 @@ actor HostState {
         subscribers[runID]?[id] = nil
     }
 
-    private func publish(_ event: HostLogEvent) {
+    private func publish(_ candidate: HostLogEvent) {
+        var event = candidate
+        if event.eventID?.isEmpty != false {
+            event.eventID = UUID().uuidString.lowercased()
+        }
+        if event.runStatus?.nilIfBlank == nil {
+            event.runStatus = runs[event.runID]?.status.rawValue
+        }
         logs[event.runID, default: []].append(event)
         appendLogFile(event)
         subscribers[event.runID]?.values.forEach { $0(event) }
@@ -2622,12 +3437,47 @@ actor HostState {
         }
     }
 
-    private func persistRuns() {
-        try? FileManager.default.createDirectory(at: HostConfig.folder, withIntermediateDirectories: true)
-        let sortedRuns = runs.values.sorted { $0.startedAt < $1.startedAt }
-        if let data = try? JSONEncoder.pretty.encode(sortedRuns) {
-            try? data.write(to: Self.runsURL, options: .atomic)
+    private func commitRun(_ run: HostRun) throws {
+        guard runPersistenceAvailable else {
+            throw HostError.serviceUnavailable("Run security state persistence is unavailable")
         }
+        var candidate = runs
+        candidate[run.id] = run
+        do {
+            try Self.writeRuns(candidate)
+        } catch {
+            runPersistenceAvailable = false
+            throw HostError.serviceUnavailable("Run security state could not be persisted")
+        }
+        runs = candidate
+    }
+
+    private static func writeRuns(_ candidate: [String: HostRun]) throws {
+        try FileManager.default.createDirectory(at: HostConfig.folder, withIntermediateDirectories: true)
+        let sortedRuns = candidate.values.sorted { $0.startedAt < $1.startedAt }
+        let data = try JSONEncoder.pretty.encode(sortedRuns)
+        try data.write(to: Self.runsURL, options: .atomic)
+    }
+
+    private static func writeHandoffs(_ candidate: [String: HostHandoff]) throws {
+        try FileManager.default.createDirectory(at: HostConfig.folder, withIntermediateDirectories: true)
+        let sortedHandoffs = candidate.values.sorted { $0.id < $1.id }
+        let data = try JSONEncoder.pretty.encode(sortedHandoffs)
+        try data.write(to: Self.handoffsURL, options: .atomic)
+    }
+
+    private func persistRuns() {
+        do {
+            try Self.writeRuns(runs)
+        } catch {
+            runPersistenceAvailable = false
+        }
+    }
+
+    private static func writeReplayWindow(_ candidate: VeqralReplayWindow) throws {
+        try FileManager.default.createDirectory(at: HostConfig.folder, withIntermediateDirectories: true)
+        let data = try JSONEncoder.pretty.encode(candidate)
+        try data.write(to: Self.replayWindowURL, options: .atomic)
     }
 
     private func persistConfig() throws {
@@ -2658,22 +3508,71 @@ actor HostState {
         return devices
     }
 
-    private static func loadRuns() -> [String: HostRun] {
+    private static func loadRuns() -> (runs: [String: HostRun], available: Bool) {
+        guard FileManager.default.fileExists(atPath: runsURL.path) else {
+            return ([:], true)
+        }
         guard let data = try? Data(contentsOf: runsURL),
               let storedRuns = try? JSONDecoder.dates.decode([HostRun].self, from: data) else {
-            return [:]
+            return ([:], false)
         }
-        return Dictionary(
-            uniqueKeysWithValues: storedRuns.map { storedRun in
-                var run = storedRun
+        var changed = false
+        let normalized = storedRuns.map { storedRun -> HostRun in
+            var run = storedRun
+            changed = run.normalizeApprovalProvenance() || changed
+            changed = run.normalizeForgeIdentity() || changed
+            if run.approvalState == .pending {
                 if run.status == .running || run.status == .queued {
-                    run.status = .queued
+                    run.status = .waitingApproval
                     run.pid = nil
                     run.completedAt = nil
+                    changed = true
                 }
-                return (run.id, run)
+            } else if run.status == .running {
+                run.status = .queued
+                run.pid = nil
+                run.completedAt = nil
+                changed = true
             }
-        )
+            return run
+        }
+        let runs = Dictionary(uniqueKeysWithValues: normalized.map { ($0.id, $0) })
+        if changed {
+            do {
+                try writeRuns(runs)
+            } catch {
+                return (runs, false)
+            }
+        }
+        return (runs, true)
+    }
+
+    private static func loadHandoffs() -> (handoffs: [String: HostHandoff], available: Bool) {
+        guard FileManager.default.fileExists(atPath: handoffsURL.path) else {
+            return ([:], true)
+        }
+        guard let data = try? Data(contentsOf: handoffsURL),
+              let stored = try? JSONDecoder.dates.decode([HostHandoff].self, from: data) else {
+            return ([:], false)
+        }
+        return (Dictionary(uniqueKeysWithValues: stored.map { ($0.id, $0) }), true)
+    }
+
+    private static func loadReplayWindow() -> (window: VeqralReplayWindow, available: Bool) {
+        guard FileManager.default.fileExists(atPath: replayWindowURL.path) else {
+            return (VeqralReplayWindow(validityInterval: 300), true)
+        }
+        guard let data = try? Data(contentsOf: replayWindowURL),
+              var stored = try? JSONDecoder.dates.decode(VeqralReplayWindow.self, from: data) else {
+            return (VeqralReplayWindow(validityInterval: 300), false)
+        }
+        stored.prune()
+        do {
+            try writeReplayWindow(stored)
+            return (stored, true)
+        } catch {
+            return (stored, false)
+        }
     }
 
     private static func loadLogs(for runIDs: [String]) -> [String: [HostLogEvent]] {
@@ -2681,11 +3580,15 @@ actor HostState {
         for runID in runIDs {
             let url = logsFolder.appendingPathComponent("\(runID).jsonl")
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            loaded[runID] = text
+            var events = text
                 .split(whereSeparator: \.isNewline)
                 .compactMap { line in
                     try? JSONDecoder.dates.decode(HostLogEvent.self, from: Data(String(line).utf8))
                 }
+            for index in events.indices where events[index].eventID?.isEmpty != false {
+                events[index].eventID = "legacy-\(runID)-\(index)"
+            }
+            loaded[runID] = events
         }
         return loaded
     }
@@ -2800,17 +3703,29 @@ final class HostServer: @unchecked Sendable {
                     deviceName: body.deviceName,
                     code: body.pairingCode,
                     pairingEndpoint: body.pairingEndpoint,
-                    pairingSignature: body.pairingSignature
+                    pairingSignature: body.pairingSignature,
+                    stableClientID: body.clientStableID,
+                    pairingProtocolVersion: body.pairingProtocolVersion,
+                    apiProtocolVersion: body.apiProtocolVersion,
+                    requestAuthVersions: body.requestAuthVersions,
+                    capabilities: body.capabilities,
+                    pairingEndpoints: body.pairingEndpoints,
+                    pairingProof: body.pairingProof,
+                    selectedEndpoint: body.selectedEndpoint
                 )
-                sendJSON(PairResponse(deviceID: result.deviceID, token: result.token), connection: connection)
+                sendJSON(PairResponse(deviceID: result.deviceID, token: result.token, apiProtocolVersion: 2, minimumAuthVersion: body.pairingProtocolVersion == 2 ? 2 : 1), connection: connection)
                 return
             }
 
             if request.path == "/v1/pairing", request.method == "GET" {
+                guard VeqralPairingAccessPolicy.canReadStatus(isLoopback: isLoopback(connection.endpoint)) else {
+                    throw HostError.unauthorized("Pairing status is only available on this Mac")
+                }
                 let url = await state.pairingURL()
                 let code = await state.currentPairingCode()
                 let endpoints = await state.pairingEndpoints()
-                sendJSON(PairingStatus(pairingCode: code, pairingURL: url, pairingEndpoints: endpoints), connection: connection)
+                let simulatorURL = await state.simulatorPairingURL()
+                sendJSON(PairingStatus(pairingCode: code, pairingURL: url, pairingEndpoints: endpoints, simulatorPairingURL: simulatorURL), connection: connection)
                 return
             }
 
@@ -3153,7 +4068,7 @@ final class HostServer: @unchecked Sendable {
             }
 
             if request.path == "/v1/runs", request.method == "GET" {
-                sendJSON(RunListResponse(runs: await state.runsList()), connection: connection)
+                sendJSON(try await state.forgeRunListResponse(), connection: connection)
                 return
             }
 
@@ -3165,6 +4080,7 @@ final class HostServer: @unchecked Sendable {
                     engine: body.engine ?? .hermes,
                     resumeSessionID: body.resumeSessionID,
                     projectID: body.projectID,
+                    taskID: body.taskID,
                     chatID: body.chatID,
                     provider: body.provider,
                     model: body.model,
@@ -3198,7 +4114,8 @@ final class HostServer: @unchecked Sendable {
                             run: run,
                             logs: await state.replayLogs(runID: runID),
                             diff: GitDiffInspector.entries(workingDirectory: run.workingDirectory),
-                            artifacts: ArtifactScanner.artifacts(for: run)
+                            artifacts: ArtifactScanner.artifacts(for: run),
+                            handoffs: try await state.handoffs(runID: runID)
                         ),
                         connection: connection
                     )
@@ -3221,18 +4138,26 @@ final class HostServer: @unchecked Sendable {
                     let response = try ArtifactScanner.content(run: run, artifactID: body.artifactID)
                     sendJSON(response, connection: connection)
                 case ("POST", "cancel"):
-                    await state.cancel(runID: runID)
+                    let body = try decodeRunControlRequest(request.body)
+                    try await state.cancel(runID: runID, expectedTaskID: body.expectedTaskID)
                     sendJSON(SimpleResponse(ok: true), connection: connection)
                 case ("POST", "resume"):
-                    _ = try await state.resume(runID: runID)
+                    let body = try decodeRunControlRequest(request.body)
+                    _ = try await state.resume(runID: runID, expectedTaskID: body.expectedTaskID)
                     sendJSON(SimpleResponse(ok: true), connection: connection)
                     Task { await runner.start(runID: runID) }
                 case ("POST", "approve"):
-                    _ = try await state.approve(runID: runID)
+                    let body = try decodeRunControlRequest(request.body)
+                    _ = try await state.approve(runID: runID, expectedTaskID: body.expectedTaskID, approvedByDeviceID: authenticatedDeviceID)
                     sendJSON(SimpleResponse(ok: true), connection: connection)
                     Task { await runner.start(runID: runID) }
+                case ("POST", "input"):
+                    let body = try JSONDecoder.dates.decode(RunInputRequest.self, from: request.body)
+                    _ = try await state.submitInput(runID: runID, expectedTaskID: body.expectedTaskID, text: body.text, submit: body.submit ?? true)
+                    sendJSON(SimpleResponse(ok: true), connection: connection)
                 case ("POST", "reject"):
-                    await state.cancel(runID: runID)
+                    let body = try decodeRunControlRequest(request.body)
+                    try await state.reject(runID: runID, expectedTaskID: body.expectedTaskID, rejectedByDeviceID: authenticatedDeviceID)
                     sendJSON(SimpleResponse(ok: true), connection: connection)
                 default:
                     throw HostError.notFound("Unknown run action")
@@ -3246,6 +4171,11 @@ final class HostServer: @unchecked Sendable {
         }
     }
 
+    private func decodeRunControlRequest(_ data: Data) throws -> RunControlRequest {
+        guard !data.isEmpty else { return RunControlRequest(expectedTaskID: nil) }
+        return try JSONDecoder.dates.decode(RunControlRequest.self, from: data)
+    }
+
     private func authenticate(_ request: HTTPRequest) async throws -> String {
         guard let device = request.headers["x-veqral-device"],
               let timestamp = request.headers["x-veqral-timestamp"],
@@ -3257,7 +4187,9 @@ final class HostServer: @unchecked Sendable {
             method: request.method,
             path: request.path,
             timestamp: timestamp,
+            nonce: request.headers["x-veqral-nonce"],
             signature: signature,
+            authVersion: request.headers["x-veqral-auth-version"],
             body: request.body
         )
         return device
@@ -3401,6 +4333,34 @@ struct CLIExecutionPlan: Sendable {
     var executable: String
     var arguments: [String]
     var toolStatus: CLIToolStatus
+}
+
+enum GitWorkspacePolicy {
+    static func validationError(path: String) -> String? {
+        guard let cleanPath = path.nilIfBlank else {
+            return "This session has no recorded Git workspace."
+        }
+        let expanded = cleanPath.expandingTilde
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return "The recorded workspace no longer exists."
+        }
+        let output = ProcessRunner.run(
+            "/usr/bin/git",
+            ["-C", expanded, "rev-parse", "--is-inside-work-tree", "--is-bare-repository", "--verify", "HEAD"],
+            timeout: 3
+        )
+        let lines = output.stdout.split(whereSeparator: \.isNewline).map(String.init)
+        guard output.exitCode == 0, lines.count >= 3, lines[0] == "true", lines[1] == "false", !lines[2].isEmpty else {
+            return "The recorded workspace is not a non-bare Git checkout with a valid HEAD."
+        }
+        return nil
+    }
+
+    static func sameWorkspace(_ lhs: String, _ rhs: String) -> Bool {
+        URL(fileURLWithPath: lhs.expandingTilde).standardizedFileURL.resolvingSymlinksInPath().path
+            == URL(fileURLWithPath: rhs.expandingTilde).standardizedFileURL.resolvingSymlinksInPath().path
+    }
 }
 
 enum CLIAdapterRegistry {
@@ -3731,7 +4691,7 @@ final class AgentRunner {
     }
 
     func start(runID: String) async {
-        guard let run = await state.run(runID: runID) else { return }
+        guard let run = await state.claimStartableRun(runID: runID) else { return }
         guard let plan = CLIAdapterRegistry.plan(for: run) else {
             let status = CLIAdapterRegistry.status(for: run.engineOrDefault)
             await state.appendLog(runID: runID, stream: "error", message: status.compatibilityNote)
@@ -3821,7 +4781,7 @@ enum PTYProcess {
             await state.finish(runID: runID, exitCode: 127)
             return
         }
-        await state.markStarted(runID: runID, pid: pid)
+        await state.markStarted(runID: runID, pid: pid, ptyMaster: master)
         setNonBlocking(master)
 
         var waitStatus: Int32 = 0
@@ -4646,13 +5606,28 @@ enum ArtifactScanner {
             artifacts.append(HostArtifact(
                 id: url.path,
                 title: url.lastPathComponent,
-                type: url.pathExtension.lowercased(),
+                type: artifactType(for: url),
                 path: url.path,
                 bytes: values?.fileSize ?? 0,
                 updatedAt: values?.contentModificationDate
             ))
         }
         return artifacts.sorted { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }.prefix(50).map { $0 }
+    }
+
+    private static func artifactType(for url: URL) -> String {
+        if isExplicitHandoff(url) {
+            return "handoff"
+        }
+        return url.pathExtension.lowercased()
+    }
+
+    static func isExplicitHandoff(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        return ["handoff.md", "handoff.json", "handoff.txt"].contains(name)
+            || name.hasSuffix(".handoff.md")
+            || name.hasSuffix(".handoff.json")
+            || name.hasSuffix(".handoff.txt")
     }
 
     static func content(run: HostRun, artifactID: String) throws -> ArtifactContentResponse {
@@ -4682,6 +5657,69 @@ enum ArtifactScanner {
         default:
             "application/octet-stream"
         }
+    }
+}
+
+enum HandoffScanner {
+    static func handoffs(for run: HostRun) throws -> [HostHandoff] {
+        let root = URL(fileURLWithPath: run.workingDirectory.expandingTilde, isDirectory: true)
+            .standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw HostError.serviceUnavailable("Handoff source is unavailable")
+        }
+
+        var scanError: Error?
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants],
+            errorHandler: { _, error in
+                scanError = error
+                return false
+            }
+        ) else {
+            throw HostError.serviceUnavailable("Handoff source could not be scanned")
+        }
+
+        var records: [HostHandoff] = []
+        for case let url as URL in enumerator {
+            guard ArtifactScanner.isExplicitHandoff(url) else { continue }
+            do {
+                let values = try url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey])
+                guard values.isRegularFile == true,
+                      let updatedAt = values.contentModificationDate,
+                      updatedAt >= run.startedAt else {
+                    continue
+                }
+                records.append(HostHandoff(
+                    id: "handoff:\(run.id):\(url.path)",
+                    taskID: run.forgeTaskID,
+                    runID: run.id,
+                    sourceWorkstreamID: run.engineOrDefault.rawValue,
+                    targetWorkstreamID: nil,
+                    artifactIDs: [url.path],
+                    summary: url.lastPathComponent,
+                    state: "readyForReview",
+                    createdAt: updatedAt,
+                    reviewedAt: nil
+                ))
+            } catch {
+                scanError = error
+                break
+            }
+        }
+        if scanError != nil {
+            throw HostError.serviceUnavailable("Handoff source could not be scanned")
+        }
+        return records
+            .sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                return $0.id < $1.id
+            }
+            .prefix(50)
+            .map { $0 }
     }
 }
 
@@ -6861,11 +7899,14 @@ struct MemoryWriteResponse: Codable {
 }
 
 enum HistoryTool: String, Codable, CaseIterable {
+    case hermes
     case claude
     case codex
 
     var title: String {
         switch self {
+        case .hermes:
+            "Hermes"
         case .claude:
             "Claude"
         case .codex:
@@ -6901,6 +7942,10 @@ struct HistorySessionSummary: Codable, Identifiable {
     var summary: String
     var filePath: String
     var bytes: Int
+    var provider: String? = nil
+    var billingMode: String? = nil
+    var canContinue: Bool? = nil
+    var continueBlockedReason: String? = nil
 }
 
 struct HistorySessionListResponse: Codable {
@@ -6926,6 +7971,8 @@ struct HistorySessionDetailResponse: Codable {
     var session: HistorySessionSummary
     var turns: [HistoryTurn]
     var truncated: Bool
+    var returnedBytes: Int? = nil
+    var truncationReason: String? = nil
 }
 
 struct HermesMemoryStore {
@@ -7225,8 +8272,11 @@ struct HermesMemoryStore {
 }
 
 struct HermesUsageStore {
-    private let stateDBURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".hermes/state.db")
+    private var stateDBURL: URL {
+        let hermesHome = ProcessInfo.processInfo.environment["HERMES_HOME"]?.nilIfBlank?.expandingTilde
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hermes", isDirectory: true).path
+        return URL(fileURLWithPath: hermesHome, isDirectory: true).appendingPathComponent("state.db")
+    }
 
     func usage(sessionID: String) -> RunUsage? {
         let cleanSessionID = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -7319,7 +8369,7 @@ struct AgentHistoryStore {
         let limit = min(max(1, request.limit ?? 50), 100)
         let query = request.query?.trimmingCharacters(in: .whitespacesAndNewlines)
         let warnings = historyWarnings(for: request.tool)
-        var sessions = try allSessions(tool: request.tool)
+        var sessions = try allSessions(tool: request.tool, request: request)
 
         if let project = request.project, !project.isEmpty {
             sessions = sessions.filter { $0.project == project || $0.projectPath == project }
@@ -7335,8 +8385,9 @@ struct AgentHistoryStore {
         if let query, !query.isEmpty {
             let folded = query.lowercased()
             sessions = sessions.filter { session in
-                let visible = "\(session.tool.rawValue) \(session.project) \(session.projectPath) \(session.summary) \(session.model ?? "")".lowercased()
-                return visible.contains(folded) || fileContains(session.filePath, query: folded)
+                let visible = Redactor.redact("\(session.tool.rawValue) \(session.project) \(session.projectPath) \(session.summary) \(session.model ?? "")").lowercased()
+                if visible.contains(folded) { return true }
+                return sessionContains(session, query: folded)
             }
         }
 
@@ -7361,6 +8412,9 @@ struct AgentHistoryStore {
     }
 
     func detail(_ request: HistorySessionDetailRequest) throws -> HistorySessionDetailResponse {
+        if request.tool == .hermes {
+            return try hermesDetail(sessionID: request.id)
+        }
         guard let sessionFile = sessionFile(id: request.id, tool: request.tool),
               let session = summarize(url: sessionFile.url, tool: request.tool, fallbackProject: sessionFile.fallbackProject) else {
             throw HostError.notFound("History session not found")
@@ -7391,19 +8445,23 @@ struct AgentHistoryStore {
         return HistorySessionDetailResponse(session: session, turns: turns, truncated: truncated)
     }
 
-    private func allSessions(tool: HistoryTool?) throws -> [HistorySessionSummary] {
+    private func allSessions(tool: HistoryTool?, request: HistorySessionListRequest) throws -> [HistorySessionSummary] {
         switch tool {
+        case .hermes:
+            return hermesSessions(request: request)
         case .claude:
             return claudeSessions()
         case .codex:
             return codexSessions()
         case nil:
-            return claudeSessions() + codexSessions()
+            return hermesSessions(request: request) + claudeSessions() + codexSessions()
         }
     }
 
     private func sessionFile(id: String, tool: HistoryTool) -> (url: URL, fallbackProject: String)? {
         switch tool {
+        case .hermes:
+            return nil
         case .claude:
             for root in claudeProjectRoots() {
                 for url in jsonlFiles(under: root, limit: listMaxFiles) where Self.identifier(for: url) == id {
@@ -7418,6 +8476,308 @@ struct AgentHistoryStore {
             }
         }
         return nil
+    }
+
+    private func hermesSessions(request: HistorySessionListRequest) -> [HistorySessionSummary] {
+        guard fileManager.fileExists(atPath: hermesStateDBURL.path) else { return [] }
+        var clauses: [String] = []
+        if let dateText = request.date?.nilIfBlank,
+           let start = Self.dayFormatter.date(from: dateText) {
+            let end = Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86_400)
+            clauses.append("COALESCE(started_at, ended_at) >= \(start.timeIntervalSince1970) AND COALESCE(started_at, ended_at) < \(end.timeIntervalSince1970)")
+        }
+        let whereSQL = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
+        let query = """
+        SELECT
+          id,
+          source,
+          model,
+          billing_provider,
+          billing_mode,
+          title,
+          cwd,
+          git_repo_root,
+          started_at,
+          ended_at,
+          message_count,
+          tool_call_count
+        FROM sessions
+        \(whereSQL)
+        ORDER BY COALESCE(ended_at, started_at) DESC;
+        """
+        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", "-json", hermesStateDBURL.path, query], timeout: 10)
+        guard output.exitCode == 0,
+              let data = output.stdout.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([HermesHistorySessionRow].self, from: data) else {
+            return []
+        }
+        var workspaceResults: [String: String] = [:]
+        return rows.map { row in
+            let projectPath = row.gitRepoRoot?.nilIfBlank ?? row.cwd?.nilIfBlank ?? ""
+            let marker: String
+            if let cached = workspaceResults[projectPath] {
+                marker = cached
+            } else {
+                marker = GitWorkspacePolicy.validationError(path: projectPath) ?? ""
+                workspaceResults[projectPath] = marker
+            }
+            return hermesSummary(row, workspaceError: marker.nilIfBlank)
+        }
+    }
+
+    private func hermesDetail(sessionID: String) throws -> HistorySessionDetailResponse {
+        guard fileManager.fileExists(atPath: hermesStateDBURL.path) else {
+            throw HostError.notFound("Hermes state database not found")
+        }
+        guard let session = hermesSession(id: sessionID) else {
+            throw HostError.notFound("Hermes session not found")
+        }
+        let query = """
+        WITH source AS (
+          SELECT
+            id,
+            role,
+            COALESCE(NULLIF(content, ''), NULLIF(reasoning_content, ''), reasoning) AS primary_text,
+            tool_name,
+            timestamp,
+            COUNT(*) OVER () AS total_rows
+          FROM messages
+          WHERE session_id = \(Self.sqliteLiteral(sessionID))
+            AND active = 1
+        ), safe_content AS (
+          SELECT
+            id,
+            role,
+            CASE
+              WHEN COALESCE(length(CAST(primary_text AS BLOB)), 0) <= CASE WHEN role = 'tool' THEN 8000 ELSE 14000 END
+              THEN primary_text
+              ELSE NULL
+            END AS content,
+            tool_name,
+            timestamp,
+            total_rows,
+            COALESCE(length(CAST(primary_text AS BLOB)), 0) AS source_bytes
+          FROM source
+        ), budgeted AS (
+          SELECT
+            *,
+            COALESCE(length(CAST(content AS BLOB)), 0) AS content_bytes,
+            SUM(COALESCE(length(CAST(content AS BLOB)), 0)) OVER (ORDER BY id) AS cumulative_bytes
+          FROM safe_content
+        )
+        SELECT id, role, content, tool_name, timestamp, total_rows, source_bytes, content_bytes, cumulative_bytes
+        FROM budgeted
+        WHERE cumulative_bytes - content_bytes < \(detailScanBytes)
+        ORDER BY id ASC
+        LIMIT \(detailScanLines + 1);
+        """
+        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", "-json", hermesStateDBURL.path, query], timeout: 10)
+        guard output.exitCode == 0,
+              let data = output.stdout.data(using: .utf8),
+              data.count <= detailScanBytes * 2,
+              let rows = try? JSONDecoder().decode([HermesHistoryMessageRow].self, from: data) else {
+            throw HostError.badRequest("Hermes messages exceeded the safe decode envelope or could not be read")
+        }
+
+        var turns: [HistoryTurn] = []
+        var returnedBytes = 0
+        var reasons: [String] = []
+        let totalRows = rows.first?.totalRows ?? 0
+        if totalRows > detailScanLines || rows.count > detailScanLines {
+            reasons.append("line-limit")
+        }
+        if rows.contains(where: { ($0.sourceBytes ?? 0) > ($0.contentBytes ?? 0) }) {
+            reasons.append("per-turn-limit")
+        }
+        if rows.count < totalRows {
+            reasons.append("byte-limit")
+        }
+
+        for row in rows.prefix(detailScanLines) {
+            guard var turn = hermesTurn(row) else { continue }
+            let encodedCount = turn.text.lengthOfBytes(using: .utf8)
+            let remaining = detailScanBytes - returnedBytes
+            guard remaining > 0 else {
+                if !reasons.contains("byte-limit") { reasons.append("byte-limit") }
+                break
+            }
+            if encodedCount > remaining {
+                turn.text = Self.utf8Prefix(turn.text, maxBytes: remaining)
+                if !turn.text.isEmpty {
+                    returnedBytes += turn.text.lengthOfBytes(using: .utf8)
+                    turns.append(turn)
+                }
+                if !reasons.contains("byte-limit") { reasons.append("byte-limit") }
+                break
+            }
+            returnedBytes += encodedCount
+            turns.append(turn)
+        }
+        return HistorySessionDetailResponse(
+            session: session,
+            turns: turns,
+            truncated: !reasons.isEmpty,
+            returnedBytes: returnedBytes,
+            truncationReason: reasons.isEmpty ? nil : reasons.joined(separator: ",")
+        )
+    }
+
+    private func hermesSession(id: String) -> HistorySessionSummary? {
+        let query = """
+        SELECT
+          id,
+          source,
+          model,
+          billing_provider,
+          billing_mode,
+          title,
+          cwd,
+          git_repo_root,
+          started_at,
+          ended_at,
+          message_count,
+          tool_call_count
+        FROM sessions
+        WHERE id = \(Self.sqliteLiteral(id))
+        LIMIT 1;
+        """
+        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", "-json", hermesStateDBURL.path, query], timeout: 10)
+        guard output.exitCode == 0,
+              let data = output.stdout.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([HermesHistorySessionRow].self, from: data),
+              let row = rows.first else {
+            return nil
+        }
+        let projectPath = row.gitRepoRoot?.nilIfBlank ?? row.cwd?.nilIfBlank ?? ""
+        return hermesSummary(row, workspaceError: GitWorkspacePolicy.validationError(path: projectPath))
+    }
+
+    private func hermesSummary(_ row: HermesHistorySessionRow, workspaceError: String?) -> HistorySessionSummary {
+        let projectPath = row.gitRepoRoot?.nilIfBlank ?? row.cwd?.nilIfBlank ?? ""
+        let title = row.title?.nilIfBlank ?? "Hermes session \(row.id)"
+        let provider = row.billingProvider?.nilIfBlank
+        let billingMode = row.billingMode?.nilIfBlank
+        let routeError: String? = if provider == nil {
+            "Original Hermes provider is unavailable."
+        } else if provider == "custom" {
+            "The original custom provider route is ambiguous."
+        } else if billingMode == nil {
+            "Original Hermes billing route is unavailable."
+        } else if !Self.isNonMeteredBilling(provider: provider, mode: billingMode) {
+            "This session may use a metered provider and requires an explicit billing confirmation."
+        } else {
+            nil
+        }
+        let blockedReason = workspaceError ?? routeError
+        return HistorySessionSummary(
+            id: row.id,
+            tool: .hermes,
+            resumeID: row.id,
+            project: projectName(from: projectPath, fallback: row.source?.nilIfBlank ?? "Hermes"),
+            projectPath: projectPath,
+            startedAt: row.startedAt.map(Date.init(timeIntervalSince1970:)),
+            updatedAt: (row.endedAt ?? row.startedAt).map(Date.init(timeIntervalSince1970:)),
+            messageCount: row.messageCount ?? 0,
+            model: row.model?.nilIfBlank,
+            summary: clipped(Redactor.redact(title), limit: 240),
+            filePath: "\(hermesStateDBURL.path)#\(row.id)",
+            bytes: 0,
+            provider: provider,
+            billingMode: billingMode,
+            canContinue: blockedReason == nil,
+            continueBlockedReason: blockedReason
+        )
+    }
+
+    func hermesContinuationSession(id: String) -> HistorySessionSummary? {
+        hermesSession(id: id)
+    }
+
+    private static func isNonMeteredBilling(provider: String?, mode: String?) -> Bool {
+        let value = "\(provider ?? "") \(mode ?? "")".lowercased()
+        return value.contains("subscription") || value.contains("included") || value.contains("local") || value.contains("ollama")
+    }
+
+    private func hermesTurn(_ row: HermesHistoryMessageRow) -> HistoryTurn? {
+        let primary = row.content?.nilIfBlank ?? row.reasoningContent?.nilIfBlank ?? row.reasoning?.nilIfBlank
+        guard let text = primary?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+        let role = row.role.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank ?? "unknown"
+        let kind = row.toolName?.nilIfBlank.map { "tool:\($0)" } ?? (role == "tool" ? "tool" : "message")
+        return HistoryTurn(
+            id: "hermes-\(row.id)",
+            role: role,
+            kind: kind,
+            timestamp: Date(timeIntervalSince1970: row.timestamp),
+            text: clipped(Redactor.redact(text), limit: role == "tool" ? 8_000 : 14_000),
+            metadata: row.toolName?.nilIfBlank
+        )
+    }
+
+    private var hermesStateDBURL: URL {
+        let hermesHome = ProcessInfo.processInfo.environment["HERMES_HOME"]?.nilIfBlank?.expandingTilde
+            ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".hermes", isDirectory: true).path
+        return URL(fileURLWithPath: hermesHome, isDirectory: true).appendingPathComponent("state.db")
+    }
+
+    private struct HermesHistorySessionRow: Decodable {
+        var id: String
+        var source: String?
+        var model: String?
+        var billingProvider: String?
+        var billingMode: String?
+        var title: String?
+        var cwd: String?
+        var gitRepoRoot: String?
+        var startedAt: Double?
+        var endedAt: Double?
+        var messageCount: Int?
+        var toolCallCount: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case id, source, model, title, cwd
+            case billingProvider = "billing_provider"
+            case billingMode = "billing_mode"
+            case gitRepoRoot = "git_repo_root"
+            case startedAt = "started_at"
+            case endedAt = "ended_at"
+            case messageCount = "message_count"
+            case toolCallCount = "tool_call_count"
+        }
+    }
+
+    private struct HermesHistoryMessageRow: Decodable {
+        var id: Int
+        var role: String
+        var content: String?
+        var toolName: String?
+        var timestamp: Double
+        var reasoning: String?
+        var reasoningContent: String?
+        var totalRows: Int?
+        var sourceBytes: Int?
+        var contentBytes: Int?
+        var cumulativeBytes: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case id, role, content, timestamp, reasoning
+            case toolName = "tool_name"
+            case reasoningContent = "reasoning_content"
+            case totalRows = "total_rows"
+            case sourceBytes = "source_bytes"
+            case contentBytes = "content_bytes"
+            case cumulativeBytes = "cumulative_bytes"
+        }
+    }
+
+    private struct HermesHistorySearchRow: Decodable {
+        var role: String
+        var content: String?
+        var toolName: String?
+
+        enum CodingKeys: String, CodingKey {
+            case role, content
+            case toolName = "tool_name"
+        }
     }
 
     private func claudeSessions() -> [HistorySessionSummary] {
@@ -7439,6 +8799,11 @@ struct AgentHistoryStore {
 
     private func historyWarnings(for tool: HistoryTool?) -> [String] {
         var warnings: [String] = []
+        if tool == nil || tool == .hermes {
+            if !fileManager.fileExists(atPath: hermesStateDBURL.path) {
+                warnings.append("Hermes session database not found. Checked: \(hermesStateDBURL.path)")
+            }
+        }
         if tool == nil || tool == .codex {
             let roots = codexSessionRoots()
             if !roots.contains(where: { fileManager.fileExists(atPath: $0.path) }) {
@@ -7565,13 +8930,16 @@ struct AgentHistoryStore {
             model: model,
             summary: clipped(Redactor.redact(summary), limit: 240),
             filePath: url.path,
-            bytes: values?.fileSize ?? 0
+            bytes: values?.fileSize ?? 0,
+            canContinue: true
         )
     }
 
     private func resumeIdentifier(for url: URL, tool: HistoryTool) -> String {
         let stem = url.deletingPathExtension().lastPathComponent
         switch tool {
+        case .hermes:
+            return stem
         case .claude:
             return stem
         case .codex:
@@ -7587,6 +8955,8 @@ struct AgentHistoryStore {
 
     private func turn(from object: [String: Any], tool: HistoryTool, fallbackID: String) -> HistoryTurn? {
         switch tool {
+        case .hermes:
+            return nil
         case .claude:
             return claudeTurn(from: object, fallbackID: fallbackID)
         case .codex:
@@ -7674,11 +9044,73 @@ struct AgentHistoryStore {
         return "Unrecognized \(tool.title) history record schema"
     }
 
-    private func fileContains(_ path: String, query: String) -> Bool {
-        let url = URL(fileURLWithPath: path)
+    private func sessionContains(_ session: HistorySessionSummary, query: String) -> Bool {
+        switch session.tool {
+        case .hermes:
+            return hermesSessionContains(session.id, query: query)
+        case .claude, .codex:
+            return fileContains(session, query: query)
+        }
+    }
+
+    private func hermesSessionContains(_ sessionID: String, query: String) -> Bool {
+        guard fileManager.fileExists(atPath: hermesStateDBURL.path), !query.isEmpty else { return false }
+        let sql = """
+        WITH source AS (
+          SELECT
+            role,
+            COALESCE(NULLIF(content, ''), NULLIF(reasoning_content, ''), reasoning) AS primary_text,
+            tool_name
+          FROM messages
+          WHERE session_id = \(Self.sqliteLiteral(sessionID))
+            AND active = 1
+        ), safe_content AS (
+          SELECT
+            role,
+            CASE
+              WHEN COALESCE(length(CAST(primary_text AS BLOB)), 0) <= CASE WHEN role = 'tool' THEN 8000 ELSE 14000 END
+              THEN primary_text
+              ELSE NULL
+            END AS content,
+            tool_name
+          FROM source
+        ), budgeted AS (
+          SELECT
+            *,
+            SUM(COALESCE(length(CAST(content AS BLOB)), 0)) OVER (ROWS UNBOUNDED PRECEDING) AS cumulative_bytes
+          FROM safe_content
+        )
+        SELECT role, content, tool_name
+        FROM budgeted
+        WHERE cumulative_bytes <= \(detailScanBytes)
+        LIMIT \(detailScanLines);
+        """
+        let output = ProcessRunner.run("/usr/bin/sqlite3", ["-readonly", "-json", hermesStateDBURL.path, sql], timeout: 10)
+        guard output.exitCode == 0,
+              let data = output.stdout.data(using: .utf8),
+              data.count <= detailScanBytes * 2,
+              let rows = try? JSONDecoder().decode([HermesHistorySearchRow].self, from: data) else {
+            return false
+        }
+        return rows.contains { row in
+            let visible = Redactor.redact("\(row.content ?? "") \(row.toolName ?? "")").lowercased()
+            return visible.contains(query)
+        }
+    }
+
+    private func fileContains(_ session: HistorySessionSummary, query: String) -> Bool {
+        let url = URL(fileURLWithPath: session.filePath)
         var found = false
         try? HistoryLineReader.forEachLine(url: url, maxLines: 5_000, maxBytes: 5_000_000) { line in
-            if line.lowercased().contains(query) {
+            guard !found else { return }
+            let visible: String
+            if let object = HistoryJSON.object(from: line),
+               let turn = turn(from: object, tool: session.tool, fallbackID: "") {
+                visible = turn.text
+            } else {
+                visible = Redactor.redact(line)
+            }
+            if visible.lowercased().contains(query) {
                 found = true
             }
         }
@@ -7715,6 +9147,21 @@ struct AgentHistoryStore {
 
     private static func identifier(for url: URL) -> String {
         SHA256.hash(data: Data(url.path.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func utf8Prefix(_ value: String, maxBytes: Int) -> String {
+        guard maxBytes > 0 else { return "" }
+        let bytes = Array(value.utf8.prefix(maxBytes))
+        for count in stride(from: bytes.count, through: 0, by: -1) {
+            if let text = String(bytes: bytes.prefix(count), encoding: .utf8) {
+                return text
+            }
+        }
+        return ""
+    }
+
+    private static func sqliteLiteral(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "''"))'"
     }
 
     private static let dayFormatter: DateFormatter = {
@@ -8573,6 +10020,7 @@ struct PairingStatus: Codable {
     var pairingCode: String
     var pairingURL: String
     var pairingEndpoints: [String]
+    var simulatorPairingURL: String?
 }
 
 struct PairRequest: Codable {
@@ -8580,11 +10028,21 @@ struct PairRequest: Codable {
     var pairingCode: String
     var pairingEndpoint: String?
     var pairingSignature: String?
+    var clientStableID: String?
+    var pairingProtocolVersion: Int?
+    var apiProtocolVersion: Int?
+    var requestAuthVersions: [Int]?
+    var capabilities: [String]?
+    var pairingEndpoints: [String]?
+    var pairingProof: String?
+    var selectedEndpoint: String?
 }
 
 struct PairResponse: Codable {
     var deviceID: String
     var token: String
+    var apiProtocolVersion: Int?
+    var minimumAuthVersion: Int?
 }
 
 struct PushTokenRequest: Codable {
@@ -8604,6 +10062,7 @@ struct CreateRunRequest: Codable {
     var engine: AgentEngine?
     var resumeSessionID: String?
     var projectID: String?
+    var taskID: String?
     var chatID: String?
     var provider: String?
     var model: String?
@@ -8641,8 +10100,19 @@ struct CreateRunResponse: Codable {
     var approvalSeverity: String?
 }
 
+struct RunControlRequest: Codable {
+    var expectedTaskID: String?
+}
+
+struct RunInputRequest: Codable {
+    var expectedTaskID: String?
+    var text: String
+    var submit: Bool?
+}
+
 struct RunListResponse: Codable {
     var runs: [HostRun]
+    var handoffs: [HostHandoff]
 }
 
 struct RunLogResponse: Codable {
@@ -8654,6 +10124,7 @@ struct RunSnapshotResponse: Codable {
     var logs: [HostLogEvent]
     var diff: [GitDiffEntry]
     var artifacts: [HostArtifact]
+    var handoffs: [HostHandoff]
 }
 
 struct DeviceListRecord: Codable {
@@ -8661,6 +10132,7 @@ struct DeviceListRecord: Codable {
     var name: String
     var pairedAt: Date
     var lastSeenAt: Date?
+    var stableClientID: String?
     var pushEnvironment: String?
     var pushBundleID: String?
     var pushLocale: String?
@@ -8671,6 +10143,7 @@ struct DeviceListRecord: Codable {
         self.name = device.name
         self.pairedAt = device.pairedAt
         self.lastSeenAt = device.lastSeenAt
+        self.stableClientID = device.stableClientID
         self.pushEnvironment = device.pushEnvironment
         self.pushBundleID = device.pushBundleID
         self.pushLocale = device.pushLocale
@@ -8704,6 +10177,19 @@ struct HostArtifact: Codable, Identifiable {
     var path: String
     var bytes: Int
     var updatedAt: Date?
+}
+
+struct HostHandoff: Codable, Identifiable, Equatable {
+    var id: String
+    var taskID: String
+    var runID: String
+    var sourceWorkstreamID: String
+    var targetWorkstreamID: String?
+    var artifactIDs: [String]
+    var summary: String
+    var state: String
+    var createdAt: Date
+    var reviewedAt: Date?
 }
 
 struct ArtifactListResponse: Codable {
@@ -8762,11 +10248,13 @@ enum HostError: Error, CustomStringConvertible {
     case unauthorized(String)
     case notFound(String)
     case approvalRequired(String)
+    case unsupportedProtocol(String)
+    case serviceUnavailable(String)
     case disabled(String)
 
     var description: String {
         switch self {
-        case .badRequest(let message), .unauthorized(let message), .notFound(let message), .approvalRequired(let message), .disabled(let message):
+        case .badRequest(let message), .unauthorized(let message), .notFound(let message), .approvalRequired(let message), .unsupportedProtocol(let message), .serviceUnavailable(let message), .disabled(let message):
             return message
         }
     }
@@ -8777,6 +10265,8 @@ enum HostError: Error, CustomStringConvertible {
         case .unauthorized: "401 Unauthorized"
         case .notFound: "404 Not Found"
         case .approvalRequired: "409 Conflict"
+        case .unsupportedProtocol: "426 Upgrade Required"
+        case .serviceUnavailable: "503 Service Unavailable"
         case .disabled: "501 Disabled"
         }
     }
@@ -9031,9 +10521,47 @@ enum RunUsageParser {
 }
 
 enum HMACSigner {
-    static func signature(token: String, method: String, path: String, timestamp: String, body: Data) -> String {
+    static func signature(token: String, method: String, path: String, timestamp: String, nonce: String? = nil, body: Data) -> String {
         let bodyHash = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
-        let canonical = "\(method)\n\(path)\n\(timestamp)\n\(bodyHash)"
+        let canonical: String
+        if let nonce = nonce?.nilIfBlank {
+            canonical = "\(method)\n\(path)\n\(timestamp)\n\(nonce)\n\(bodyHash)"
+        } else {
+            canonical = "\(method)\n\(path)\n\(timestamp)\n\(bodyHash)"
+        }
+        return sign(token: token, canonical: canonical)
+    }
+
+    static func requestSignature(
+        token: String,
+        deviceID: String,
+        authVersion: Int,
+        method: String,
+        path: String,
+        timestamp: String,
+        nonce: String?,
+        body: Data
+    ) -> String {
+        let bodyHash = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+        let canonical: String
+        if authVersion == 2 {
+            canonical = [
+                "VEQRAL-REQUEST-AUTH",
+                "2",
+                deviceID,
+                method.uppercased(),
+                path,
+                timestamp,
+                nonce?.nilIfBlank ?? "",
+                bodyHash
+            ].joined(separator: "\n")
+        } else {
+            canonical = "\(method)\n\(path)\n\(timestamp)\n\(bodyHash)"
+        }
+        return sign(token: token, canonical: canonical)
+    }
+
+    private static func sign(token: String, canonical: String) -> String {
         let key = SymmetricKey(data: Data(token.utf8))
         let signature = HMAC<SHA256>.authenticationCode(for: Data(canonical.utf8), using: key)
         return Data(signature).base64EncodedString()
@@ -9041,7 +10569,58 @@ enum HMACSigner {
 }
 
 enum KeychainStore {
+    private enum Backend {
+        case systemKeychain
+        case isolatedFile(VeqralIsolatedFileSecretStore)
+        case invalid(String)
+    }
+
+    private static let backend: Backend = {
+        let environment = ProcessInfo.processInfo.environment
+        switch VeqralSecretStoreIsolationPolicy.resolve(
+            environment: environment,
+            temporaryRoots: VeqralSecretStoreIsolationPolicy.systemTemporaryRoots()
+        ) {
+        case .systemKeychain:
+            #if DEBUG
+            guard environment["VEQRAL_ALLOW_SYSTEM_KEYCHAIN"] == "1" else {
+                return .invalid(
+                    "Debug Host refuses the user login Keychain. Use VEQRAL_TEST_MODE=1 with a temporary file store; " +
+                    "VEQRAL_ALLOW_SYSTEM_KEYCHAIN=1 is reserved for a disposable macOS user or VM."
+                )
+            }
+            #endif
+            return .systemKeychain
+        case .isolatedFile(let url):
+            do {
+                return .isolatedFile(try VeqralIsolatedFileSecretStore(url: url))
+            } catch {
+                return .invalid("Could not initialize isolated secret store: \(error)")
+            }
+        case .invalid(let message):
+            return .invalid(message)
+        }
+    }()
+
+    static var configurationError: String? {
+        if case .invalid(let message) = backend { return message }
+        return nil
+    }
+
     static func set(_ value: String, account: String) throws {
+        switch backend {
+        case .isolatedFile(let store):
+            do {
+                try store.set(value, account: account)
+                return
+            } catch {
+                throw HostError.serviceUnavailable("Isolated secret-store write failed: \(error)")
+            }
+        case .invalid(let message):
+            throw HostError.serviceUnavailable(message)
+        case .systemKeychain:
+            break
+        }
         delete(account: account)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -9056,12 +10635,25 @@ enum KeychainStore {
     }
 
     static func get(account: String) -> String? {
+        switch backend {
+        case .isolatedFile(let store):
+            return try? store.get(account: account)
+        case .invalid:
+            return nil
+        case .systemKeychain:
+            break
+        }
+        let context = LAContext()
+        context.interactionNotAllowed = true
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            // A background LaunchAgent cannot answer a Keychain ACL prompt. Fail
+            // closed instead of blocking the HostState actor indefinitely.
+            kSecUseAuthenticationContext as String: context
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -9073,10 +10665,22 @@ enum KeychainStore {
     }
 
     static func delete(account: String) {
+        switch backend {
+        case .isolatedFile(let store):
+            try? store.delete(account: account)
+            return
+        case .invalid:
+            return
+        case .systemKeychain:
+            break
+        }
+        let context = LAContext()
+        context.interactionNotAllowed = true
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
-            kSecAttrAccount as String: account
+            kSecAttrAccount as String: account,
+            kSecUseAuthenticationContext as String: context
         ]
         SecItemDelete(query as CFDictionary)
     }
@@ -9120,6 +10724,39 @@ private func tailscaleIP() -> String? {
 
 private func localHostName() -> String {
     ProcessInfo.processInfo.hostName
+}
+
+private func interfaceIPv4Addresses() -> [String] {
+    var first: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&first) == 0, let first else { return [] }
+    defer { freeifaddrs(first) }
+
+    var addresses: [String] = []
+    var cursor: UnsafeMutablePointer<ifaddrs>? = first
+    while let current = cursor {
+        defer { cursor = current.pointee.ifa_next }
+        guard let address = current.pointee.ifa_addr,
+              address.pointee.sa_family == UInt8(AF_INET) else { continue }
+        let flags = Int32(current.pointee.ifa_flags)
+        guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0 else { continue }
+
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let result = getnameinfo(
+            address,
+            socklen_t(address.pointee.sa_len),
+            &host,
+            socklen_t(host.count),
+            nil,
+            0,
+            NI_NUMERICHOST
+        )
+        if result == 0 {
+            let end = host.firstIndex(of: 0) ?? host.endIndex
+            let bytes = host[..<end].map { UInt8(bitPattern: $0) }
+            addresses.append(String(decoding: bytes, as: UTF8.self))
+        }
+    }
+    return addresses
 }
 
 private func shellQuoted(_ value: String) -> String {

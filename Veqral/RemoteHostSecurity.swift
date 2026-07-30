@@ -3,9 +3,17 @@ import CryptoKit
 import Security
 
 enum RemoteHostSigner {
-    static func signature(token: String, method: String, path: String, timestamp: String, body: Data) -> String {
+    static func signature(token: String, deviceID: String, authVersion: Int, method: String, path: String, timestamp: String, nonce: String? = nil, body: Data) -> String {
         let bodyHash = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
-        let canonical = "\(method)\n\(path)\n\(timestamp)\n\(bodyHash)"
+        let canonical: String
+        if authVersion == 2 {
+            canonical = [
+                "VEQRAL-REQUEST-AUTH", "2", deviceID, method.uppercased(), path,
+                timestamp, nonce?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "", bodyHash
+            ].joined(separator: "\n")
+        } else {
+            canonical = "\(method)\n\(path)\n\(timestamp)\n\(bodyHash)"
+        }
         let key = SymmetricKey(data: Data(token.utf8))
         let signature = HMAC<SHA256>.authenticationCode(for: Data(canonical.utf8), using: key)
         return Data(signature).base64EncodedString()

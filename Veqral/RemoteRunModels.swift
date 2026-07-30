@@ -16,6 +16,12 @@ struct RemoteRunAttachment: Codable, Sendable {
     var data: Data
 }
 
+struct RemoteRunApprovalProvenance: Codable, Equatable, Sendable {
+    var state: String
+    var grantedAt: Date?
+    var grantedByDeviceID: String?
+}
+
 struct RemoteRunRecord: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var prompt: String
@@ -35,10 +41,28 @@ struct RemoteRunRecord: Codable, Identifiable, Equatable, Sendable {
     var provider: String?
     var model: String?
     var usage: CommandRunUsage?
+    var interaction: CommandInteractionPrompt? = nil
+    var statusUpdatedAt: Date? = nil
+    var taskID: String? = nil
+    var approvalProvenance: RemoteRunApprovalProvenance? = nil
+}
+
+struct RemoteHandoffRecord: Codable, Identifiable, Equatable, Sendable {
+    var id: String
+    var taskID: String
+    var runID: String
+    var sourceWorkstreamID: String
+    var targetWorkstreamID: String?
+    var artifactIDs: [String]
+    var summary: String
+    var state: ForgeHandoffState
+    var createdAt: Date
+    var reviewedAt: Date?
 }
 
 struct RemoteRunListResponse: Codable, Sendable {
     var runs: [RemoteRunRecord]
+    var handoffs: [RemoteHandoffRecord]
 }
 
 struct RemoteRunLogResponse: Codable, Sendable {
@@ -50,4 +74,5 @@ struct RemoteRunSnapshotResponse: Codable, Sendable {
     var logs: [RemoteHostLogEvent]
     var diff: [RemoteGitDiffEntry]
     var artifacts: [RemoteArtifactRecord]
+    var handoffs: [RemoteHandoffRecord]
 }

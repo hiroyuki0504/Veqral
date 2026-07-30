@@ -11,66 +11,42 @@ enum VeqralPushAction {
 
 enum VeqralFeatureFlags {
     static let pushNotificationsEnabled = false
-
-    static var pushUnavailableMessage: String {
-        L10n.tr("Push requires paid Apple Developer Program.")
-    }
 }
 
 @MainActor
 final class VeqralPushNotificationCenter: NSObject, UNUserNotificationCenterDelegate {
     static let shared = VeqralPushNotificationCenter()
 
-    private weak var store: CommandCenterStore?
+    private weak var store: ForgeStore?
     private var cachedToken: (token: String, environment: String)?
 
-    func attach(store: CommandCenterStore) {
+    func attach(store: ForgeStore) {
         self.store = store
-        guard VeqralFeatureFlags.pushNotificationsEnabled else {
-            store.pushNotificationMessage = VeqralFeatureFlags.pushUnavailableMessage
-            return
-        }
+        guard VeqralFeatureFlags.pushNotificationsEnabled else { return }
         if let cachedToken {
-            store.receiveRemoteNotificationToken(cachedToken.token, environment: cachedToken.environment)
+            sendToken(cachedToken.token, environment: cachedToken.environment)
         }
     }
 
     func register() {
-        guard VeqralFeatureFlags.pushNotificationsEnabled else {
-            store?.pushNotificationMessage = VeqralFeatureFlags.pushUnavailableMessage
-            return
-        }
+        guard VeqralFeatureFlags.pushNotificationsEnabled else { return }
         #if targetEnvironment(macCatalyst)
         return
         #else
         registerCategories()
         UNUserNotificationCenter.current().delegate = self
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-            Task { @MainActor in
-                if let error {
-                    self.store?.pushNotificationMessage = "\(L10n.tr("Push registration failed")): \(error.localizedDescription)"
-                    return
-                }
-                guard granted else {
-                    self.store?.pushNotificationMessage = L10n.tr("Push notifications are disabled.")
-                    return
-                }
-                UIApplication.shared.registerForRemoteNotifications()
-            }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+            guard granted else { return }
+            Task { @MainActor in UIApplication.shared.registerForRemoteNotifications() }
         }
         #endif
     }
 
     func receiveToken(_ token: String) {
-        guard VeqralFeatureFlags.pushNotificationsEnabled else { return }
+        guard VeqralFeatureFlags.pushNotificationsEnabled, !token.isEmpty else { return }
         let environment = Self.apnsEnvironment
         cachedToken = (token, environment)
-        store?.receiveRemoteNotificationToken(token, environment: environment)
-    }
-
-    func receiveRegistrationError(_ error: Error) {
-        guard VeqralFeatureFlags.pushNotificationsEnabled else { return }
-        store?.pushNotificationMessage = "\(L10n.tr("Push registration failed")): \(error.localizedDescription)"
+        sendToken(token, environment: environment)
     }
 
     nonisolated func userNotificationCenter(
@@ -86,52 +62,52 @@ final class VeqralPushNotificationCenter: NSObject, UNUserNotificationCenterDele
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let actionIdentifier = response.actionIdentifier
-        let userInfo = Self.pushPayload(from: response.notification.request.content.userInfo)
+        let category = response.notification.request.content.categoryIdentifier
+        let runID = Self.runID(from: response.notification.request.content.userInfo)
+        let action = response.actionIdentifier
         Task { @MainActor in
-            await self.store?.handlePushNotificationResponse(
-                actionIdentifier: actionIdentifier,
-                userInfo: userInfo
-            )
+            if let runID {
+                await self.store?.handlePushApproval(
+                    actionIdentifier: action,
+                    category: category,
+                    runID: runID
+                )
+            }
         }
         completionHandler()
     }
 
-    private nonisolated static func pushPayload(from userInfo: [AnyHashable: Any]) -> [String: String] {
-        var payload: [String: String] = [:]
-        for key in ["veqral_run_id", "veqral_event", "veqral_severity"] {
-            if let value = userInfo[key] as? String {
-                payload[key] = value
-            }
+    private func sendToken(_ token: String, environment: String) {
+        guard let store else { return }
+        let bundleID = Bundle.main.bundleIdentifier ?? "dev.hiroyuki.veqral"
+        let locale = Locale.current.identifier
+        Task {
+            await store.registerPushToken(token, environment: environment, bundleID: bundleID, locale: locale)
         }
-        if let nested = userInfo["veqral"] as? [String: Any] {
-            for key in ["veqral_run_id", "veqral_event", "veqral_severity"] {
-                if payload[key] == nil, let value = nested[key] as? String {
-                    payload[key] = value
-                }
-            }
+    }
+
+    private nonisolated static func runID(from userInfo: [AnyHashable: Any]) -> String? {
+        if let value = userInfo["veqral_run_id"] as? String, !value.isEmpty {
+            return value
         }
-        return payload
+        if let nested = userInfo["veqral"] as? [String: Any],
+           let value = nested["veqral_run_id"] as? String,
+           !value.isEmpty {
+            return value
+        }
+        return nil
     }
 
     private func registerCategories() {
-        let approve = UNNotificationAction(
-            identifier: VeqralPushAction.approve,
-            title: L10n.tr("Approve"),
-            options: []
-        )
-        let reject = UNNotificationAction(
-            identifier: VeqralPushAction.reject,
-            title: L10n.tr("Reject"),
-            options: [.destructive]
-        )
-        let lowApproval = UNNotificationCategory(
+        let approve = UNNotificationAction(identifier: VeqralPushAction.approve, title: "承認", options: [])
+        let reject = UNNotificationAction(identifier: VeqralPushAction.reject, title: "却下", options: [.destructive])
+        let low = UNNotificationCategory(
             identifier: VeqralPushAction.lowApprovalCategory,
             actions: [approve, reject],
             intentIdentifiers: [],
             options: []
         )
-        let highApproval = UNNotificationCategory(
+        let high = UNNotificationCategory(
             identifier: VeqralPushAction.highApprovalCategory,
             actions: [],
             intentIdentifiers: [],
@@ -143,7 +119,7 @@ final class VeqralPushNotificationCenter: NSObject, UNUserNotificationCenterDele
             intentIdentifiers: [],
             options: []
         )
-        UNUserNotificationCenter.current().setNotificationCategories([lowApproval, highApproval, status])
+        UNUserNotificationCenter.current().setNotificationCategories([low, high, status])
     }
 
     private static var apnsEnvironment: String {
@@ -161,17 +137,6 @@ final class VeqralAppDelegate: NSObject, UIApplicationDelegate {
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()
-        Task { @MainActor in
-            VeqralPushNotificationCenter.shared.receiveToken(token)
-        }
-    }
-
-    func application(
-        _ application: UIApplication,
-        didFailToRegisterForRemoteNotificationsWithError error: Error
-    ) {
-        Task { @MainActor in
-            VeqralPushNotificationCenter.shared.receiveRegistrationError(error)
-        }
+        Task { @MainActor in VeqralPushNotificationCenter.shared.receiveToken(token) }
     }
 }
