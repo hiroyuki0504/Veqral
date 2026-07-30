@@ -1,120 +1,110 @@
-# Veqral
+# Veqral Forge
 
-Veqral is a SwiftUI command center for running and supervising local agent work from iPhone, iPad, and Mac Catalyst.
+Veqral Forgeは、iPhone/iPadからMac上の複数AI runtimeを、個別chatの集合ではなく**Mission / Workstream / Task / Artifact / Handoff**として指揮するSwiftUIアプリです。
 
-The current build is P0: the command center can run local shell commands and Hermes Agent prompts from the Mac Catalyst app, and iPhone/iPad can pair with a Swift Mac Host over Tailscale to create Hermes runs, stream PTY logs over WebSocket, approve/reject guarded work, cancel/resume sessions, and keep device tokens in Keychain.
+## UI
 
-The default UI is the dark Agent Command Center concept.
+トップレベルは3面だけです。
 
-## What Works
+1. **ミッション** — Mission、Workstream、Task、成功進捗、critical task、Artifact/Handoff
+2. **要対応** — approval、input、review、blocker、unsupportedを分離したOne Human Attention Queue
+3. **接続** — `veqral://pair`リンク、Mac Host health、Hermes/Codex/Claude runtime状態
 
-- Enter a Command to create a new Run.
-- Switch the runtime between `Hermes Agent` and `Local Shell`.
-- Hermes prompts run through `hermes chat -Q --source veqral --checkpoints --worktree` on Mac.
-- The Swift Mac Host lives in `MacHost/` and runs as a menu bar app.
-- Mac Host exposes `GET /v1/health`, `GET /v1/pairing`, `POST /v1/pair`, `GET/POST /v1/runs`, `GET /v1/runs/:id/events`, run snapshots/logs/diff/artifacts, and approve/reject/cancel/resume actions.
-- Mac Host exposes HMAC-protected device listing/revocation, audit log, GitHub status, and draft PR creation endpoints.
-- Mac Host exposes unattended remote-operation status/apply/revert endpoints, plus a local menu bar setup window that requires confirmation, admin authorization, and a one-time login password entry before changing macOS autologin, screen-lock, sleep, display-sleep, and autorestart settings.
-- The unattended setup flow checks FileVault, warns when FileVault blocks autologin, skips autologin when allowed, reads settings back after changes, and can revert the settings.
-- The Mac Host menu can install/remove a LaunchAgent for login-time restart and KeepAlive recovery.
-- iPhone/iPad remote requests use per-device HMAC headers and the device token is stored in Keychain.
-- iPhone/iPad can open `veqral://pair?...` QR links, reconnect to persisted remote runs after app restart, and receive local notifications for approvals and run completion.
-- Remote PTY logs stream line-by-line over WebSocket and are redacted before leaving the Mac Host.
-- Host runs, logs, audit entries, and Hermes `session_id` values persist under `~/.veqral-host`.
-- Mac Host exposes HMAC-protected Hermes memory APIs for `~/.hermes/memories/USER.md`, `~/.hermes/memories/MEMORY.md`, and Markdown files under `~/.hermes/skills`.
-- The Memory screen can list remote Hermes memory files, load content, preview a unified diff before saving, and write the selected file back through Mac Host.
-- Read-only commands run locally in the Mac Catalyst app through `/bin/zsh -lc`.
-- Mutating or risky commands such as file changes, package installs, `rm`, `sudo`, production deploys, secrets, and screen-control commands stop in the approval queue.
-- Risky Hermes prompts such as deletion, production, secrets, billing, browser, and screen-control requests also stop in the approval queue before launching Hermes.
-- Approve or reject pending actions from the inspector, phone dashboard, or Approvals screen.
-- Logs, run status, selected run, approvals, working directory, and git diff summaries persist in Application Support as JSON.
-- The app detects the current Git root, branch, remote, and working tree status for the selected working directory.
-- The app detects the local Hermes executable and version from common install paths such as `~/.local/bin/hermes`.
-- The Devices screen exposes Remote Mac Host pairing, live health, paired devices, revocation, and Host audit log.
-- The GitHub screen reads branch/remote/working tree/PR/CI/auth status from the Host and can request a draft PR through `gh`.
-- The Diff and Artifacts screens sync remote git diff summaries and generated files from Host runs.
-- The Models screen maps PM, architect, implementer, reviewer, tester, and researcher roles to provider/model profiles while showing that every role shares one Context Package.
-- Local command execution separates stdout and stderr, validates the working directory, captures git diff summaries, and times out long-running commands after 180 seconds.
-- iPhone and iPad builds can create and track Runs; local shell execution is intentionally Mac-only.
+workerごとのchatや生ログは主画面に置きません。ログ、差分、ArtifactはTask詳細で必要なときだけ表示します。
 
-## Hermes
+## Domain契約
 
-Veqral expects Hermes Agent to be installed on the Mac running the Catalyst app:
+`MacHost/Sources/VeqralShared/VeqralForgeDomain.swift`がForge側の共有Domainです。
 
-```sh
-hermes --version
-hermes doctor
+- ForgeのTask IDは安定しており、複数のruntime Run/attemptを関連付けられます。
+- failed/cancelledはterminalですが、成功進捗には加算しません。
+- failed Taskは未解決blockerとしてcritical候補に残ります。
+- ArtifactとHandoffはIDと関連情報を持つfirst-class objectです。HandoffはHost repositoryへ永続化され、clientはgeneric artifactからreview状態を推測しません。
+- Run成功だけでHandoffを自動生成しません。
+- 明示approvalだけがapprove/reject可能です。
+- input/question、review、blocker、unknown/unsupportedはgeneric approvalへ変換しません。
+
+## Runtime adapter
+
+Mac Hostは交換可能なruntime adapterです。iPhone側が表示するruntime名は次の3つだけです。
+
+- Hermes
+- Codex
+- Claude
+
+provider/modelはoptionalで、iPhone側へmodel IDをhard-codeしません。実際の解決はMac側設定へ委任します。
+
+## 保持しているtransport/security
+
+- ordered endpoint pairing v2とsigned pairing proof
+- Keychainに保存するdevice token（UserDefaultsには保存しない）
+- HMAC-SHA256 request auth v2
+- requestごとのnonceとHost側replay防止
+- Run create/list/snapshot/cancel/resume
+- explicit approval/rejectとinput送信
+- server-side interactionがないRunへのterminal input拒否
+- WebSocket stream（指数backoff再接続、persisted log replayの重複排除、snapshot再同期）
+- logs/diff/artifacts/content
+- APNs登録・low approval action基盤（feature flagは既定OFF）
+- credential-like textのredaction
+
+iPhoneへsudo/管理者/Keychain passwordを送信・保存・入力させません。
+
+完全なsecurity／operations contractは[`docs/SECURITY_AND_OPERATIONS.md`](docs/SECURITY_AND_OPERATIONS.md)を参照してください。
+
+## 構成
+
+```text
+Veqral/                         iOS/iPadOS/Mac Catalyst Forge shellとremote adapter
+MacHost/Sources/VeqralShared/ shared Domain/security/redaction
+MacHost/Sources/VeqralHost/   Mac Host runtime/API
+MacHost/Tests/                 Domain/security tests
+VeqralUITests/                 3面shellとapproval/input境界のUI tests
+Scripts/                       isolation、security smoke、PR verification
 ```
 
-The current local check passed with Hermes Agent v0.15.1. `hermes doctor` reports that OpenAI Codex auth is logged in, while some optional providers and tools are not configured.
+Watch target、AgentSpace、Command Center、旧Dashboard、Portfolio/Sales/Memory/Voice/Telemetry UIはForge shellから削除済みです。Hostの既存APIは互換性と将来adapterのため、このUI整理だけでは削除していません。
 
-### Hermes memory inheritance smoke
+## Build / Test
 
-`VeqralHostSmoke verify-memory-inheritance` proves Veqral's core promise with a disposable Hermes source and isolated `HERMES_HOME`. It must use real Hermes native memory and two real models (`A != B`); do not add a custom memory layer or hard-code the expected fact.
+```bash
+swift test --package-path MacHost
 
-Current passing route: monthly-login ChatGPT subscription through Hermes `openai-codex`. The smoke keeps Hermes memory isolated, then links the existing Hermes login auth from `~/.hermes/auth.json` into the disposable `HERMES_HOME`; it does not require API keys.
+xcodebuild \
+  -project Veqral.xcodeproj \
+  -scheme Veqral \
+  -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath /tmp/Veqral-iOS \
+  CODE_SIGNING_ALLOWED=NO \
+  build-for-testing
 
-```sh
-export VEQRAL_MEMTEST_PROVIDER_A=openai-codex
-export VEQRAL_MEMTEST_MODEL_A=gpt-5.5
-export VEQRAL_MEMTEST_PROVIDER_B=openai-codex
-export VEQRAL_MEMTEST_MODEL_B=gpt-5.4
-swift run --package-path MacHost VeqralHostSmoke verify-memory-inheritance --report HERMES_MEMORY_INHERITANCE_PR0.md
+xcodebuild \
+  -project Veqral.xcodeproj \
+  -scheme Veqral \
+  -destination 'platform=macOS,variant=Mac Catalyst' \
+  -derivedDataPath /tmp/Veqral-Catalyst \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+
+Scripts/run_forge_ui_tests.sh
+Scripts/smoke_forge_client.sh
+Scripts/verify_pr_ready.sh
 ```
-
-If the Hermes login home is not `~/.hermes`, point the smoke at it with `VEQRAL_MEMTEST_AUTH_HOME`. Claude/Anthropic can be selected only when Hermes reports that Claude Code/setup-token auth is usable on the Mac.
-
-Cloud-only policy: this layer uses cloud LLMs only. Local-model (Ollama) fallbacks were removed from the production host; the smoke's dormant custom-endpoint path is scheduled for removal in a follow-up.
-
-API-key providers remain optional fallback only. When used, put keys in env or Keychain, never in code or reports:
-
-```sh
-security add-generic-password -U -s dev.hiroyuki.veqral.host -a openrouter:api-key -w "$OPENROUTER_API_KEY"
-security add-generic-password -U -s dev.hiroyuki.veqral.host -a anthropic:api-key -w "$ANTHROPIC_API_KEY"
-```
-
-Override the account/service names if needed with `VEQRAL_MEMTEST_KEYCHAIN_SERVICE`, `VEQRAL_MEMTEST_OPENROUTER_KEY_ACCOUNT`, `VEQRAL_MEMTEST_ANTHROPIC_KEY_ACCOUNT`, or per-custom-endpoint `VEQRAL_MEMTEST_API_KEY_ACCOUNT_A/B`.
-
-## Operational Gaps
-
-P1 after this Host:
-
-- Store user/project/decision memory metadata in SwiftData or SQLite, with pin, forget, memory-candidate review actions, and Mac-to-Mac memory sync.
-- Generate real Context Packages from memory, requirements, repo summary, relevant files, safety policy, and device capabilities.
-- Expand artifact previews beyond path listing into screenshots, web preview URLs, PDFs, test reports, and build products.
-- Expand GitHub operations beyond status/draft PR into automated branch naming, commit staging policy, CI retry, review response, guarded merge, and guarded deploy.
-- Add camera QR scanning on iPhone/iPad and deeper Hermes internal approval correlation.
-- Add Mac mini as a second Host, multi-model PM/Reviewer organization, skill creation/update flows, MCP setup, gateways, cron, and delegation visualization.
 
 ## Run Mac Host
 
-```sh
-cd MacHost
-swift run VeqralHost
+```bash
+swift run --package-path MacHost VeqralHost
 ```
 
-Open the menu bar item and choose `Show Pairing QR`, or fetch pairing data directly:
+Macのメニューバーからpairing link/QRを表示し、Veqralの**接続**画面で読み込みます。
 
-```sh
-curl http://127.0.0.1:7878/v1/pairing
-```
+## 検証安全性
 
-For a dedicated Mac mini or always-on Host, open the menu bar item and choose `Unattended Remote Setup...`. This flow is intentionally local and explicit because it changes security and power settings.
+自動テストは必ず一時`VEQRAL_HOST_HOME`とfile-backed test secret storeを使います。実ユーザーのlogin/default/search Keychain、LaunchAgents、Hermes設定・認証情報を変更しません。実Keychain統合確認は使い捨てmacOSユーザーまたはVMでのみ行います。
 
-## Open
+## 現在の境界
 
-```sh
-open Veqral.xcodeproj
-```
-
-## Build From Terminal
-
-```sh
-xcodebuild -project Veqral.xcodeproj -scheme Veqral -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' CODE_SIGNING_ALLOWED=NO build
-```
-
-## Build Mac App
-
-```sh
-xcodebuild -project Veqral.xcodeproj -scheme Veqral -destination 'platform=macOS,variant=Mac Catalyst' CODE_SIGNING_ALLOWED=NO build
-```
+- APNsは有料capability/Host設定が揃うまでfeature flag OFFです。
+- Hermes更新の通知・staging・canary・atomic promotion・rollback UIは別実装です。更新は必ずユーザー開始とし、自動昇格しません。
+- 実機pairing/Run/stream/approval/artifactの最終受け入れには、稼働中のMac Hostと物理iPhoneが必要です。

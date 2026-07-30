@@ -27,7 +27,10 @@ struct VeqralHostSmoke {
             Foundation.exit(64)
         }
 
-        let reportPath = value(after: "--report", in: arguments) ?? "HERMES_MEMORY_INHERITANCE_PR0.md"
+        let reportPath = value(after: "--report", in: arguments)
+            ?? FileManager.default.temporaryDirectory
+                .appendingPathComponent("veqral-memory-inheritance-\(UUID().uuidString.lowercased()).md")
+                .path
         do {
             let result = try MemoryInheritanceVerifier().run(reportPath: reportPath)
             print(result.summary)
@@ -122,7 +125,7 @@ struct MemoryInheritanceVerifier {
             transcript.append("")
             transcript.append("FAIL: model swap test impossible because only one configured real model was detected. Set `VEQRAL_MEMTEST_PROVIDER_B` and `VEQRAL_MEMTEST_MODEL_B`, or configure a second Hermes provider/model, then rerun.")
             transcript.append("")
-            transcript.append("Required credential receivers are documented in `PROGRESS.md` and `README.md`. 偽 pass は作っていません。")
+            transcript.append("Required credential receivers are documented in `README.md`. 偽 pass は作っていません。")
             try writeReport(transcript, to: reportPath)
             return VerificationResult(
                 passed: false,
