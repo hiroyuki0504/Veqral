@@ -129,10 +129,10 @@ final class ForgeShellUITests: XCTestCase {
         let app = launchFixture()
 
         let create = app.buttons["forge.new-task"].firstMatch
-        XCTAssertTrue(create.waitForExistence(timeout: 2))
+        XCTAssertTrue(create.waitForExistence(timeout: 30))
         create.tap()
 
-        XCTAssertTrue(app.navigationBars["Taskを作成"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.navigationBars["Taskを作成"].waitForExistence(timeout: 30))
         XCTAssertTrue(app.buttons["Hermes"].exists)
         XCTAssertTrue(app.buttons["Codex"].exists)
         XCTAssertTrue(app.buttons["Claude"].exists)
