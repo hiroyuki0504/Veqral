@@ -542,4 +542,3 @@ struct ForgeNewTaskView: View {
         )
     }
 }
-
