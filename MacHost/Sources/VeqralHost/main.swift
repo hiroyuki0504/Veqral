@@ -772,7 +772,7 @@ enum DiscordNotificationSmoke {
         let run = HostRun(
             id: UUID().uuidString,
             prompt: "\(bearerSample)\n余白を詰めて",
-            workingDirectory: "/Users/hiroyuki/Documents/Veqral",
+            workingDirectory: "/tmp/veqral-test-workspace",
             sessionID: nil,
             status: .waitingApproval,
             startedAt: Date(),
@@ -1603,7 +1603,7 @@ enum AIHubDigestBridgeSmoke {
             let state = HostState(config: config)
             let run = try await state.createRun(
                 prompt: "Verify automatic AI-Hub digest bridge.",
-                workingDirectory: "/Users/hiroyuki/Documents/Veqral",
+                workingDirectory: tempRoot.path,
                 engine: .codex,
                 model: "gpt-5.5"
             )
